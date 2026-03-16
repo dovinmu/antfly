@@ -85,12 +85,12 @@ func TestOrphanedIntents_CleanupPrevented(t *testing.T) {
 	copy(txnDataCopy, txnData)
 	closer.Close()
 
-	var record map[string]any
+	var record TxnRecord
 	err = json.Unmarshal(txnDataCopy, &record)
 	require.NoError(t, err)
 
 	// Set committed_at to 10 minutes ago (past the 5 minute cleanup cutoff)
-	record["committed_at"] = time.Now().Add(-10 * time.Minute).Unix()
+	record.FinalizedAt = time.Now().Add(-10 * time.Minute).Unix()
 
 	updatedData, err := json.Marshal(record)
 	require.NoError(t, err)

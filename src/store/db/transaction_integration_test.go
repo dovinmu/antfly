@@ -578,3 +578,92 @@ func TestTimestampBasedConflictResolution(t *testing.T) {
 	t.Log("  - T3 (ts=200) wrote 'third' ✓")
 	t.Log("  - Timestamps stored in separate key:t metadata (not in document)")
 }
+
+func TestCommitTimestampBecomesVisibleVersion(t *testing.T) {
+	dir := t.TempDir()
+	db := createTestDB(t, dir)
+	defer db.Close()
+
+	ctx := t.Context()
+	key := []byte("txn:visible_version")
+	coordinatorShard := []byte{1, 0, 0, 0, 0, 0, 0, 0}
+
+	err := db.Batch(storeutils.WithTimestamp(ctx, 10000), [][2][]byte{
+		{key, []byte(`{"title":"v1"}`)},
+	}, nil, Op_SyncLevelWrite)
+	require.NoError(t, err)
+
+	txnID := uuid.New()
+	beginTS := uint64(11000)
+	commitTS := uint64(11001)
+
+	err = db.InitTransaction(ctx, InitTransactionOp_builder{
+		TxnId:        txnID[:],
+		Timestamp:    beginTS,
+		Participants: [][]byte{coordinatorShard},
+	}.Build())
+	require.NoError(t, err)
+
+	err = db.WriteIntent(ctx, WriteIntentOp_builder{
+		TxnId:            txnID[:],
+		Timestamp:        beginTS,
+		CoordinatorShard: coordinatorShard,
+		Batch: BatchOp_builder{
+			Writes: []*Write{
+				Write_builder{Key: key, Value: []byte(`{"title":"v2"}`)}.Build(),
+			},
+		}.Build(),
+		Predicates: []*VersionPredicate{
+			VersionPredicate_builder{Key: key, ExpectedVersion: 10000}.Build(),
+		},
+	}.Build())
+	require.NoError(t, err)
+
+	err = db.CommitTransaction(storeutils.WithTimestamp(ctx, commitTS), CommitTransactionOp_builder{
+		TxnId: txnID[:],
+	}.Build())
+	require.NoError(t, err)
+
+	err = db.ResolveIntents(ctx, ResolveIntentsOp_builder{
+		TxnId:  txnID[:],
+		Status: TxnStatusCommitted,
+	}.Build())
+	require.NoError(t, err)
+
+	doc, err := db.Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", doc["title"])
+
+	metaKey := append(storeutils.KeyRangeStart(key), storeutils.TransactionSuffix...)
+	tsBytes, closer, err := db.pdb.Get(metaKey)
+	require.NoError(t, err)
+	defer closer.Close()
+
+	_, visibleTS, err := encoding.DecodeUint64Ascending(tsBytes)
+	require.NoError(t, err)
+	assert.Equal(t, commitTS, visibleTS, "Committed value should expose commit timestamp as visible version")
+
+	txn2ID := uuid.New()
+	err = db.InitTransaction(ctx, InitTransactionOp_builder{
+		TxnId:        txn2ID[:],
+		Timestamp:    12000,
+		Participants: [][]byte{coordinatorShard},
+	}.Build())
+	require.NoError(t, err)
+
+	err = db.WriteIntent(ctx, WriteIntentOp_builder{
+		TxnId:            txn2ID[:],
+		Timestamp:        12000,
+		CoordinatorShard: coordinatorShard,
+		Batch: BatchOp_builder{
+			Writes: []*Write{
+				Write_builder{Key: key, Value: []byte(`{"title":"stale"}`)}.Build(),
+			},
+		}.Build(),
+		Predicates: []*VersionPredicate{
+			VersionPredicate_builder{Key: key, ExpectedVersion: 10000}.Build(),
+		},
+	}.Build())
+	var versionConflict *ErrVersionConflict
+	require.ErrorAs(t, err, &versionConflict)
+}

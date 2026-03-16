@@ -16,6 +16,7 @@ package db
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"time"
 
@@ -159,7 +160,7 @@ func (db *DBImpl) extractAndWriteSpecialFields(
 }
 
 // finalizeTransaction updates a transaction record to the given status (1=Committed, 2=Aborted).
-func (db *DBImpl) finalizeTransaction(txnID []byte, status int32, label string) error {
+func (db *DBImpl) finalizeTransaction(ctx context.Context, txnID []byte, status int32, label string) error {
 	start := time.Now()
 	defer func() {
 		transactionDurationSeconds.WithLabelValues(label).Observe(time.Since(start).Seconds())
@@ -176,17 +177,22 @@ func (db *DBImpl) finalizeTransaction(txnID []byte, status int32, label string) 
 	}
 	defer func() { _ = closer.Close() }()
 
-	var record map[string]any
+	var record TxnRecord
 	if err := json.Unmarshal(data, &record); err != nil {
 		transactionOpsTotal.WithLabelValues(label, "error").Inc()
 		return fmt.Errorf("unmarshaling transaction record: %w", err)
 	}
 
-	// Update status
-	record["status"] = status
-	record["committed_at"] = time.Now().Unix()
+	record.Status = status
+	record.FinalizedAt = time.Now().Unix()
+	if status == TxnStatusCommitted {
+		commitVersion := storeutils.GetTimestampFromContext(ctx)
+		if commitVersion == 0 {
+			commitVersion = record.Version()
+		}
+		record.CommitVersion = commitVersion
+	}
 
-	// Save back
 	updatedData, err := json.Marshal(record)
 	if err != nil {
 		transactionOpsTotal.WithLabelValues(label, "error").Inc()
