@@ -309,7 +309,7 @@ func TestFinalizeTransaction(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, db.pdb.Set(txnKey, data, pebble.Sync))
 
-		err = db.finalizeTransaction(t.Context(), txnID, TxnStatusCommitted, "commit")
+		_, err = db.finalizeTransaction(t.Context(), txnID, TxnStatusCommitted, "commit")
 		require.NoError(t, err)
 
 		updatedData, closer, err := db.pdb.Get(txnKey)
@@ -334,7 +334,7 @@ func TestFinalizeTransaction(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, db.pdb.Set(txnKey, data, pebble.Sync))
 
-		err = db.finalizeTransaction(t.Context(), txnID, TxnStatusAborted, "abort")
+		_, err = db.finalizeTransaction(t.Context(), txnID, TxnStatusAborted, "abort")
 		require.NoError(t, err)
 
 		updatedData, closer, err := db.pdb.Get(txnKey)
@@ -347,9 +347,9 @@ func TestFinalizeTransaction(t *testing.T) {
 	})
 
 	t.Run("missing transaction record", func(t *testing.T) {
-		err := db.finalizeTransaction(t.Context(), []byte("nonexistent"), int32(1), "commit")
+		_, err := db.finalizeTransaction(t.Context(), []byte("nonexistent"), int32(1), "commit")
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "loading transaction record")
+		assert.ErrorIs(t, err, ErrTxnNotFound)
 	})
 }
 

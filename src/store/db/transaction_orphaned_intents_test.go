@@ -74,7 +74,7 @@ func TestOrphanedIntents_CleanupPrevented(t *testing.T) {
 	commitOp := CommitTransactionOp_builder{
 		TxnId: txnID[:],
 	}.Build()
-	err = coordinatorDB.CommitTransaction(ctx, commitOp)
+	_, err = coordinatorDB.CommitTransaction(ctx, commitOp)
 	require.NoError(t, err)
 
 	// Modify the committed_at time to be in the past (simulating old transaction)
@@ -169,7 +169,7 @@ func TestOrphanedIntents_RecoveryLoopRace(t *testing.T) {
 	commitOp := CommitTransactionOp_builder{
 		TxnId: txnID[:],
 	}.Build()
-	err = coordinatorDB.CommitTransaction(ctx, commitOp)
+	_, err = coordinatorDB.CommitTransaction(ctx, commitOp)
 	require.NoError(t, err)
 
 	// Trigger recovery loop - this will try to notify participants
@@ -201,7 +201,7 @@ type failingShardNotifier struct {
 	attempts int
 }
 
-func (f *failingShardNotifier) NotifyResolveIntent(ctx context.Context, shardID []byte, txnID []byte, status int32) error {
+func (f *failingShardNotifier) NotifyResolveIntent(ctx context.Context, shardID []byte, txnID []byte, status int32, commitVersion uint64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempts++

@@ -292,11 +292,12 @@ type DB interface {
 
 	// Transaction operations
 	InitTransaction(ctx context.Context, op *InitTransactionOp) error
-	CommitTransaction(ctx context.Context, op *CommitTransactionOp) error
+	CommitTransaction(ctx context.Context, op *CommitTransactionOp) (uint64, error)
 	AbortTransaction(ctx context.Context, op *AbortTransactionOp) error
 	WriteIntent(ctx context.Context, op *WriteIntentOp) error
 	ResolveIntents(ctx context.Context, op *ResolveIntentsOp) error
 	GetTransactionStatus(ctx context.Context, txnID []byte) (int32, error)
+	GetCommitVersion(ctx context.Context, txnID []byte) (uint64, error)
 	GetTimestamp(key []byte) (uint64, error)
 
 	// Graph operations
@@ -309,7 +310,7 @@ type DB interface {
 // ShardNotifier provides a way for DBImpl to send notifications to other shards
 type ShardNotifier interface {
 	// NotifyResolveIntent sends a resolve intent RPC to a participant shard
-	NotifyResolveIntent(ctx context.Context, shardID []byte, txnID []byte, status int32) error
+	NotifyResolveIntent(ctx context.Context, shardID []byte, txnID []byte, status int32, commitVersion uint64) error
 }
 
 type DBImpl struct {
@@ -1026,7 +1027,7 @@ func (db *DBImpl) notifyPendingResolutions(ctx context.Context) {
 					var newlyResolved []string
 					for _, shardID := range unresolvedParticipants {
 						notifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-						err = db.shardNotifier.NotifyResolveIntent(notifyCtx, shardID, record.TxnID, record.Status)
+						err = db.shardNotifier.NotifyResolveIntent(notifyCtx, shardID, record.TxnID, record.Status, record.Version())
 						cancel()
 
 						participant := base64.StdEncoding.EncodeToString(shardID)
@@ -1070,8 +1071,9 @@ func (db *DBImpl) notifyPendingResolutions(ctx context.Context) {
 			// Also resolve the coordinator's own intents (the coordinator is not in the participants list)
 			if db.proposeResolveIntentsFunc != nil {
 				resolveOp := ResolveIntentsOp_builder{
-					TxnId:  record.TxnID,
-					Status: record.Status,
+					TxnId:         record.TxnID,
+					Status:        record.Status,
+					CommitVersion: record.Version(),
 				}.Build()
 
 				if err := db.proposeResolveIntentsFunc(ctx, resolveOp); err != nil {
@@ -1664,6 +1666,9 @@ func (db *DBImpl) openIndex(dir string, recoverIndex bool) error {
 }
 
 var ErrNotFound = errors.New("key not found")
+
+// ErrTxnNotFound is returned when a transaction record does not exist in storage.
+var ErrTxnNotFound = errors.New("transaction not found")
 
 func (db *DBImpl) Get(ctx context.Context, key []byte) (docMap map[string]any, err error) {
 	// Use default query options: include both summaries and embeddings
@@ -4305,14 +4310,15 @@ func (db *DBImpl) InitTransaction(ctx context.Context, op *InitTransactionOp) er
 	return nil
 }
 
-// CommitTransaction updates transaction status to Committed
-func (db *DBImpl) CommitTransaction(ctx context.Context, op *CommitTransactionOp) error {
+// CommitTransaction updates transaction status to Committed and returns the commit version.
+func (db *DBImpl) CommitTransaction(ctx context.Context, op *CommitTransactionOp) (uint64, error) {
 	return db.finalizeTransaction(ctx, op.GetTxnId(), TxnStatusCommitted, "commit")
 }
 
 // AbortTransaction updates transaction status to Aborted
 func (db *DBImpl) AbortTransaction(ctx context.Context, op *AbortTransactionOp) error {
-	return db.finalizeTransaction(ctx, op.GetTxnId(), TxnStatusAborted, "abort")
+	_, err := db.finalizeTransaction(ctx, op.GetTxnId(), TxnStatusAborted, "abort")
+	return err
 }
 
 // WriteIntent writes provisional write intent
@@ -4439,23 +4445,8 @@ func (db *DBImpl) ResolveIntents(ctx context.Context, op *ResolveIntentsOp) erro
 	encoder := db.encoderPool.Get().(*zstd.Encoder)
 	defer db.encoderPool.Put(encoder)
 
-	var resolvedTimestamp uint64
-	if op.GetStatus() == TxnStatusCommitted {
-		txnKey := makeTxnKey(op.GetTxnId())
-		recordBytes, closer, err := db.pdb.Get(txnKey)
-		if err != nil {
-			transactionOpsTotal.WithLabelValues("resolve_intents", "error").Inc()
-			return fmt.Errorf("loading transaction record for resolution: %w", err)
-		}
-		defer func() { _ = closer.Close() }()
-
-		var record TxnRecord
-		if err := json.Unmarshal(recordBytes, &record); err != nil {
-			transactionOpsTotal.WithLabelValues("resolve_intents", "error").Inc()
-			return fmt.Errorf("unmarshaling transaction record for resolution: %w", err)
-		}
-		resolvedTimestamp = record.Version()
-	}
+	// The commit version is passed in the op by the coordinator (via notification or self-resolve).
+	commitVersion := op.GetCommitVersion()
 
 	count := 0
 	skipped := 0
@@ -4516,14 +4507,14 @@ func (db *DBImpl) ResolveIntents(ctx context.Context, op *ResolveIntentsOp) erro
 				}
 
 				if len(valueBytes) > 0 {
-					if resolvedTimestamp == 0 {
-						db.logger.Warn("Resolved timestamp is zero, this may indicate a problem",
+					if commitVersion == 0 {
+						db.logger.Warn("Commit version is zero, this may indicate a problem",
 							zap.String("key", types.FormatKey(userKey)),
 							zap.Binary("txnID", op.GetTxnId()))
 					}
 
 					// Check if we should write based on timestamp
-					shouldWrite, err := db.shouldWriteValue(actualKey, resolvedTimestamp)
+					shouldWrite, err := db.shouldWriteValue(actualKey, commitVersion)
 					if err != nil {
 						db.logger.Warn("Error checking existing value timestamp, writing anyway",
 							zap.String("key", types.FormatKey(actualKey)),
@@ -4541,7 +4532,7 @@ func (db *DBImpl) ResolveIntents(ctx context.Context, op *ResolveIntentsOp) erro
 						// This is needed because transaction intents bypass the normal Batch() path
 						// Use userKey (not actualKey) for edge extraction since edges use the document key without storage suffix
 						valueToCompress := valueBytes
-						sfResult, err := db.extractAndWriteSpecialFields(batch, valueBytes, userKey, resolvedTimestamp)
+						sfResult, err := db.extractAndWriteSpecialFields(batch, valueBytes, userKey, commitVersion)
 						if err != nil {
 							db.logger.Warn("Failed to extract special fields during intent resolution, writing raw value",
 								zap.String("key", types.FormatKey(actualKey)),
@@ -4562,7 +4553,7 @@ func (db *DBImpl) ResolveIntents(ctx context.Context, op *ResolveIntentsOp) erro
 
 						// Write timestamp metadata to separate key (key:t)
 						tsMetaKey := slices.Concat(actualKey, storeutils.TransactionSuffix)
-						timestampBytes := encoding.EncodeUint64Ascending(nil, resolvedTimestamp)
+						timestampBytes := encoding.EncodeUint64Ascending(nil, commitVersion)
 						if err := batch.Set(tsMetaKey, timestampBytes, nil); err != nil {
 							transactionOpsTotal.WithLabelValues("resolve_intents", "error").Inc()
 							return fmt.Errorf("writing timestamp metadata: %w", err)
@@ -4571,7 +4562,7 @@ func (db *DBImpl) ResolveIntents(ctx context.Context, op *ResolveIntentsOp) erro
 						skipped++
 						db.logger.Debug("Skipped write due to lower timestamp",
 							zap.String("key", types.FormatKey(actualKey)),
-							zap.Uint64("resolvedTimestamp", resolvedTimestamp))
+							zap.Uint64("commitVersion", commitVersion))
 					}
 				}
 			}
@@ -4852,26 +4843,45 @@ func (db *DBImpl) shouldWriteValueLegacy(key []byte, newTimestamp uint64) (bool,
 	return newTimestamp > uint64(existingTimestamp), nil
 }
 
-// GetTransactionStatus queries transaction status from coordinator
-func (db *DBImpl) GetTransactionStatus(ctx context.Context, txnID []byte) (int32, error) {
-	txnKey := makeTxnKey(txnID)
-
-	data, closer, err := db.pdb.Get(txnKey)
+// loadTxnRecord reads and unmarshals the TxnRecord for txnID from Pebble.
+// Returns ErrTxnNotFound when the record does not exist.
+func (db *DBImpl) loadTxnRecord(txnID []byte) (TxnRecord, error) {
+	data, closer, err := db.pdb.Get(makeTxnKey(txnID))
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
-			// Transaction not found - might be old and cleaned up
-			return TxnStatusAborted, nil
+			return TxnRecord{}, ErrTxnNotFound
 		}
-		return 0, fmt.Errorf("loading transaction record: %w", err)
+		return TxnRecord{}, fmt.Errorf("loading transaction record: %w", err)
 	}
 	defer func() { _ = closer.Close() }()
 
 	var record TxnRecord
 	if err := json.Unmarshal(data, &record); err != nil {
-		return 0, fmt.Errorf("unmarshaling transaction record: %w", err)
+		return TxnRecord{}, fmt.Errorf("unmarshaling transaction record: %w", err)
 	}
+	return record, nil
+}
 
+// GetTransactionStatus queries transaction status from coordinator
+func (db *DBImpl) GetTransactionStatus(ctx context.Context, txnID []byte) (int32, error) {
+	record, err := db.loadTxnRecord(txnID)
+	if err != nil {
+		if errors.Is(err, ErrTxnNotFound) {
+			// Transaction not found - might be old and cleaned up
+			return TxnStatusAborted, nil
+		}
+		return 0, err
+	}
 	return record.Status, nil
+}
+
+// GetCommitVersion returns the commit version for a committed transaction.
+func (db *DBImpl) GetCommitVersion(ctx context.Context, txnID []byte) (uint64, error) {
+	record, err := db.loadTxnRecord(txnID)
+	if err != nil {
+		return 0, err
+	}
+	return record.Version(), nil
 }
 
 // ========================================
