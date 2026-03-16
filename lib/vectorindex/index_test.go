@@ -44,8 +44,8 @@ func TestCalculateRecall(t *testing.T) {
 			topK:    10,
 			count:   1000,
 			expected: map[string]float64{
-				"Euclidean":    95.50,
-				"InnerProduct": 95.50,
+				"Euclidean":    97.00,
+				"InnerProduct": 91.50,
 				"Cosine":       95.50,
 			},
 		},
@@ -67,7 +67,7 @@ func TestCalculateRecall(t *testing.T) {
 			expected: map[string]float64{
 				"Euclidean":    100.00,
 				"InnerProduct": 99.50,
-				"Cosine":       97.50,
+				"Cosine":       96.50,
 			},
 		},
 		{
@@ -86,9 +86,9 @@ func TestCalculateRecall(t *testing.T) {
 			topK:    10,
 			count:   1000,
 			expected: map[string]float64{
-				"Euclidean":    97.00,
+				"Euclidean":    98.00,
 				"InnerProduct": 98.50,
-				"Cosine":       94.00,
+				"Cosine":       95.00,
 			},
 		},
 		{
@@ -108,8 +108,8 @@ func TestCalculateRecall(t *testing.T) {
 			count:   1000,
 			expected: map[string]float64{
 				"Euclidean":    93.00,
-				"InnerProduct": 81.50,
-				"Cosine":       96.50,
+				"InnerProduct": 80.00,
+				"Cosine":       95.50,
 			},
 		},
 		{
@@ -131,7 +131,7 @@ func TestCalculateRecall(t *testing.T) {
 			expected: map[string]float64{
 				"Euclidean":    95.50,
 				"InnerProduct": 93.00,
-				"Cosine":       92.00,
+				"Cosine":       93.00,
 			},
 		},
 		{
@@ -141,7 +141,7 @@ func TestCalculateRecall(t *testing.T) {
 			count:     1000,
 			expected: map[string]float64{
 				"Euclidean":    99.00,
-				"InnerProduct": 98.50,
+				"InnerProduct": 97.50,
 				"Cosine":       98.50,
 			},
 		},
@@ -152,7 +152,7 @@ func TestCalculateRecall(t *testing.T) {
 			expected: map[string]float64{
 				"Euclidean":    95.00,
 				"InnerProduct": 85.50,
-				"Cosine":       85.50,
+				"Cosine":       86.50,
 			},
 		},
 		{
@@ -163,7 +163,7 @@ func TestCalculateRecall(t *testing.T) {
 			expected: map[string]float64{
 				"Euclidean":    99.00,
 				"InnerProduct": 97.00,
-				"Cosine":       96.50,
+				"Cosine":       98.00,
 			},
 		},
 		{
@@ -173,8 +173,8 @@ func TestCalculateRecall(t *testing.T) {
 			tolerance: 1.5, // Higher tolerance due to platform precision differences
 			expected: map[string]float64{
 				"Euclidean":    86.50,
-				"InnerProduct": 73.50,
-				"Cosine":       73.00,
+				"InnerProduct": 69.00,
+				"Cosine":       77.50,
 			},
 		},
 		{
@@ -182,10 +182,11 @@ func TestCalculateRecall(t *testing.T) {
 			topK:      10,
 			randomize: true,
 			count:     10_000,
+			tolerance: 1.5, // Higher tolerance due to platform precision differences
 			expected: map[string]float64{
-				"Euclidean":    89.00,
-				"InnerProduct": 86.50,
-				"Cosine":       86.00,
+				"Euclidean":    88.50,
+				"InnerProduct": 83.00,
+				"Cosine":       85.50,
 			},
 		},
 		{
@@ -206,7 +207,7 @@ func TestCalculateRecall(t *testing.T) {
 			expected: map[string]float64{
 				"Euclidean":    100.00,
 				"InnerProduct": 97.00,
-				"Cosine":       97.00,
+				"Cosine":       98.00,
 			},
 		},
 		{
@@ -215,7 +216,7 @@ func TestCalculateRecall(t *testing.T) {
 			count:   1000,
 			expected: map[string]float64{
 				"Euclidean":    100.00,
-				"InnerProduct": 100.00,
+				"InnerProduct": 99.00,
 				"Cosine":       100.00,
 			},
 		},

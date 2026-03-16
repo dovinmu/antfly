@@ -387,6 +387,64 @@ func TestHBCIndex_LeafCentroidsTrackInsertedMembers(t *testing.T) {
 	assert.InDeltaSlice(t, []float64{5.1, 5.05}, toFloat64s(found["[5 6]"]), 1e-4)
 }
 
+func TestHBCIndex_DeleteRepairsUnderfullLeaf(t *testing.T) {
+	vectors := []vector.T{
+		{0.0, 0.0},
+		{0.1, 0.0},
+		{0.2, 0.0},
+		{10.0, 10.0},
+		{10.1, 10.0},
+		{10.2, 10.0},
+	}
+	ids := []uint64{1, 2, 3, 4, 5, 6}
+	metadata := make([][]byte, len(ids))
+	for i, id := range ids {
+		metadata[i] = fmt.Appendf(nil, "doc:%d", id)
+	}
+	batch := &Batch{
+		IDs:          ids,
+		Vectors:      vectors,
+		MetadataList: metadata,
+	}
+
+	db := setupPebbleWithVectors(t, "test_hbc", batch)
+	config := HBCConfig{
+		Dimension:       2,
+		Name:            "test_hbc",
+		BranchingFactor: 2,
+		LeafSize:        5,
+		SearchWidth:     8,
+		CacheSizeNodes:  100,
+		CacheTTL:        5 * time.Minute,
+		VectorDB:        db,
+		IndexDB:         db,
+	}
+	index, err := NewHBCIndex(config, rand.NewPCG(42, 1024))
+	require.NoError(t, err)
+	defer index.Close()
+
+	require.NoError(t, index.Batch(t.Context(), batch))
+	require.NoError(t, index.Delete(1, 2))
+
+	results, err := index.Search(&SearchRequest{
+		Embedding: []float32{0.2, 0.0},
+		K:         4,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 4)
+	assert.EqualValues(t, 3, results[0].ID)
+
+	dump, err := index.DebugDump()
+	require.NoError(t, err)
+	assert.EqualValues(t, 4, dump.ActiveCount)
+	assert.EqualValues(t, dump.RootNode, dump.Nodes[len(dump.Nodes)-1].ID)
+	for _, node := range dump.Nodes {
+		if node.IsLeaf {
+			assert.NotEmpty(t, node.Members)
+		}
+	}
+}
+
 func toFloat64s(v []float32) []float64 {
 	out := make([]float64, len(v))
 	for i := range v {

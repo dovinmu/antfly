@@ -1074,7 +1074,7 @@ func (idx *HBCIndex) Batch(ctx context.Context, b *Batch) (err error) {
 			return err
 		}
 
-		if err := idx.removeFromLeaf(batch, idx.writerCache, leafID, id); err != nil {
+		if err := idx.removeFromLeaf(batch, idx.writerCache, meta, leafID, id); err != nil {
 			if errors.Is(err, ErrNotFound) {
 				continue
 			}
@@ -1185,7 +1185,7 @@ func (idx *HBCIndex) insertIntoTree(
 		if nodeUnsafe.IsLeaf {
 			if existingLeafID != 0 {
 				if existingLeafID != nodeUnsafe.ID {
-					if err := idx.removeFromLeaf(batch, cacheBatch, existingLeafID, vectorID); err != nil {
+					if err := idx.removeFromLeaf(batch, cacheBatch, meta, existingLeafID, vectorID); err != nil {
 						return fmt.Errorf(
 							"removing existing vector %d from leaf %d: %w",
 							vectorID,
@@ -2155,10 +2155,143 @@ func (idx *HBCIndex) Delete(ids ...uint64) error {
 	return idx.Batch(context.Background(), b)
 }
 
+func (idx *HBCIndex) minLeafOccupancy() int {
+	if idx.config.LeafSize <= 2 {
+		return 1
+	}
+	return idx.config.LeafSize / 2
+}
+
+func (idx *HBCIndex) recomputeLeafCentroid(batch pebble.Reader, leaf *HBCNode) error {
+	if len(leaf.Members) == 0 {
+		clear(leaf.Centroid)
+		return nil
+	}
+	if len(leaf.Centroid) != int(idx.config.Dimension) {
+		leaf.Centroid = make(vector.T, idx.config.Dimension)
+	} else {
+		clear(leaf.Centroid)
+	}
+	tempVec := idx.writerAllocator.AllocVector(int(idx.config.Dimension))
+	defer idx.writerAllocator.FreeVector(tempVec)
+	for _, memberID := range leaf.Members {
+		var err error
+		tempVec, err = idx.GetVector(batch, memberID, tempVec)
+		if err != nil {
+			return fmt.Errorf("loading vector %d: %w", memberID, err)
+		}
+		idx.TransformVector(tempVec, tempVec)
+		vec.AddFloat32(leaf.Centroid, tempVec)
+	}
+	vec.ScaleFloat32(1/float32(len(leaf.Members)), leaf.Centroid)
+	return nil
+}
+
+func (idx *HBCIndex) recomputeInternalCentroid(batch pebble.Reader, cacheBatch nodeCache, node *HBCNode) error {
+	if len(node.Children) == 0 {
+		clear(node.Centroid)
+		return nil
+	}
+	if len(node.Centroid) != int(idx.config.Dimension) {
+		node.Centroid = make(vector.T, idx.config.Dimension)
+	} else {
+		clear(node.Centroid)
+	}
+	for _, childID := range node.Children {
+		child, err := idx.loadNode(batch, cacheBatch, childID)
+		if err != nil {
+			return fmt.Errorf("loading child %d: %w", childID, err)
+		}
+		vec.AddFloat32(node.Centroid, child.Centroid)
+	}
+	vec.ScaleFloat32(1/float32(len(node.Children)), node.Centroid)
+	return nil
+}
+
+func (idx *HBCIndex) collapseSingleChildParents(
+	batch *pebble.Batch,
+	cacheBatch nodeCache,
+	meta *hbcIndexMetadata,
+	startNodeID uint64,
+) error {
+	nodeID := startNodeID
+	for nodeID != 0 {
+		nodeUnsafe, err := idx.loadNode(batch, cacheBatch, nodeID)
+		if err != nil {
+			return err
+		}
+		if nodeUnsafe.IsLeaf || len(nodeUnsafe.Children) != 1 {
+			return nil
+		}
+
+		childID := nodeUnsafe.Children[0]
+		childUnsafe, err := idx.loadNode(batch, cacheBatch, childID)
+		if err != nil {
+			return err
+		}
+		child := idx.nodePool.Get().(*HBCNode)
+		child.CopyFrom(childUnsafe)
+		if childUnsafe.QuantizedVectors != nil {
+			child.QuantizedVectors = childUnsafe.QuantizedVectors.Clone()
+		}
+		parentID := nodeUnsafe.Parent
+		child.Parent = parentID
+		if err := idx.saveNode(batch, cacheBatch, child); err != nil {
+			child.reset()
+			idx.nodePool.Put(child)
+			return err
+		}
+		child.reset()
+		idx.nodePool.Put(child)
+
+		if parentID == 0 {
+			meta.RootNode = childID
+			if err := idx.deleteNode(batch, cacheBatch, nodeID); err != nil {
+				return err
+			}
+			return nil
+		}
+
+		parentUnsafe, err := idx.loadNode(batch, cacheBatch, parentID)
+		if err != nil {
+			return err
+		}
+		parent := idx.nodePool.Get().(*HBCNode)
+		parent.CopyFrom(parentUnsafe)
+		if parentUnsafe.QuantizedVectors != nil {
+			parent.QuantizedVectors = parentUnsafe.QuantizedVectors.Clone()
+		}
+		for i := range parent.Children {
+			if parent.Children[i] == nodeID {
+				parent.Children[i] = childID
+				break
+			}
+		}
+		if err := idx.recomputeInternalCentroid(batch, cacheBatch, parent); err != nil {
+			parent.reset()
+			idx.nodePool.Put(parent)
+			return err
+		}
+		if err := idx.saveNode(batch, cacheBatch, parent); err != nil {
+			parent.reset()
+			idx.nodePool.Put(parent)
+			return err
+		}
+		parent.reset()
+		idx.nodePool.Put(parent)
+		if err := idx.deleteNode(batch, cacheBatch, nodeID); err != nil {
+			return err
+		}
+		nodeID = parentID
+	}
+	return nil
+}
+
 // removeFromLeaf removes a vector from the tree structure
 func (idx *HBCIndex) removeFromLeaf(
 	batch *pebble.Batch,
 	cacheBatch nodeCache,
+	meta *hbcIndexMetadata,
 	leafID uint64,
 	vectorID uint64,
 ) error {
@@ -2185,17 +2318,155 @@ func (idx *HBCIndex) removeFromLeaf(
 		leaf.QuantizedVectors = leafUnsafe.QuantizedVectors.Clone()
 	}
 
+	// Load the removed vector for incremental centroid update. If the vector
+	// is already gone from VectorDB (externally deleted), we skip the
+	// incremental update and just clear the centroid — the next split will
+	// recompute it exactly.
+	removedVec := idx.writerAllocator.AllocVector(int(idx.config.Dimension))
+	defer idx.writerAllocator.FreeVector(removedVec)
+	hasRemovedVec := false
+	if _, err := idx.GetVector(batch, vectorID, removedVec); err == nil {
+		idx.TransformVector(removedVec, removedVec)
+		hasRemovedVec = true
+	}
+
+	oldCount := len(leaf.Members)
 	leaf.Members = utils.ReplaceWithLast(leaf.Members, i)
 	if leaf.QuantizedVectors != nil {
 		leaf.QuantizedVectors.ReplaceWithLast(i)
 	}
 
-	// Just save the updated leaf
+	if len(leaf.Members) > 0 && hasRemovedVec && len(leaf.Centroid) == len(removedVec) {
+		nfOld := float32(oldCount)
+		nfNew := float32(len(leaf.Members))
+		for i := range leaf.Centroid {
+			leaf.Centroid[i] = (leaf.Centroid[i]*nfOld - removedVec[i]) / nfNew
+		}
+	} else if len(leaf.Members) == 0 {
+		clear(leaf.Centroid)
+	}
+
+	if len(leaf.Members) == 0 && leaf.Parent != 0 {
+		parentUnsafe, err := idx.loadNode(batch, cacheBatch, leaf.Parent)
+		if err != nil {
+			return err
+		}
+		parent := idx.nodePool.Get().(*HBCNode)
+		parent.CopyFrom(parentUnsafe)
+		if parentUnsafe.QuantizedVectors != nil {
+			parent.QuantizedVectors = parentUnsafe.QuantizedVectors.Clone()
+		}
+		filtered := parent.Children[:0]
+		for _, childID := range parent.Children {
+			if childID != leafID {
+				filtered = append(filtered, childID)
+			}
+		}
+		parent.Children = filtered
+		if err := idx.recomputeInternalCentroid(batch, cacheBatch, parent); err != nil {
+			parent.reset()
+			idx.nodePool.Put(parent)
+			return err
+		}
+		if err := idx.saveNode(batch, cacheBatch, parent); err != nil {
+			parent.reset()
+			idx.nodePool.Put(parent)
+			return err
+		}
+		parent.reset()
+		idx.nodePool.Put(parent)
+		if err := idx.deleteNode(batch, cacheBatch, leafID); err != nil {
+			return err
+		}
+		return idx.collapseSingleChildParents(batch, cacheBatch, meta, leaf.Parent)
+	}
+
 	if err := idx.saveNodeNoUpdateQuantizedVectors(batch, cacheBatch, leaf); err != nil {
 		return err
 	}
 
-	return nil
+	if leaf.Parent == 0 || len(leaf.Members) >= idx.minLeafOccupancy() {
+		return nil
+	}
+
+	parentUnsafe, err := idx.loadNode(batch, cacheBatch, leaf.Parent)
+	if err != nil {
+		return err
+	}
+	var bestSibling *HBCNode
+	bestDist := float32(math.MaxFloat32)
+	for _, childID := range parentUnsafe.Children {
+		if childID == leafID {
+			continue
+		}
+		siblingUnsafe, err := idx.loadNode(batch, cacheBatch, childID)
+		if err != nil || !siblingUnsafe.IsLeaf {
+			continue
+		}
+		if len(siblingUnsafe.Members)+len(leaf.Members) > idx.config.LeafSize {
+			continue
+		}
+		dist := vector.MeasureDistance(idx.config.DistanceMetric, leaf.Centroid, siblingUnsafe.Centroid)
+		if dist < bestDist {
+			if bestSibling != nil {
+				bestSibling.reset()
+				idx.nodePool.Put(bestSibling)
+			}
+			bestDist = dist
+			bestSibling = idx.nodePool.Get().(*HBCNode)
+			bestSibling.CopyFrom(siblingUnsafe)
+			if siblingUnsafe.QuantizedVectors != nil {
+				bestSibling.QuantizedVectors = siblingUnsafe.QuantizedVectors.Clone()
+			}
+		}
+	}
+	if bestSibling == nil {
+		return nil
+	}
+
+	bestSibling.Members = append(bestSibling.Members, leaf.Members...)
+	if err := idx.recomputeLeafCentroid(batch, bestSibling); err != nil {
+		bestSibling.reset()
+		idx.nodePool.Put(bestSibling)
+		return err
+	}
+	if err := idx.saveNode(batch, cacheBatch, bestSibling); err != nil {
+		bestSibling.reset()
+		idx.nodePool.Put(bestSibling)
+		return err
+	}
+	bestSibling.reset()
+	idx.nodePool.Put(bestSibling)
+
+	parent := idx.nodePool.Get().(*HBCNode)
+	parent.CopyFrom(parentUnsafe)
+	if parentUnsafe.QuantizedVectors != nil {
+		parent.QuantizedVectors = parentUnsafe.QuantizedVectors.Clone()
+	}
+	filtered := parent.Children[:0]
+	for _, childID := range parent.Children {
+		if childID != leafID {
+			filtered = append(filtered, childID)
+		}
+	}
+	parent.Children = filtered
+	if err := idx.recomputeInternalCentroid(batch, cacheBatch, parent); err != nil {
+		parent.reset()
+		idx.nodePool.Put(parent)
+		return err
+	}
+	if err := idx.saveNode(batch, cacheBatch, parent); err != nil {
+		parent.reset()
+		idx.nodePool.Put(parent)
+		return err
+	}
+	parent.reset()
+	idx.nodePool.Put(parent)
+
+	if err := idx.deleteNode(batch, cacheBatch, leafID); err != nil {
+		return err
+	}
+	return idx.collapseSingleChildParents(batch, cacheBatch, meta, leaf.Parent)
 }
 
 // findLeafForVectorID finds the leaf node containing a vector
