@@ -31,7 +31,7 @@ require (
 	github.com/antflydb/antfly v0.0.16
 	github.com/antflydb/antfly/pkg/client v0.0.0
 	github.com/antflydb/antfly/pkg/docsaf v0.0.0-00010101000000-000000000000
-	github.com/antflydb/antfly/pkg/libaf v0.0.0
+	github.com/antflydb/antfly/pkg/libaf v0.0.1
 	github.com/antflydb/termite v0.0.7
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/johannesboyne/gofakes3 v0.0.0-20260208201424-4c385a1f6a73

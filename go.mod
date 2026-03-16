@@ -42,7 +42,7 @@ require (
 	github.com/antflydb/antfly/pkg/client v0.0.0-00010101000000-000000000000
 	github.com/antflydb/antfly/pkg/evalaf v0.0.0
 	github.com/antflydb/antfly/pkg/genkit/openrouter v0.0.0-20260313151000-3c73f35767a3
-	github.com/antflydb/antfly/pkg/libaf v0.0.0-20260313151000-3c73f35767a3
+	github.com/antflydb/antfly/pkg/libaf v0.0.1
 	github.com/antflydb/termite v0.0.0-00010101000000-000000000000
 	github.com/antflydb/termite/pkg/client v0.0.0-00010101000000-000000000000
 	github.com/aws/aws-sdk-go-v2/config v1.32.12
