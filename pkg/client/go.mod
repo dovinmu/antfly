@@ -5,7 +5,7 @@ go 1.26
 replace github.com/antflydb/antfly/pkg/libaf => ../libaf
 
 require (
-	github.com/antflydb/antfly/pkg/libaf v0.0.0-00010101000000-000000000000
+	github.com/antflydb/antfly/pkg/libaf v0.0.1
 	github.com/getkin/kin-openapi v0.133.0
 	github.com/kaptinlin/jsonschema v0.7.5
 	github.com/oapi-codegen/runtime v1.2.0
