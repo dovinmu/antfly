@@ -169,6 +169,7 @@ func (tm *TableManager) needsUpdates(
 			ShardConfig:         oldShardStatus.ShardConfig,
 			ShardStats:          shardStats,
 			Peers:               oldShardStatus.Peers,
+			ReportedBy:          oldShardStatus.ReportedBy,
 			RaftStatus:          oldShardStatus.RaftStatus,
 			HasSnapshot:         oldShardStatus.HasSnapshot,
 			Initializing:        oldShardStatus.Initializing,
@@ -185,6 +186,10 @@ func (tm *TableManager) needsUpdates(
 		newShardStatus.Peers = newShardInfo.Peers
 		needsPersist = true
 
+	}
+	if !oldShardStatus.ReportedBy.Equal(newShardInfo.ReportedBy) {
+		newShardStatus.ReportedBy = newShardInfo.ReportedBy
+		needsPersist = true
 	}
 	// Note: We intentionally do NOT update ShardConfig from storage node reports.
 	// The metadata is the source of truth for ShardConfig (ByteRange, Schema, Indexes).

@@ -277,6 +277,7 @@ const (
 
 	// MergeStrategy values
 	MergeStrategyRrf      = oapi.MergeStrategyRrf
+	MergeStrategyRsf      = oapi.MergeStrategyRsf
 	MergeStrategyFailover = oapi.MergeStrategyFailover
 
 	// LinearMergePageStatus values

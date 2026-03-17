@@ -20,6 +20,7 @@ import (
 	"time"
 
 	antfly "github.com/antflydb/antfly/pkg/client"
+	"github.com/antflydb/antfly/pkg/client/query"
 	"github.com/antflydb/termite/pkg/termite/lib/modelregistry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -245,6 +246,70 @@ func TestE2E_Quickstart(t *testing.T) {
 	require.NotEmpty(t, rerankedHits, "Expected reranked search results")
 	t.Logf("Hybrid search with reranker returned %d hits", len(rerankedHits))
 	for i, hit := range rerankedHits {
+		t.Logf("  [%d] id=%s score=%.4f", i, hit.ID, hit.Score)
+	}
+
+	// --- True hybrid search: FTS + semantic with RSF ---
+	// RSF (Relative Score Fusion) normalizes scores from each source into [0,1]
+	// within a sliding window, then combines them with configurable weights.
+	// This exercises the full RSF pipeline: min-max normalization, weighting, and fusion.
+	t.Log("Running hybrid FTS + semantic search (RSF fusion)...")
+	ftsQuery := query.NewQueryString("body:relativity Einstein physics")
+	rsfConfig := antfly.MergeConfig{
+		Strategy:   antfly.MergeStrategyRsf,
+		WindowSize: 10, // normalization window (defaults to limit)
+		Weights: map[string]float64{
+			"full_text":  0.4, // BM25 weight
+			"title_body": 0.6, // semantic embedding weight
+		},
+	}
+	results, err = swarm.Client.Query(ctx, antfly.QueryRequest{
+		Table:          tableName,
+		FullTextSearch: &ftsQuery,
+		SemanticSearch: "theory of relativity and physics",
+		Indexes:        []string{"title_body"},
+		Fields:         []string{"title", "url"},
+		Limit:          5,
+		MergeConfig:    rsfConfig,
+	})
+	require.NoError(t, err, "Hybrid FTS+semantic search failed")
+	require.NotEmpty(t, results.Responses)
+	hybridHits := results.Responses[0].Hits.Hits
+	require.NotEmpty(t, hybridHits, "Expected hybrid search results")
+	t.Logf("Hybrid FTS+semantic (RSF w=0.4/0.6) returned %d hits", len(hybridHits))
+	for i, hit := range hybridHits {
+		t.Logf("  [%d] id=%s score=%.4f", i, hit.ID, hit.Score)
+	}
+
+	// Both physics documents should appear — they match both BM25 and semantic signals.
+	hybridIDs := make([]string, len(hybridHits))
+	for i, hit := range hybridHits {
+		hybridIDs[i] = hit.ID
+	}
+	assert.Contains(t, hybridIDs, "Theory of Relativity",
+		"Expected Theory of Relativity in hybrid results")
+	assert.Contains(t, hybridIDs, "Quantum Physics",
+		"Expected Quantum Physics in hybrid results")
+
+	// --- Hybrid FTS + semantic with RSF + reranker ---
+	t.Log("Running hybrid FTS + semantic search with RSF + reranker...")
+	results, err = swarm.Client.Query(ctx, antfly.QueryRequest{
+		Table:          tableName,
+		FullTextSearch: &ftsQuery,
+		SemanticSearch: "theory of relativity and physics",
+		Indexes:        []string{"title_body"},
+		Fields:         []string{"title", "url"},
+		Limit:          5,
+		MergeConfig:    rsfConfig,
+		Reranker:       rerankerConfig,
+		Pruner:         antfly.Pruner{MinScoreRatio: 0.01},
+	})
+	require.NoError(t, err, "Hybrid FTS+semantic+reranker search failed")
+	require.NotEmpty(t, results.Responses)
+	hybridRerankedHits := results.Responses[0].Hits.Hits
+	require.NotEmpty(t, hybridRerankedHits, "Expected hybrid reranked search results")
+	t.Logf("Hybrid FTS+semantic+reranker returned %d hits", len(hybridRerankedHits))
+	for i, hit := range hybridRerankedHits {
 		t.Logf("  [%d] id=%s score=%.4f", i, hit.ID, hit.Score)
 	}
 

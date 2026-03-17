@@ -51,6 +51,7 @@ func TestE2E_Autoscaling_ShardSplit(t *testing.T) {
 	// Step 2: Create 4 tables with 5 shards each
 	t.Log("Step 2: Creating tables...")
 	tableNames := []string{"autoscale_t1", "autoscale_t2", "autoscale_t3", "autoscale_t4"}
+	sampleRecordIDs := make(map[string][]string, len(tableNames))
 	for _, tableName := range tableNames {
 		err := cluster.Client.CreateTable(ctx, tableName, antfly.CreateTableRequest{
 			NumShards: 5,
@@ -82,6 +83,9 @@ func TestE2E_Autoscaling_ShardSplit(t *testing.T) {
 		for i := range recordsPerTable {
 			recordID := fmt.Sprintf("record-%s-%03d", tableName, i)
 			records[recordID] = GenerateTestData(recordSize)
+			if i < 5 {
+				sampleRecordIDs[tableName] = append(sampleRecordIDs[tableName], recordID)
+			}
 		}
 
 		// Use LinearMerge for efficient bulk insert
@@ -128,7 +132,8 @@ func TestE2E_Autoscaling_ShardSplit(t *testing.T) {
 
 	// Wait for shard reallocation to new node - needs longer time for Raft conf changes to propagate
 	t.Log("Waiting for shard reallocation and Raft state to converge...")
-	time.Sleep(30 * time.Second) // Give reconciler time to rebalance and Raft state to converge
+	err := cluster.WaitForNodeAssigned(ctx, newNode.ID, 2*time.Minute)
+	require.NoError(t, err, "New node did not receive shard assignments")
 
 	// Verify the cluster is still healthy
 	for _, tableName := range tableNames {
@@ -150,7 +155,7 @@ func TestE2E_Autoscaling_ShardSplit(t *testing.T) {
 		}
 	}
 
-	err := cluster.RemoveStoreNode(ctx, nodeToRemove)
+	err = cluster.RemoveStoreNode(ctx, nodeToRemove)
 	require.NoError(t, err, "Failed to remove store node")
 	t.Logf("Removed store node %d", nodeToRemove)
 
@@ -160,7 +165,8 @@ func TestE2E_Autoscaling_ShardSplit(t *testing.T) {
 	// 2. Re-elect leaders for any shards that lost their leader
 	// 3. Complete any pending Raft configuration changes
 	t.Log("Waiting for shard rebalancing...")
-	time.Sleep(45 * time.Second) // Give reconciler time to reassign shards and elect new leaders
+	err = cluster.WaitForNodeRemovedAndStable(ctx, nodeToRemove, sampleRecordIDs, 2*time.Minute)
+	require.NoError(t, err, "Removed node still appears in shard assignments or reads are not stable")
 
 	// Step 9: Verify all data is still accessible after node removal
 	t.Log("Step 9: Verifying data after node removal...")
