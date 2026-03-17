@@ -662,7 +662,7 @@ func (t *TableApi) runGenerationStep(
 				t.logger.Error("Generation step failed", zap.Error(err))
 				if streamCallback != nil {
 					_ = streamCallback(ctx, SSEEventError, map[string]string{
-						"error": fmt.Sprintf("Generation failed: %v", err),
+						"error": ai.ClassifyGenerationError(resolveProviderName(req), err).UserMessage,
 					})
 				}
 			}
@@ -684,6 +684,9 @@ func (t *TableApi) runGenerationStep(
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				t.logger.Error("Generation step failed", zap.Error(err))
+				classified := ai.ClassifyGenerationError(resolveProviderName(req), err)
+				result.Status = RetrievalAgentStatusFailed
+				result.Generation = classified.UserMessage
 			}
 			return
 		}
@@ -865,7 +868,8 @@ func (t *TableApi) streamRetrievalPipeline(
 
 	result, err := t.ExecutePipeline(ctx, req, generator, streamCb)
 	if err != nil {
-		_ = streamEvent(w, rc, SSEEventError, map[string]string{"error": err.Error()})
+		classified := ai.ClassifyGenerationError(resolveProviderName(req), err)
+		_ = streamEvent(w, rc, SSEEventError, map[string]string{"error": classified.UserMessage})
 		return
 	}
 
@@ -1108,7 +1112,8 @@ func (t *TableApi) RunAgenticRetrieval(
 			t.logger.Error("Classification step failed", zap.Error(err))
 		}
 		if streamCallback != nil {
-			_ = streamCallback(ctx, SSEEventError, map[string]string{"error": err.Error()})
+			classified := ai.ClassifyGenerationError(resolveProviderName(req), err)
+			_ = streamCallback(ctx, SSEEventError, map[string]string{"error": classified.UserMessage})
 		}
 		// Continue without classification
 	}
@@ -1952,6 +1957,18 @@ func (e *retrievalToolExecutor) fallbackToSemanticSearch(
 }
 
 // convertQueryHitsToDocuments converts QueryHit slice to schema.Document slice
+// resolveProviderName returns the provider name from the request for use in
+// user-facing error messages.
+func resolveProviderName(req *RetrievalAgentRequest) string {
+	if req.Generator.Provider != "" {
+		return string(req.Generator.Provider)
+	}
+	if len(req.Chain) > 0 && req.Chain[0].Generator.Provider != "" {
+		return string(req.Chain[0].Generator.Provider)
+	}
+	return "unknown"
+}
+
 func convertQueryHitsToDocuments(hits []QueryHit) []schema.Document {
 	docs := make([]schema.Document, 0, len(hits))
 	for _, hit := range hits {
