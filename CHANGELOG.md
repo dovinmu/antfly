@@ -21,6 +21,16 @@ All notable changes to Antfly will be documented in this file.
 
 ## Releases
 
+### [0.1.0] - 2026-03-17
+
+#### Highlights
+
+- **First official public release of Antfly**
+
+[Full changelog](https://github.com/antflydb/antfly/compare/v0.0.19...v0.1.0)
+
+---
+
 ### [0.0.19] - 2026-03-17
 
 #### Highlights
