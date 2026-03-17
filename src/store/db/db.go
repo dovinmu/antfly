@@ -4286,6 +4286,14 @@ func (db *DBImpl) InitTransaction(ctx context.Context, op *InitTransactionOp) er
 		transactionDurationSeconds.WithLabelValues("init").Observe(time.Since(start).Seconds())
 	}()
 
+	db.pdbMu.RLock()
+	pdb := db.pdb
+	db.pdbMu.RUnlock()
+
+	if pdb == nil {
+		return pebble.ErrClosed
+	}
+
 	activeTransactionsGauge.Inc()
 
 	txnKey := makeTxnKey(op.GetTxnId())
@@ -4305,7 +4313,7 @@ func (db *DBImpl) InitTransaction(ctx context.Context, op *InitTransactionOp) er
 		return fmt.Errorf("marshaling transaction record: %w", err)
 	}
 
-	if err := db.pdb.Set(txnKey, data, pebble.Sync); err != nil {
+	if err := pdb.Set(txnKey, data, pebble.Sync); err != nil {
 		transactionOpsTotal.WithLabelValues("init", "error").Inc()
 		return fmt.Errorf("writing transaction record: %w", err)
 	}
@@ -4338,7 +4346,15 @@ func (db *DBImpl) WriteIntent(ctx context.Context, op *WriteIntentOp) error {
 		transactionDurationSeconds.WithLabelValues("write_intent").Observe(time.Since(start).Seconds())
 	}()
 
-	batch := db.pdb.NewBatch()
+	db.pdbMu.RLock()
+	pdb := db.pdb
+	db.pdbMu.RUnlock()
+
+	if pdb == nil {
+		return pebble.ErrClosed
+	}
+
+	batch := pdb.NewBatch()
 	defer func() { _ = batch.Close() }()
 
 	txnID := op.GetTxnId()
@@ -4436,10 +4452,19 @@ func (db *DBImpl) ResolveIntents(ctx context.Context, op *ResolveIntentsOp) erro
 		intentResolutionDurationSeconds.Observe(time.Since(start).Seconds())
 	}()
 
+	// Take read lock to prevent access after Close() sets pdb to nil
+	db.pdbMu.RLock()
+	pdb := db.pdb
+	db.pdbMu.RUnlock()
+
+	if pdb == nil {
+		return pebble.ErrClosed
+	}
+
 	// Scan for all intents matching this txnID
 	prefix := slices.Concat(txnIntentsPrefix, op.GetTxnId())
 
-	iter, err := db.pdb.NewIter(&pebble.IterOptions{
+	iter, err := pdb.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: utils.PrefixSuccessor(prefix),
 	})
@@ -4449,7 +4474,7 @@ func (db *DBImpl) ResolveIntents(ctx context.Context, op *ResolveIntentsOp) erro
 	}
 	defer func() { _ = iter.Close() }()
 
-	batch := db.pdb.NewBatch()
+	batch := pdb.NewBatch()
 	defer func() { _ = batch.Close() }()
 
 	encoder := db.encoderPool.Get().(*zstd.Encoder)
@@ -4621,10 +4646,18 @@ func (db *DBImpl) ResolveIntents(ctx context.Context, op *ResolveIntentsOp) erro
 // GetTimestamp returns the HLC timestamp for a key from the :t suffix metadata key.
 // Returns 0 if the key has no timestamp (never written via transactions).
 func (db *DBImpl) GetTimestamp(key []byte) (uint64, error) {
+	db.pdbMu.RLock()
+	pdb := db.pdb
+	db.pdbMu.RUnlock()
+
+	if pdb == nil {
+		return 0, pebble.ErrClosed
+	}
+
 	normalizedKey := storeutils.KeyRangeStart(key)
 	txnKey := append(normalizedKey, storeutils.TransactionSuffix...)
 
-	existingBytes, closer, err := db.pdb.Get(txnKey)
+	existingBytes, closer, err := pdb.Get(txnKey)
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
 			return 0, nil
@@ -4708,7 +4741,15 @@ func (db *DBImpl) checkVersionPredicates(predicates []*VersionPredicate, exclude
 // buildConflictingIntentsMap scans all pending intents once and returns a map
 // of userKey → conflicting txnID for intents not belonging to excludeTxnID.
 func (db *DBImpl) buildConflictingIntentsMap(excludeTxnID []byte) (map[string][]byte, error) {
-	iter, err := db.pdb.NewIter(&pebble.IterOptions{
+	db.pdbMu.RLock()
+	pdb := db.pdb
+	db.pdbMu.RUnlock()
+
+	if pdb == nil {
+		return nil, pebble.ErrClosed
+	}
+
+	iter, err := pdb.NewIter(&pebble.IterOptions{
 		LowerBound: txnIntentsPrefix,
 		UpperBound: utils.PrefixSuccessor(txnIntentsPrefix),
 	})
@@ -4748,7 +4789,15 @@ func (db *DBImpl) hasConflictingIntentForKey(userKey []byte, excludeTxnID []byte
 	// This is O(n) in the number of pending intents, but necessary for correctness.
 	// Could be optimized with a reverse index (userKey -> txnIDs) in the future.
 
-	iter, err := db.pdb.NewIter(&pebble.IterOptions{
+	db.pdbMu.RLock()
+	pdb := db.pdb
+	db.pdbMu.RUnlock()
+
+	if pdb == nil {
+		return nil, pebble.ErrClosed
+	}
+
+	iter, err := pdb.NewIter(&pebble.IterOptions{
 		LowerBound: txnIntentsPrefix,
 		UpperBound: utils.PrefixSuccessor(txnIntentsPrefix),
 	})
@@ -4856,7 +4905,15 @@ func (db *DBImpl) shouldWriteValueLegacy(key []byte, newTimestamp uint64) (bool,
 // loadTxnRecord reads and unmarshals the TxnRecord for txnID from Pebble.
 // Returns ErrTxnNotFound when the record does not exist.
 func (db *DBImpl) loadTxnRecord(txnID []byte) (TxnRecord, error) {
-	data, closer, err := db.pdb.Get(makeTxnKey(txnID))
+	db.pdbMu.RLock()
+	pdb := db.pdb
+	db.pdbMu.RUnlock()
+
+	if pdb == nil {
+		return TxnRecord{}, pebble.ErrClosed
+	}
+
+	data, closer, err := pdb.Get(makeTxnKey(txnID))
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
 			return TxnRecord{}, ErrTxnNotFound
