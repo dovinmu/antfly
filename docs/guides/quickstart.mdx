@@ -164,24 +164,18 @@ Search by visual content using CLIP, a multimodal embedding model that understan
 ### Pull the CLIP model
 
 ```bash
-antfly termite pull openai/clip-vit-base-patch32
+antfly termite pull --variants i8 openai/clip-vit-base-patch32
 ```
 
 ### Add a CLIP index to the table
 
 ```bash
 antfly index create --table wikipedia \
-  --index '{
-    "name": "thumbnail",
-    "type": "embeddings",
-    "template": "{{media url=thumbnail_url}}",
-    "embedder": {
-      "provider": "termite",
-      "model": "openai/clip-vit-base-patch32"
-    },
-    "dimension": 512,
-    "distance_metric": "cosine"
-  }'
+  --index thumbnail \
+  --type embeddings \
+  --template "{{media url=thumbnail_url}}" \
+  --embedder '{"provider": "termite", "model": "openai/clip-vit-base-patch32"}' \
+  --dimension 512
 ```
 
 ### Search by image content
