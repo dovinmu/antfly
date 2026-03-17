@@ -57,6 +57,17 @@ type MetadataNode struct {
 	ReadyC   chan struct{}
 }
 
+type clusterStatusResponse struct {
+	Health  string `json:"health"`
+	Message string `json:"message"`
+	Stores  struct {
+		Statuses map[string]json.RawMessage `json:"statuses"`
+	} `json:"stores"`
+	Shards struct {
+		Statuses map[string]*store.ShardStatus `json:"statuses"`
+	} `json:"shards"`
+}
+
 // TestCluster represents a multi-node test cluster for distributed e2e testing.
 // It manages metadata and store nodes with dynamic scaling capabilities.
 type TestCluster struct {
@@ -333,7 +344,7 @@ func (c *TestCluster) RemoveStoreNode(ctx context.Context, nodeID types.ID) erro
 		return fmt.Errorf("deregister returned status %d", resp.StatusCode)
 	}
 
-	// Stop the store node
+	// Stop the store node after deregistration so the cluster exercises real node removal.
 	node.Cancel()
 
 	c.Logger.Info("Store node removed and deregistered", zap.Stringer("nodeID", nodeID))
@@ -551,6 +562,228 @@ func (c *TestCluster) WaitForShardCount(ctx context.Context, tableName string, m
 					zap.Int("minExpected", minShards))
 				return lastCount, nil
 			}
+		}
+	}
+}
+
+func (c *TestCluster) getClusterStatus(ctx context.Context) (*clusterStatusResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.MetadataNode.APIURL+"/api/v1/status", nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating cluster status request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: HTTP client calling configured endpoint
+	if err != nil {
+		return nil, fmt.Errorf("getting cluster status: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("cluster status returned %d", resp.StatusCode)
+	}
+
+	var status clusterStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("decoding cluster status: %w", err)
+	}
+
+	return &status, nil
+}
+
+func (c *TestCluster) getStoreStatus(ctx context.Context, node *StoreNode) (*store.StoreStatus, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, node.APIURL+"/status", nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating store status request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: HTTP client calling configured endpoint
+	if err != nil {
+		return nil, fmt.Errorf("getting store status for node %d: %w", node.ID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("store status for node %d returned %d", node.ID, resp.StatusCode)
+	}
+
+	var status store.StoreStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("decoding store status for node %d: %w", node.ID, err)
+	}
+
+	return &status, nil
+}
+
+func (c *TestCluster) sampleReadsHealthy(ctx context.Context, samples map[string][]string) error {
+	for tableName, keys := range samples {
+		for _, key := range keys {
+			record, err := c.Client.LookupKey(ctx, tableName, key)
+			if err != nil {
+				return fmt.Errorf("lookup %s/%s: %w", tableName, key, err)
+			}
+			if record == nil {
+				return fmt.Errorf("lookup %s/%s returned nil record", tableName, key)
+			}
+		}
+	}
+	return nil
+}
+
+func (c *TestCluster) WaitForNodeAssigned(ctx context.Context, nodeID types.ID, timeout time.Duration) error {
+	c.T.Helper()
+
+	c.T.Logf("Waiting for store node %d to receive shard assignments...", nodeID)
+
+	c.mu.RLock()
+	node, exists := c.StoreNodes[nodeID]
+	c.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("store node %d not found", nodeID)
+	}
+
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	pollCount := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			pollCount++
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timeout waiting for node %d assignment after %d polls", nodeID, pollCount)
+			}
+
+			status, err := c.getClusterStatus(ctx)
+			if err != nil {
+				c.T.Logf("  [Poll %d] Error getting cluster status: %v", pollCount, err)
+				continue
+			}
+
+			storeStatus, err := c.getStoreStatus(ctx, node)
+			if err != nil {
+				c.T.Logf("  [Poll %d] Error getting store status for node %d: %v", pollCount, nodeID, err)
+				continue
+			}
+
+			assignedShards := len(storeStatus.Shards)
+			if assignedShards == 0 || status.Health != "healthy" {
+				c.T.Logf("  [Poll %d] Node %d local shards=%d, cluster health=%s (%s)",
+					pollCount, nodeID, assignedShards, status.Health, status.Message)
+				continue
+			}
+
+			c.T.Logf("Store node %d received %d local shards after %d polls", nodeID, assignedShards, pollCount)
+			return nil
+		}
+	}
+}
+
+func (c *TestCluster) WaitForNodeRemovedAndStable(
+	ctx context.Context,
+	nodeID types.ID,
+	samples map[string][]string,
+	timeout time.Duration,
+) error {
+	c.T.Helper()
+
+	c.T.Logf("Waiting for store node %d to be removed from shard assignments...", nodeID)
+
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	pollCount := 0
+	consecutiveHealthyReads := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			pollCount++
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timeout waiting for node %d removal after %d polls", nodeID, pollCount)
+			}
+
+			if pollCount%5 == 1 {
+				if err := c.TriggerReallocate(ctx); err != nil {
+					c.T.Logf("  [Poll %d] TriggerReallocate failed: %v", pollCount, err)
+				}
+			}
+
+			status, err := c.getClusterStatus(ctx)
+			if err != nil {
+				c.T.Logf("  [Poll %d] Error getting cluster status: %v", pollCount, err)
+				continue
+			}
+
+			c.mu.RLock()
+			activeNodes := make([]*StoreNode, 0, len(c.StoreNodes))
+			for _, node := range c.StoreNodes {
+				activeNodes = append(activeNodes, node)
+			}
+			c.mu.RUnlock()
+
+			shardsWithRemovedNode := make(map[types.ID]struct{})
+			shardsWithoutLeader := make(map[types.ID]struct{})
+			storeStatusErrors := 0
+			for _, node := range activeNodes {
+				storeStatus, err := c.getStoreStatus(ctx, node)
+				if err != nil {
+					c.T.Logf("  [Poll %d] Error getting store status for node %d: %v", pollCount, node.ID, err)
+					storeStatusErrors++
+					continue
+				}
+				for shardID, shard := range storeStatus.Shards {
+					if shard == nil {
+						continue
+					}
+					if shard.RaftStatus == nil || shard.RaftStatus.Lead == 0 {
+						shardsWithoutLeader[shardID] = struct{}{}
+					}
+					if shard.Peers.Contains(nodeID) ||
+						(shard.RaftStatus != nil && shard.RaftStatus.Voters.Contains(nodeID)) {
+						shardsWithRemovedNode[shardID] = struct{}{}
+					}
+				}
+			}
+
+			if err := c.sampleReadsHealthy(ctx, samples); err != nil {
+				consecutiveHealthyReads = 0
+				c.T.Logf(
+					"  [Poll %d] Node %d still present in %d shards, shards without leader=%d, store status errors=%d, cluster health=%s (%s), sample reads not ready: %v",
+					pollCount,
+					nodeID,
+					len(shardsWithRemovedNode),
+					len(shardsWithoutLeader),
+					storeStatusErrors,
+					status.Health,
+					status.Message,
+					err,
+				)
+				continue
+			}
+
+			consecutiveHealthyReads++
+			c.T.Logf(
+				"  [Poll %d] Node %d still present in %d shards, shards without leader=%d, store status errors=%d, cluster health=%s (%s), healthy read streak=%d",
+				pollCount,
+				nodeID,
+				len(shardsWithRemovedNode),
+				len(shardsWithoutLeader),
+				storeStatusErrors,
+				status.Health,
+				status.Message,
+				consecutiveHealthyReads,
+			)
+			if storeStatusErrors > 0 || consecutiveHealthyReads < 3 {
+				continue
+			}
+
+			c.T.Logf("Store node %d reached stable read availability after %d polls", nodeID, pollCount)
+			return nil
 		}
 	}
 }

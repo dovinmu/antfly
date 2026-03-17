@@ -1160,7 +1160,7 @@ func (s *StoreDB) applyOpSplit(_ context.Context, split *SplitOp) error {
 	// The byteRange has already been updated above, so new writes to the split-off
 	// range will be rejected. The data remains in Pebble until FinalizeSplit deletes it.
 	if err := s.coreDB.Split(oldByteRange, medianKey, dbDir1, dbDir2, true); err != nil {
-		s.logger.Fatal("failed to split db", zap.Error(err))
+		return fmt.Errorf("failed to split db: %w", err)
 	}
 	splitTime := time.Since(t)
 	s.logger.Info("SPLIT_ARCHIVE: Split completed, data staged for archive",
@@ -1175,11 +1175,7 @@ func (s *StoreDB) applyOpSplit(_ context.Context, split *SplitOp) error {
 	newSnapDir := common.SnapDir(s.dataDir, types.ID(newShardID), nodeID)
 	tmpArchiveFile := filepath.Join(newSnapDir, "antfly-split-"+uuid.NewString()+".tar.zst")
 	if err := os.MkdirAll(newSnapDir+"/", os.ModePerm); err != nil { //nolint:gosec // G301: standard permissions for data directory
-		s.logger.Fatal(
-			"Failed to create new snapshot directory",
-			zap.String("snapDir", newSnapDir),
-			zap.Error(err),
-		)
+		return fmt.Errorf("creating snapshot directory %s: %w", newSnapDir, err)
 	}
 	defer func() {
 		_ = os.Remove(tmpArchiveFile)
@@ -1258,10 +1254,7 @@ func (s *StoreDB) applyOpSplit(_ context.Context, split *SplitOp) error {
 	// the other shard fetches a snapshot from another node before we move it
 	if statInfo, err := os.Stat(archiveFile); err != nil || archiveInfo.Size() != statInfo.Size() {
 		if err := os.Rename(tmpArchiveFile, archiveFile); err != nil {
-			s.logger.Fatal("Renaming split archive failed",
-				zap.String("from", tmpArchiveFile),
-				zap.String("to", archiveFile),
-				zap.Error(err))
+			return fmt.Errorf("renaming split archive from %s to %s: %w", tmpArchiveFile, archiveFile, err)
 		}
 	}
 	archiveTime := time.Since(t)
