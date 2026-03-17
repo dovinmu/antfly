@@ -21,6 +21,31 @@ All notable changes to Antfly will be documented in this file.
 
 ## Releases
 
+### [0.0.18] - 2026-03-16
+
+#### Highlights
+
+- **Initial Public Release** — Antfly is now open source
+- **Transaction Safety** — multiple fixes for nil pointer panics during shutdown and transaction recovery
+- **Schema Migration** — table migration state exposed via API for schema version cutover
+- **SQL Join Fix** — LEFT JOIN no longer returns INNER JOIN results due to plan cache key collision
+
+#### Features
+
+- Initial public release of Antfly
+- Add table migration state to API for schema version cutover
+- Replace `map[string]any` transaction records with typed `TxnRecord` struct
+- Thread `commit_version` through `ResolveIntentsOp` proto and clean up transaction DB code
+- Fix HBC delete to repair underfull leaves and update recall expectations
+- Fix race in Group causing ResultGroup to drop results from queued tasks
+- Fix nil pointer panic in transaction recovery during shutdown
+- Guard transaction Pebble accesses with `pdbMu` to prevent nil dereference on shutdown
+- Fix LEFT JOIN returning INNER JOIN results due to plan cache key collision
+
+[Full changelog](https://github.com/antflydb/antfly/compare/v0.0.17...v0.0.18)
+
+---
+
 ### [0.0.17] - 2026-03-15
 
 #### Features
