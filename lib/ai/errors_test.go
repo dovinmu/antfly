@@ -18,128 +18,116 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	openrouter "github.com/revrost/go-openrouter"
 )
 
-func TestClassifyGenerationError_OpenRouterAuth(t *testing.T) {
-	err := &openrouter.APIError{HTTPStatusCode: 401, Message: "Invalid API key"}
-	result := ClassifyGenerationError("openrouter", err)
-	if result.Kind != GenerationErrorAuth {
-		t.Errorf("expected Auth, got %v", result.Kind)
+func TestAsGenerationError(t *testing.T) {
+	tests := []struct {
+		name        string
+		provider    string
+		err         error
+		wantKind    GenerationErrorKind
+		wantMessage string // exact match; use wantContains for substring
+		wantContains string
+	}{
+		{
+			name:        "openrouter 401",
+			provider:    "openrouter",
+			err:         &openrouter.APIError{HTTPStatusCode: 401, Message: "Invalid API key"},
+			wantKind:    GenerationErrorAuth,
+			wantMessage: "Authentication failed for provider 'openrouter'. Check your API key.",
+		},
+		{
+			name:     "openrouter 403",
+			provider: "openrouter",
+			err:      &openrouter.APIError{HTTPStatusCode: 403, Message: "Forbidden"},
+			wantKind: GenerationErrorAuth,
+		},
+		{
+			name:        "openrouter 402",
+			provider:    "openrouter",
+			err:         &openrouter.APIError{HTTPStatusCode: 402, Message: "Payment required"},
+			wantKind:    GenerationErrorQuotaExceeded,
+			wantMessage: "Quota exceeded for provider 'openrouter'. Check your billing or usage limits.",
+		},
+		{
+			name:        "openrouter 404",
+			provider:    "openrouter",
+			err:         &openrouter.APIError{HTTPStatusCode: 404, Message: "model not found"},
+			wantKind:    GenerationErrorModelNotFound,
+			wantMessage: "Model not found on provider 'openrouter'. Check your model name.",
+		},
+		{
+			name:     "openrouter 429",
+			provider: "openrouter",
+			err:      &openrouter.APIError{HTTPStatusCode: 429, Message: "Rate limit exceeded"},
+			wantKind: GenerationErrorRateLimit,
+		},
+		{
+			name:     "openrouter 500",
+			provider: "openrouter",
+			err:      &openrouter.APIError{HTTPStatusCode: 500, Message: "Internal server error"},
+			wantKind: GenerationErrorServer,
+		},
+		{
+			name:     "openrouter RequestError",
+			provider: "openrouter",
+			err:      &openrouter.RequestError{HTTPStatusCode: 401, HTTPStatus: "401 Unauthorized"},
+			wantKind: GenerationErrorAuth,
+		},
+		{
+			name:     "deep wrapping preserves type",
+			provider: "openrouter",
+			err: fmt.Errorf("executing prompt: %w",
+				fmt.Errorf("OpenRouter API error: %w",
+					&openrouter.APIError{HTTPStatusCode: 402, Message: "Payment required"})),
+			wantKind: GenerationErrorQuotaExceeded,
+		},
+		{
+			name:        "context deadline",
+			provider:    "openrouter",
+			err:         fmt.Errorf("calling LLM: %w", context.DeadlineExceeded),
+			wantKind:    GenerationErrorTimeout,
+			wantMessage: "Request to provider 'openrouter' timed out.",
+		},
+		{
+			name:         "plain error falls through to unknown",
+			provider:     "openai",
+			err:          errors.New("something broke"),
+			wantKind:     GenerationErrorUnknown,
+			wantContains: "something broke",
+		},
+		{
+			name:        "nil error",
+			provider:    "openai",
+			err:         nil,
+			wantKind:    GenerationErrorUnknown,
+			wantMessage: "",
+		},
+		{
+			name:        "empty provider defaults to unknown",
+			provider:    "",
+			err:         &openrouter.APIError{HTTPStatusCode: 401, Message: "bad key"},
+			wantKind:    GenerationErrorAuth,
+			wantMessage: "Authentication failed for provider 'unknown'. Check your API key.",
+		},
 	}
-	if got := result.UserMessage; got != "Authentication failed for provider 'openrouter'. Check your API key." {
-		t.Errorf("unexpected message: %s", got)
-	}
-}
 
-func TestClassifyGenerationError_OpenRouterForbidden(t *testing.T) {
-	err := &openrouter.APIError{HTTPStatusCode: 403, Message: "Forbidden"}
-	result := ClassifyGenerationError("openrouter", err)
-	if result.Kind != GenerationErrorAuth {
-		t.Errorf("expected Auth, got %v", result.Kind)
-	}
-}
-
-func TestClassifyGenerationError_OpenRouterQuota(t *testing.T) {
-	err := &openrouter.APIError{HTTPStatusCode: 402, Message: "Payment required"}
-	result := ClassifyGenerationError("openrouter", err)
-	if result.Kind != GenerationErrorQuotaExceeded {
-		t.Errorf("expected QuotaExceeded, got %v", result.Kind)
-	}
-	if got := result.UserMessage; got != "Quota exceeded for provider 'openrouter'. Check your billing or usage limits." {
-		t.Errorf("unexpected message: %s", got)
-	}
-}
-
-func TestClassifyGenerationError_OpenRouterModelNotFound(t *testing.T) {
-	err := &openrouter.APIError{HTTPStatusCode: 404, Message: "model not found"}
-	result := ClassifyGenerationError("openrouter", err)
-	if result.Kind != GenerationErrorModelNotFound {
-		t.Errorf("expected ModelNotFound, got %v", result.Kind)
-	}
-	expected := "Model not found on provider 'openrouter'. Check your model name."
-	if result.UserMessage != expected {
-		t.Errorf("expected %q, got %q", expected, result.UserMessage)
-	}
-}
-
-func TestClassifyGenerationError_OpenRouterRateLimit(t *testing.T) {
-	err := &openrouter.APIError{HTTPStatusCode: 429, Message: "Rate limit exceeded"}
-	result := ClassifyGenerationError("openrouter", err)
-	if result.Kind != GenerationErrorRateLimit {
-		t.Errorf("expected RateLimit, got %v", result.Kind)
-	}
-}
-
-func TestClassifyGenerationError_OpenRouterServerError(t *testing.T) {
-	err := &openrouter.APIError{HTTPStatusCode: 500, Message: "Internal server error"}
-	result := ClassifyGenerationError("openrouter", err)
-	if result.Kind != GenerationErrorServer {
-		t.Errorf("expected ServerError, got %v", result.Kind)
-	}
-}
-
-func TestClassifyGenerationError_OpenRouterRequestError(t *testing.T) {
-	err := &openrouter.RequestError{HTTPStatusCode: 401, HTTPStatus: "401 Unauthorized"}
-	result := ClassifyGenerationError("openrouter", err)
-	if result.Kind != GenerationErrorAuth {
-		t.Errorf("expected Auth, got %v", result.Kind)
-	}
-}
-
-func TestClassifyGenerationError_DeepWrapping(t *testing.T) {
-	apiErr := &openrouter.APIError{HTTPStatusCode: 402, Message: "Payment required"}
-	wrapped := fmt.Errorf("executing prompt: %w", fmt.Errorf("OpenRouter API error: %w", apiErr))
-	result := ClassifyGenerationError("openrouter", wrapped)
-	if result.Kind != GenerationErrorQuotaExceeded {
-		t.Errorf("expected QuotaExceeded through wrapping, got %v", result.Kind)
-	}
-}
-
-func TestClassifyGenerationError_Timeout(t *testing.T) {
-	err := fmt.Errorf("calling LLM: %w", context.DeadlineExceeded)
-	result := ClassifyGenerationError("openrouter", err)
-	if result.Kind != GenerationErrorTimeout {
-		t.Errorf("expected Timeout, got %v", result.Kind)
-	}
-	expected := "Request to provider 'openrouter' timed out."
-	if result.UserMessage != expected {
-		t.Errorf("expected %q, got %q", expected, result.UserMessage)
-	}
-}
-
-func TestClassifyGenerationError_PlainError(t *testing.T) {
-	err := errors.New("something broke")
-	result := ClassifyGenerationError("openai", err)
-	if result.Kind != GenerationErrorUnknown {
-		t.Errorf("expected Unknown, got %v", result.Kind)
-	}
-	expected := "Generation failed (provider 'openai'): something broke"
-	if result.UserMessage != expected {
-		t.Errorf("expected %q, got %q", expected, result.UserMessage)
-	}
-}
-
-func TestClassifyGenerationError_Nil(t *testing.T) {
-	result := ClassifyGenerationError("openai", nil)
-	if result.Kind != GenerationErrorUnknown {
-		t.Errorf("expected Unknown for nil, got %v", result.Kind)
-	}
-	if result.UserMessage != "" {
-		t.Errorf("expected empty message for nil, got %q", result.UserMessage)
-	}
-}
-
-func TestClassifyGenerationError_EmptyProvider(t *testing.T) {
-	err := &openrouter.APIError{HTTPStatusCode: 401, Message: "bad key"}
-	result := ClassifyGenerationError("", err)
-	if result.Kind != GenerationErrorAuth {
-		t.Errorf("expected Auth, got %v", result.Kind)
-	}
-	expected := "Authentication failed for provider 'unknown'. Check your API key."
-	if result.UserMessage != expected {
-		t.Errorf("expected %q, got %q", expected, result.UserMessage)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := AsGenerationError(tt.provider, tt.err)
+			if result.Kind != tt.wantKind {
+				t.Errorf("Kind = %v, want %v", result.Kind, tt.wantKind)
+			}
+			if tt.wantMessage != "" && result.UserMessage != tt.wantMessage {
+				t.Errorf("UserMessage = %q, want %q", result.UserMessage, tt.wantMessage)
+			}
+			if tt.wantContains != "" && !strings.Contains(result.UserMessage, tt.wantContains) {
+				t.Errorf("UserMessage = %q, want substring %q", result.UserMessage, tt.wantContains)
+			}
+		})
 	}
 }

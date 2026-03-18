@@ -662,7 +662,7 @@ func (t *TableApi) runGenerationStep(
 				t.logger.Error("Generation step failed", zap.Error(err))
 				if streamCallback != nil {
 					_ = streamCallback(ctx, SSEEventError, map[string]string{
-						"error": ai.ClassifyGenerationError(resolveProviderName(req), err).UserMessage,
+						"error": ai.AsGenerationError(resolveProviderName(req), err).UserMessage,
 					})
 				}
 			}
@@ -684,7 +684,7 @@ func (t *TableApi) runGenerationStep(
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				t.logger.Error("Generation step failed", zap.Error(err))
-				classified := ai.ClassifyGenerationError(resolveProviderName(req), err)
+				classified := ai.AsGenerationError(resolveProviderName(req), err)
 				result.Status = RetrievalAgentStatusFailed
 				result.Generation = classified.UserMessage
 			}
@@ -819,7 +819,7 @@ func (t *TableApi) RetrievalAgent(w http.ResponseWriter, r *http.Request) {
 			var err error
 			generator, err = ai.NewGenKitGenerator(r.Context(), chain[0].Generator)
 			if err != nil {
-				classified := ai.ClassifyGenerationError(resolveProviderName(&req), err)
+				classified := ai.AsGenerationError(resolveProviderName(&req), err)
 				errorResponse(w, classified.UserMessage, classified.HTTPStatusCode())
 				return
 			}
@@ -869,7 +869,7 @@ func (t *TableApi) streamRetrievalPipeline(
 
 	result, err := t.ExecutePipeline(ctx, req, generator, streamCb)
 	if err != nil {
-		classified := ai.ClassifyGenerationError(resolveProviderName(req), err)
+		classified := ai.AsGenerationError(resolveProviderName(req), err)
 		_ = streamEvent(w, rc, SSEEventError, map[string]string{"error": classified.UserMessage})
 		return
 	}
@@ -888,7 +888,7 @@ func (t *TableApi) jsonRetrievalPipeline(
 ) {
 	result, err := t.ExecutePipeline(r.Context(), req, generator, nil)
 	if err != nil {
-		classified := ai.ClassifyGenerationError(resolveProviderName(req), err)
+		classified := ai.AsGenerationError(resolveProviderName(req), err)
 		errorResponse(w, classified.UserMessage, classified.HTTPStatusCode())
 		return
 	}
@@ -1114,7 +1114,7 @@ func (t *TableApi) RunAgenticRetrieval(
 			t.logger.Error("Classification step failed", zap.Error(err))
 		}
 		if streamCallback != nil {
-			classified := ai.ClassifyGenerationError(resolveProviderName(req), err)
+			classified := ai.AsGenerationError(resolveProviderName(req), err)
 			_ = streamCallback(ctx, SSEEventError, map[string]string{"error": classified.UserMessage})
 		}
 		// Continue without classification
