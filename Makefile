@@ -31,6 +31,9 @@ help:
 	@echo "  build-docs         Join and lint OpenAPI specifications"
 	@echo "  generate           Generate code, client SDKs, and all website documentation (API, config, changelog)"
 	@echo "  lint               Run golangci-lint with auto-fix"
+	@echo "  tidy               Run go mod tidy across root and Go submodules"
+	@echo "  tidy-check         Verify go.mod/go.sum are tidy across root and Go submodules"
+	@echo "  install-git-hooks  Configure Git to use the repository hooks in .githooks/"
 	@echo "  update-deps        Update Go dependencies"
 	@echo "  cleanup-goreman    Clean up goreman logs and data"
 	@echo ""
@@ -58,7 +61,7 @@ help:
 # Build and Generation Commands
 # ====================================================================================
 
-.PHONY: build build-docs generate lint license-headers license-check update-deps tidy build-antfarm build-termite-dashboard
+.PHONY: build build-docs generate lint license-headers license-check update-deps tidy tidy-check install-git-hooks build-antfarm build-termite-dashboard
 
 build-antfarm: build-antfarm-main build-termite-dashboard
 
@@ -176,6 +179,17 @@ tidy:
 		echo "==> Tidying $$mod"; \
 		(cd $$mod && go mod tidy) || exit 1; \
 	done
+
+tidy-check:
+	$(GO) mod tidy -diff
+	@for mod in $(GO_SUBMODULES); do \
+		echo "==> Checking tidy in $$mod"; \
+		(cd $$mod && go mod tidy -diff) || exit 1; \
+	done
+
+install-git-hooks:
+	git config core.hooksPath .githooks
+	@echo "Configured Git hooks path to .githooks/"
 
 update-deps:
 	$(GO) get -u ./... && $(GO) mod tidy
