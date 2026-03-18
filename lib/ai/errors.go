@@ -41,6 +41,26 @@ type ClassifiedError struct {
 	UserMessage string
 }
 
+// HTTPStatusCode returns the appropriate HTTP status code for this error kind.
+func (c ClassifiedError) HTTPStatusCode() int {
+	switch c.Kind {
+	case GenerationErrorAuth:
+		return 401
+	case GenerationErrorQuotaExceeded:
+		return 402
+	case GenerationErrorModelNotFound:
+		return 404
+	case GenerationErrorRateLimit:
+		return 429
+	case GenerationErrorTimeout:
+		return 504
+	case GenerationErrorServer:
+		return 502
+	default:
+		return 500
+	}
+}
+
 // ClassifyGenerationError inspects the error chain for known provider SDK types
 // and returns a user-friendly message. The provider parameter is used to give
 // context in the message (e.g. "openrouter", "openai").

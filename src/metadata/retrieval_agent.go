@@ -820,7 +820,7 @@ func (t *TableApi) RetrievalAgent(w http.ResponseWriter, r *http.Request) {
 			generator, err = ai.NewGenKitGenerator(r.Context(), chain[0].Generator)
 			if err != nil {
 				classified := ai.ClassifyGenerationError(resolveProviderName(&req), err)
-				errorResponse(w, classified.UserMessage, http.StatusBadRequest)
+				errorResponse(w, classified.UserMessage, classified.HTTPStatusCode())
 				return
 			}
 		}
@@ -888,7 +888,8 @@ func (t *TableApi) jsonRetrievalPipeline(
 ) {
 	result, err := t.ExecutePipeline(r.Context(), req, generator, nil)
 	if err != nil {
-		errorResponse(w, err.Error(), http.StatusBadRequest)
+		classified := ai.ClassifyGenerationError(resolveProviderName(req), err)
+		errorResponse(w, classified.UserMessage, classified.HTTPStatusCode())
 		return
 	}
 
