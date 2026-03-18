@@ -99,7 +99,8 @@ func AsGenerationError(provider string, err error) GenerationError {
 		}
 	}
 
-	// 5. Rate limit (pre-existing string-based detection in chain.go)
+	// 5. Rate limit — catches rate limits from providers without typed SDK errors
+	// (e.g. Ollama, Anthropic). Typed SDK errors with 429 are already caught above.
 	if isRateLimitError(err) {
 		return GenerationError{
 			Kind:        GenerationErrorRateLimit,

@@ -1958,7 +1958,6 @@ func (e *retrievalToolExecutor) fallbackToSemanticSearch(
 	return []QueryHit{}
 }
 
-// convertQueryHitsToDocuments converts QueryHit slice to schema.Document slice
 // resolveProviderName returns the provider name from the request for use in
 // user-facing error messages.
 func resolveProviderName(req *RetrievalAgentRequest) string {
