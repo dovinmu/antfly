@@ -1,15 +1,13 @@
-import type {
-  GeneratorConfig,
-  GeneratorProvider,
-  QueryBuilderRequest,
-  QueryBuilderResult,
-} from "@antfly/sdk";
+import type { GeneratorConfig, QueryBuilderRequest, QueryBuilderResult } from "@antfly/sdk";
 import { ChevronDownIcon, ChevronUpIcon, GearIcon } from "@radix-ui/react-icons";
 import type React from "react";
 import { useState } from "react";
 import {
   formatGeneratorSummary,
+  GENERATOR_DEFAULT_CONFIG,
   GeneratorSelector,
+  getInheritedGeneratorLabels,
+  QUERY_BUILDER_PROVIDERS,
 } from "@/components/playground/GeneratorSelector";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -21,19 +19,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { useApi } from "@/hooks/use-api-config";
 import { useGeneratorPreference } from "@/hooks/use-generator-preference";
 import JsonViewer from "./JsonViewer";
-
-const QUERY_BUILDER_PROVIDERS: GeneratorProvider[] = [
-  "gemini",
-  "vertex",
-  "openai",
-  "anthropic",
-  "bedrock",
-  "ollama",
-  "cohere",
-  "openrouter",
-  "termite",
-  "mock",
-];
 
 interface QueryBuilderAgentProps {
   tableName?: string;
@@ -58,10 +43,8 @@ const QueryBuilderAgent: React.FC<QueryBuilderAgentProps> = ({
   // Generator configuration
   const [generatorOverride, setGeneratorOverride] = useState<GeneratorConfig | null>(null);
   const effectiveGenerator = generatorOverride ?? dashboardGenerator ?? null;
-  const inheritedGeneratorLabel = dashboardGenerator ? "Dashboard default" : "Server default";
-  const inheritedGeneratorDescription = dashboardGenerator
-    ? `Use the dashboard default generator (${formatGeneratorSummary(dashboardGenerator)}).`
-    : "Leave empty to use the server's default generator configuration.";
+  const { label: inheritedGeneratorLabel, description: inheritedGeneratorDescription } =
+    getInheritedGeneratorLabels(dashboardGenerator);
 
   const handleGenerateQuery = async () => {
     if (!intent.trim()) {
@@ -164,11 +147,7 @@ const QueryBuilderAgent: React.FC<QueryBuilderAgentProps> = ({
             <GeneratorSelector
               value={generatorOverride}
               onChange={setGeneratorOverride}
-              defaultConfig={{
-                provider: "openai",
-                model: "gpt-4.1",
-                temperature: 0.7,
-              }}
+              defaultConfig={GENERATOR_DEFAULT_CONFIG}
               defaultLabel={inheritedGeneratorLabel}
               defaultDescription={inheritedGeneratorDescription}
               providers={QUERY_BUILDER_PROVIDERS}

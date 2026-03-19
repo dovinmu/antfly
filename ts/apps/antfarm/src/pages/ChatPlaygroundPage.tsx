@@ -23,7 +23,11 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Source, Sources, SourcesContent, SourcesTrigger } from "@/components/ai-elements/sources";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
-import { GeneratorSelector } from "@/components/playground/GeneratorSelector";
+import {
+  GENERATOR_DEFAULT_CONFIG,
+  GeneratorSelector,
+  getInheritedGeneratorLabels,
+} from "@/components/playground/GeneratorSelector";
 import { ReasoningChainCollapsible } from "@/components/playground/ReasoningChainCollapsible";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -43,12 +47,6 @@ interface StepsConfig {
   followup: { enabled: boolean; count: number };
   confidence: { enabled: boolean };
 }
-
-const DEFAULT_GENERATOR: GeneratorConfig = {
-  provider: "openai",
-  model: "gpt-4o-mini",
-  temperature: 0.7,
-};
 
 const DEFAULT_STEPS: StepsConfig = {
   classification: { enabled: true },
@@ -112,10 +110,8 @@ const ChatPlaygroundPage: React.FC = () => {
     () => typeof window !== "undefined" && window.innerWidth >= 1024
   );
   const effectiveGenerator = generatorOverride ?? dashboardGenerator ?? null;
-  const inheritedGeneratorLabel = dashboardGenerator ? "Dashboard default" : "Server default";
-  const inheritedGeneratorDescription = dashboardGenerator
-    ? `Use the dashboard default generator (${dashboardGenerator.provider}/${dashboardGenerator.model}).`
-    : "Use the generator configured in the Antfly server config and omit any local override.";
+  const { label: inheritedGeneratorLabel, description: inheritedGeneratorDescription } =
+    getInheritedGeneratorLabels(dashboardGenerator);
 
   // Chat bar key to force reset
   const [chatKey, setChatKey] = useState(0);
@@ -198,7 +194,7 @@ const ChatPlaygroundPage: React.FC = () => {
                       <GeneratorSelector
                         value={generatorOverride}
                         onChange={setGeneratorOverride}
-                        defaultConfig={DEFAULT_GENERATOR}
+                        defaultConfig={GENERATOR_DEFAULT_CONFIG}
                         defaultLabel={inheritedGeneratorLabel}
                         defaultDescription={inheritedGeneratorDescription}
                       />

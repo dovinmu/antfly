@@ -1,11 +1,14 @@
-import type { GeneratorConfig, GeneratorProvider, QueryBuilderResult } from "@antfly/sdk";
+import type { GeneratorConfig, QueryBuilderResult } from "@antfly/sdk";
 import { GearIcon } from "@radix-ui/react-icons";
 import { Sparkles } from "lucide-react";
 import type React from "react";
 import { useState } from "react";
 import {
   formatGeneratorSummary,
+  GENERATOR_DEFAULT_CONFIG,
   GeneratorSelector,
+  getInheritedGeneratorLabels,
+  QUERY_BUILDER_PROVIDERS,
 } from "@/components/playground/GeneratorSelector";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -17,19 +20,6 @@ import { useApi } from "@/hooks/use-api-config";
 import { useGeneratorPreference } from "@/hooks/use-generator-preference";
 import { normalizeSimplifiedDSL, usesSimplifiedDSL } from "@/utils/normalizeQuery";
 import { QueryDiffView } from "./QueryDiffView";
-
-const QUERY_BUILDER_PROVIDERS: GeneratorProvider[] = [
-  "gemini",
-  "vertex",
-  "openai",
-  "anthropic",
-  "bedrock",
-  "ollama",
-  "cohere",
-  "openrouter",
-  "termite",
-  "mock",
-];
 
 interface AIQueryAssistantProps {
   tableName?: string;
@@ -58,10 +48,8 @@ const AIQueryAssistant: React.FC<AIQueryAssistantProps> = ({
   // Generator configuration
   const [generatorOverride, setGeneratorOverride] = useState<GeneratorConfig | null>(null);
   const effectiveGenerator = generatorOverride ?? dashboardGenerator ?? null;
-  const inheritedGeneratorLabel = dashboardGenerator ? "Dashboard default" : "Server default";
-  const inheritedGeneratorDescription = dashboardGenerator
-    ? `Use the dashboard default generator (${formatGeneratorSummary(dashboardGenerator)}).`
-    : "Leave empty to use the server's default generator configuration.";
+  const { label: inheritedGeneratorLabel, description: inheritedGeneratorDescription } =
+    getInheritedGeneratorLabels(dashboardGenerator);
 
   const handleGenerate = async () => {
     if (!intent.trim()) {
@@ -161,11 +149,7 @@ const AIQueryAssistant: React.FC<AIQueryAssistantProps> = ({
                 <GeneratorSelector
                   value={generatorOverride}
                   onChange={setGeneratorOverride}
-                  defaultConfig={{
-                    provider: "openai",
-                    model: "gpt-4.1",
-                    temperature: 0.7,
-                  }}
+                  defaultConfig={GENERATOR_DEFAULT_CONFIG}
                   defaultLabel={inheritedGeneratorLabel}
                   defaultDescription={inheritedGeneratorDescription}
                   providers={QUERY_BUILDER_PROVIDERS}

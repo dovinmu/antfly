@@ -20,6 +20,12 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  formatGeneratorSummary,
+  GENERATOR_DEFAULT_CONFIG,
+  GeneratorSelector,
+  getInheritedGeneratorLabels,
+} from "@/components/playground/GeneratorSelector";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,10 +38,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  formatGeneratorSummary,
-  GeneratorSelector,
-} from "@/components/playground/GeneratorSelector";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -127,15 +129,11 @@ const EvalsPlaygroundPage: React.FC = () => {
   const abortControllerRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const effectiveAnswerGenerator = answerGeneratorOverride ?? dashboardGenerator ?? null;
-  const inheritedAnswerGeneratorLabel = dashboardGenerator ? "Dashboard default" : "Server default";
-  const inheritedAnswerGeneratorDescription = dashboardGenerator
-    ? `Use the dashboard default generator (${formatGeneratorSummary(dashboardGenerator)}).`
-    : "Use the generator configured in the Antfly server config and omit any local override.";
-  const effectiveJudge = judgeOverride ?? dashboardGenerator ?? DEFAULT_JUDGE;
-  const inheritedJudgeLabel = dashboardGenerator ? "Dashboard default" : "Playground default judge";
-  const inheritedJudgeDescription = dashboardGenerator
-    ? `Use the dashboard default generator (${formatGeneratorSummary(dashboardGenerator)}).`
-    : "Keep Antfarm's built-in judge selection for evals.";
+  const { label: inheritedAnswerGeneratorLabel, description: inheritedAnswerGeneratorDescription } =
+    getInheritedGeneratorLabels(dashboardGenerator);
+  const effectiveJudge = judgeOverride ?? DEFAULT_JUDGE;
+  const inheritedJudgeLabel = "Playground default judge";
+  const inheritedJudgeDescription = "Keep Antfarm's built-in judge selection for evals.";
 
   // Set first eval set as default
   useEffect(() => {
@@ -436,7 +434,15 @@ const EvalsPlaygroundPage: React.FC = () => {
       setIsLoading(false);
       setProgress(null);
     }
-  }, [selectedSet, selectedTable, selectedSetName, effectiveJudge, apiClient, selectedIndex]);
+  }, [
+    selectedSet,
+    selectedTable,
+    selectedSetName,
+    effectiveJudge,
+    apiClient,
+    selectedIndex,
+    effectiveAnswerGenerator,
+  ]);
 
   return (
     <div className="h-full">
@@ -952,11 +958,7 @@ const EvalsPlaygroundPage: React.FC = () => {
             <GeneratorSelector
               value={answerGeneratorOverride}
               onChange={setAnswerGeneratorOverride}
-              defaultConfig={{
-                provider: "openai",
-                model: "gpt-4.1",
-                temperature: 0.7,
-              }}
+              defaultConfig={GENERATOR_DEFAULT_CONFIG}
               defaultLabel={inheritedAnswerGeneratorLabel}
               defaultDescription={inheritedAnswerGeneratorDescription}
             />

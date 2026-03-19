@@ -22,6 +22,12 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { useCallback, useMemo, useReducer, useRef, useState } from "react";
+import {
+  formatGeneratorSummary,
+  GENERATOR_DEFAULT_CONFIG,
+  GeneratorSelector,
+  getInheritedGeneratorLabels,
+} from "@/components/playground/GeneratorSelector";
 import { PipelineTrace } from "@/components/rag/PipelineTrace";
 import {
   type ConfidenceStepData,
@@ -32,10 +38,6 @@ import {
   pipelineReducer,
   type SearchStepData,
 } from "@/components/rag/pipeline-types";
-import {
-  formatGeneratorSummary,
-  GeneratorSelector,
-} from "@/components/playground/GeneratorSelector";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -68,12 +70,6 @@ interface StepsConfig {
     enabled: boolean;
   };
 }
-
-const DEFAULT_GENERATOR: GeneratorConfig = {
-  provider: "openai",
-  model: "gpt-4o-mini",
-  temperature: 0.7,
-};
 
 const DEFAULT_STEPS: StepsConfig = {
   classification: { enabled: false, with_reasoning: false },
@@ -152,10 +148,8 @@ const RagPlaygroundPage: React.FC = () => {
   const [steps, setSteps] = useState<StepsConfig>(DEFAULT_STEPS);
   const [settingsOpen, setSettingsOpen] = useState(true);
   const effectiveGenerator = generatorOverride ?? dashboardGenerator ?? null;
-  const inheritedGeneratorLabel = dashboardGenerator ? "Dashboard default" : "Server default";
-  const inheritedGeneratorDescription = dashboardGenerator
-    ? `Use the dashboard default generator (${formatGeneratorSummary(dashboardGenerator)}).`
-    : "Use the generator configured in the Antfly server config and omit any local override.";
+  const { label: inheritedGeneratorLabel, description: inheritedGeneratorDescription } =
+    getInheritedGeneratorLabels(dashboardGenerator);
 
   // Pipeline state
   const [pipeline, dispatchPipeline] = useReducer(pipelineReducer, initialPipelineState);
@@ -653,7 +647,7 @@ const RagPlaygroundPage: React.FC = () => {
                       <GeneratorSelector
                         value={generatorOverride}
                         onChange={setGeneratorOverride}
-                        defaultConfig={DEFAULT_GENERATOR}
+                        defaultConfig={GENERATOR_DEFAULT_CONFIG}
                         defaultLabel={inheritedGeneratorLabel}
                         defaultDescription={inheritedGeneratorDescription}
                       />

@@ -39,6 +39,27 @@ export const GENERATOR_PROVIDER_LABELS: Record<GeneratorProvider, string> = {
   mock: "Mock (Testing)",
 };
 
+/** Default generator config used as the initial "custom" value across playgrounds. */
+export const GENERATOR_DEFAULT_CONFIG: GeneratorConfig = {
+  provider: "openai",
+  model: "gpt-4.1",
+  temperature: 0.7,
+};
+
+/** Providers shown in the query-builder generator selectors. */
+export const QUERY_BUILDER_PROVIDERS: GeneratorProvider[] = [
+  "gemini",
+  "vertex",
+  "openai",
+  "anthropic",
+  "bedrock",
+  "ollama",
+  "cohere",
+  "openrouter",
+  "termite",
+  "mock",
+];
+
 export function formatGeneratorSummary(
   config: Pick<GeneratorConfig, "provider" | "model"> | null | undefined,
   defaultLabel = "Server default"
@@ -47,6 +68,28 @@ export function formatGeneratorSummary(
     return defaultLabel;
   }
   return `${config.provider}/${config.model}`;
+}
+
+/**
+ * Derive the label and description shown in the "default" radio of a
+ * GeneratorSelector, depending on whether a dashboard-level generator has
+ * been configured.
+ */
+export function getInheritedGeneratorLabels(dashboardGenerator: GeneratorConfig | null): {
+  label: string;
+  description: string;
+} {
+  if (dashboardGenerator) {
+    return {
+      label: "Dashboard default",
+      description: `Use the dashboard default generator (${formatGeneratorSummary(dashboardGenerator)}).`,
+    };
+  }
+  return {
+    label: "Server default",
+    description:
+      "Use the generator configured in the Antfly server config and omit any local override.",
+  };
 }
 
 interface GeneratorSelectorProps {
@@ -104,7 +147,10 @@ export function GeneratorSelector({
   return (
     <div className={cn("space-y-4", className)}>
       <RadioGroup value={mode} onValueChange={handleModeChange} className="gap-2">
-        <label className="flex items-start gap-3 rounded-lg border p-3 cursor-pointer hover:bg-muted/30">
+        <label
+          htmlFor={defaultId}
+          className="flex items-start gap-3 rounded-lg border p-3 cursor-pointer hover:bg-muted/30"
+        >
           <RadioGroupItem value="default" id={defaultId} className="mt-0.5" />
           <div className="space-y-1">
             <Label htmlFor={defaultId} className="cursor-pointer">
@@ -113,7 +159,10 @@ export function GeneratorSelector({
             <p className="text-xs text-muted-foreground">{defaultDescription}</p>
           </div>
         </label>
-        <label className="flex items-start gap-3 rounded-lg border p-3 cursor-pointer hover:bg-muted/30">
+        <label
+          htmlFor={customId}
+          className="flex items-start gap-3 rounded-lg border p-3 cursor-pointer hover:bg-muted/30"
+        >
           <RadioGroupItem value="custom" id={customId} className="mt-0.5" />
           <div className="space-y-1">
             <Label htmlFor={customId} className="cursor-pointer">

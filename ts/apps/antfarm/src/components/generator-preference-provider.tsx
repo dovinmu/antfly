@@ -1,6 +1,6 @@
 import type { GeneratorConfig } from "@antfly/sdk";
 import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { GeneratorPreferenceContext } from "@/contexts/generator-preference-context";
 
 const STORAGE_KEY = "antfarm-dashboard-generator";
@@ -33,7 +33,7 @@ export function GeneratorPreferenceProvider({ children }: { children: ReactNode 
     loadStoredGenerator
   );
 
-  const setDashboardGenerator = (value: GeneratorConfig | null) => {
+  const setDashboardGenerator = useCallback((value: GeneratorConfig | null) => {
     setDashboardGeneratorState(value);
 
     if (value) {
@@ -41,14 +41,14 @@ export function GeneratorPreferenceProvider({ children }: { children: ReactNode 
     } else {
       localStorage.removeItem(STORAGE_KEY);
     }
-  };
+  }, []);
 
   const contextValue = useMemo(
     () => ({
       dashboardGenerator: dashboardGeneratorState,
       setDashboardGenerator,
     }),
-    [dashboardGeneratorState]
+    [dashboardGeneratorState, setDashboardGenerator]
   );
 
   return (

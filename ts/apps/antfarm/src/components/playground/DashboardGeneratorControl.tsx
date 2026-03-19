@@ -1,6 +1,7 @@
 import { Sparkles } from "lucide-react";
 import {
   formatGeneratorSummary,
+  GENERATOR_DEFAULT_CONFIG,
   GeneratorSelector,
 } from "@/components/playground/GeneratorSelector";
 import { Button } from "@/components/ui/button";
@@ -34,11 +35,7 @@ export function DashboardGeneratorControl() {
           defaultLabel="Server default"
           defaultDescription="Leave unset to defer to the backend default generator."
           customLabel="Dashboard default"
-          defaultConfig={{
-            provider: "openai",
-            model: "gpt-4.1",
-            temperature: 0.7,
-          }}
+          defaultConfig={GENERATOR_DEFAULT_CONFIG}
         />
       </PopoverContent>
     </Popover>
