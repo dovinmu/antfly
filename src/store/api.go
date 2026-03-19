@@ -178,7 +178,10 @@ func (h *StoreAPI) handleStopShard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.store.StopRaftGroup(shardID)
+	if err := h.store.StopRaftGroup(shardID); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }
 

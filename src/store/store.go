@@ -47,7 +47,7 @@ var _ StoreIface = (*Store)(nil)
 type StoreIface interface {
 	Shard(id types.ID) (ShardIface, bool)
 	Status() *StoreStatus
-	StopRaftGroup(shardID types.ID)
+	StopRaftGroup(shardID types.ID) error
 	StartRaftGroup(shardID types.ID, peers []common.Peer, join bool, config *ShardStartConfig) error
 	ID() types.ID
 	Scan(
@@ -289,7 +289,11 @@ func (m *Store) ErrorC(ctx context.Context) chan error {
 				m.logger.Info("ID removed: shutting down Raft group",
 					zap.Stringer("shardID", shardID),
 					zap.Error(err))
-				m.StopRaftGroup(shardID)
+				if stopErr := m.StopRaftGroup(shardID); stopErr != nil {
+					m.logger.Warn("Failed to stop removed Raft group",
+						zap.Stringer("shardID", shardID),
+						zap.Error(stopErr))
+				}
 				continue
 			}
 			m.logger.Info("Received error from shard",
@@ -331,22 +335,37 @@ func (m *Store) Scan(
 	return shard.Scan(ctx, fromKey, toKey, opts)
 }
 
-func (m *Store) StopRaftGroup(shardID types.ID) {
+func (m *Store) StopRaftGroup(shardID types.ID) error {
 	_, err, _ := m.sg.Do(shardID.String()+":stop", func() (any, error) {
 		m.logger.Info("Stopping Raft Group", zap.Stringer("shardID", shardID))
-		// Load and Delete are not atomic, but this is safe because the
-		// entire stop operation is serialized per-shard via singleflight.
-		if shard, ok := m.shardsMap.Load(shardID); ok {
+
+		// Atomically check the shard state and remove it from the map.
+		// Using Compute prevents a race where a concurrent StartRaftGroup
+		// (which runs under a different singleflight key) stores a new
+		// initializing shard between our Load and Delete.
+		var shardToClose *Shard
+		m.shardsMap.Compute(shardID, func(shard *Shard, loaded bool) (*Shard, xsync.ComputeOp) {
+			if !loaded {
+				return shard, xsync.CancelOp
+			}
 			if shard.IsInitializing() {
+				return shard, xsync.CancelOp // keep in map
+			}
+			shardToClose = shard
+			return shard, xsync.DeleteOp
+		})
+
+		if shardToClose == nil {
+			if _, ok := m.shardsMap.Load(shardID); ok {
 				return nil, errors.New("shard is still initializing")
 			}
-			m.shardsMap.Delete(shardID)
-			if err := shard.Close(); err != nil {
-				m.logger.Warn("Error closing shard while stopping Raft Group",
-					zap.String("shardID", shardID.String()),
-					zap.Error(err))
-			}
+			// Shard wasn't in the map; still clean up disk state below.
+		} else if err := shardToClose.Close(); err != nil {
+			m.logger.Warn("Error closing shard while stopping Raft Group",
+				zap.Stringer("shardID", shardID),
+				zap.Error(err))
 		}
+
 		// TODO (ajr) Delete the snapshots and pebble databases
 		dataDir := m.antflyConfig.GetBaseDir()
 		_ = os.RemoveAll(common.StorageDBDir(dataDir, shardID, m.config.ID)) //nolint:gosec // G703: path from internal config
@@ -359,9 +378,7 @@ func (m *Store) StopRaftGroup(shardID types.ID) {
 		m.logger.Info("Deleted Raft Group disk footprint", zap.Stringer("shardID", shardID))
 		return nil, nil
 	})
-	if err != nil {
-		m.logger.Warn("Error stopping Raft Group", zap.Stringer("shardID", shardID), zap.Error(err))
-	}
+	return err
 }
 
 func (m *Store) createPassThroughChannels(

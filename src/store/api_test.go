@@ -264,8 +264,9 @@ func (m *MockStore) Status() *StoreStatus {
 	return args.Get(0).(*StoreStatus)
 }
 
-func (m *MockStore) StopRaftGroup(shardID types.ID) {
-	m.Called(shardID)
+func (m *MockStore) StopRaftGroup(shardID types.ID) error {
+	args := m.Called(shardID)
+	return args.Error(0)
 }
 
 func (m *MockStore) StartRaftGroup(
