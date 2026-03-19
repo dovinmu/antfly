@@ -636,6 +636,7 @@ func (h *Harness) Advance(d time.Duration) error {
 	for d > 0 {
 		step := min(d, 100*time.Millisecond)
 		h.clock.Advance(step)
+		h.yieldBackgroundWork()
 		if err := h.pump(); err != nil {
 			return err
 		}
@@ -968,11 +969,16 @@ func (h *Harness) startStore(storeID types.ID) error {
 	}
 	h.stores[storeID] = node
 
-	if err := h.tableManager.RegisterStore(context.Background(), &store.StoreRegistrationRequest{
-		StoreInfo: *info,
+	if err := h.runWithProgress(simulatorControlPlaneTimeout, func() error {
+		return h.tableManager.RegisterStore(context.Background(), &store.StoreRegistrationRequest{
+			StoreInfo: *info,
+		})
 	}); err != nil {
 		_ = h.router.Unregister(info.ApiURL)
 		storeInstance.Close()
+		node.store = nil
+		node.errC = nil
+		delete(h.stores, storeID)
 		return fmt.Errorf("registering store %s in metadata: %w", storeID, err)
 	}
 	return nil
@@ -1061,6 +1067,12 @@ func (h *Harness) pump() error {
 		return err
 	}
 	return h.checkStoreErrors()
+}
+
+func (h *Harness) yieldBackgroundWork() {
+	for range 8 {
+		runtime.Gosched()
+	}
 }
 
 func (h *Harness) checkStoreErrors() error {

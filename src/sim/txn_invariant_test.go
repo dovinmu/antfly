@@ -49,7 +49,7 @@ func TestChecker_StableRejectsPendingTransactionState(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- h.ExecuteTransaction(
-			30*time.Second,
+			90*time.Second,
 			map[types.ID][][2][]byte{
 				lowShard:  {{[]byte(lowKey), []byte(`{"owner":"alice","balance":100}`)}},
 				highShard: {{[]byte(highKey), []byte(`{"owner":"bob","balance":50}`)}},
@@ -76,7 +76,7 @@ func TestChecker_StableRejectsPendingTransactionState(t *testing.T) {
 
 	close(releaseResolve)
 	require.NoError(t, <-done)
-	require.NoError(t, h.WaitFor(30*time.Second, func() error {
+	require.NoError(t, h.WaitFor(60*time.Second, func() error {
 		return checker.CheckStable(context.Background(), h)
 	}))
 }

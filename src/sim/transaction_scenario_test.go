@@ -91,6 +91,71 @@ func TestHarness_TransactionDelayedResolveIntentDelivery(t *testing.T) {
 	require.NotEmpty(t, highValue)
 }
 
+func TestHarness_TransactionSyncLevelWriteWaitsForCoordinatorResolution(t *testing.T) {
+	txnID := uuid.MustParse("00000000-0000-0000-0000-0000000000a2")
+	h := newTransactionHarness(t, txnID)
+
+	lowKey := "1/acct/alice"
+	highKey := "a/acct/bob"
+	lowShard, err := h.ShardForKey("accounts", lowKey)
+	require.NoError(t, err)
+	highShard, err := h.ShardForKey("accounts", highKey)
+	require.NoError(t, err)
+	require.NotEqual(t, lowShard, highShard)
+
+	coordinatorShard := pickCoordinatorForTest(txnID, lowShard, highShard)
+	blockedResolve := make(chan struct{}, 1)
+	releaseResolve := make(chan struct{})
+	h.AddBeforeRPCFault(1, func(event RPCEvent) bool {
+		return event.Method == "ResolveIntent" && event.ShardID == coordinatorShard
+	}, func(ctx context.Context, event RPCEvent) error {
+		select {
+		case blockedResolve <- struct{}{}:
+		default:
+		}
+		select {
+		case <-releaseResolve:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- h.ExecuteTransaction(
+			60*time.Second,
+			map[types.ID][][2][]byte{
+				lowShard:  {{[]byte(lowKey), []byte(`{"owner":"alice","balance":110}`)}},
+				highShard: {{[]byte(highKey), []byte(`{"owner":"bob","balance":60}`)}},
+			},
+			nil,
+			nil,
+			nil,
+			storedb.Op_SyncLevelWrite,
+		)
+	}()
+
+	select {
+	case <-blockedResolve:
+	case err := <-done:
+		require.NoError(t, err)
+		t.Fatal("transaction completed before coordinator resolve-intent was reached")
+	case <-time.After(5 * time.Second):
+		t.Fatal("coordinator resolve-intent fault was not reached")
+	}
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+		t.Fatal("transaction completed before coordinator resolve-intent was released")
+	default:
+	}
+
+	close(releaseResolve)
+	require.NoError(t, <-done)
+}
+
 func TestHarness_TransactionCoordinatorCrashAfterCommitStillCompletes(t *testing.T) {
 	txnID := uuid.MustParse("00000000-0000-0000-0000-0000000000b2")
 	h := newTransactionHarness(t, txnID)
@@ -120,7 +185,7 @@ func TestHarness_TransactionCoordinatorCrashAfterCommitStillCompletes(t *testing
 	})
 
 	require.NoError(t, h.ExecuteTransaction(
-		45*time.Second,
+		90*time.Second,
 		map[types.ID][][2][]byte{
 			lowShard:  {{[]byte(lowKey), []byte(`{"owner":"alice","balance":101}`)}},
 			highShard: {{[]byte(highKey), []byte(`{"owner":"bob","balance":51}`)}},
@@ -138,7 +203,7 @@ func TestHarness_TransactionCoordinatorCrashAfterCommitStillCompletes(t *testing
 		t.Fatal("coordinator crash fault did not trigger")
 	}
 
-	require.NoError(t, h.WaitFor(60*time.Second, func() error {
+	require.NoError(t, h.WaitFor(90*time.Second, func() error {
 		lowValue, err := h.LookupKey("accounts", lowKey)
 		if err != nil {
 			return err
@@ -191,7 +256,7 @@ func TestHarness_TransactionParticipantCrashDuringWriteIntentStillCompletes(t *t
 	})
 
 	require.NoError(t, h.ExecuteTransaction(
-		45*time.Second,
+		90*time.Second,
 		map[types.ID][][2][]byte{
 			lowShard:  {{[]byte(lowKey), []byte(`{"owner":"alice","balance":102}`)}},
 			highShard: {{[]byte(highKey), []byte(`{"owner":"bob","balance":52}`)}},
@@ -209,7 +274,7 @@ func TestHarness_TransactionParticipantCrashDuringWriteIntentStillCompletes(t *t
 		t.Fatal("participant crash fault did not trigger")
 	}
 
-	require.NoError(t, h.WaitFor(30*time.Second, func() error {
+	require.NoError(t, h.WaitFor(60*time.Second, func() error {
 		lowValue, err := h.LookupKey("accounts", lowKey)
 		if err != nil {
 			return err

@@ -184,12 +184,12 @@ func (ms *MetadataStore) notifyParticipantsAsync(
 	go func() { _ = g.Wait() }()
 }
 
-// notifyParticipantsSync sends resolve intent notifications to participant shards
-// and waits for completion.
+// notifyParticipantsSync sends resolve intent notifications to all shards and
+// waits for completion.
 //
-// The coordinator shard resolves its own intents locally as part of commit
-// processing inside the store, so waiting on it again here only turns a
-// post-commit coordinator crash into a client-visible stall.
+// The coordinator still participates in the SyncLevelWrite contract: the local
+// resolve path started by commit is asynchronous, so this explicit wait keeps
+// the API from returning before the coordinator's own intents are durable.
 func (ms *MetadataStore) notifyParticipantsSync(
 	ctx context.Context,
 	coordinatorID types.ID,
@@ -200,9 +200,6 @@ func (ms *MetadataStore) notifyParticipantsSync(
 	g, _ := workerpool.NewGroup(ctx, ms.pool)
 
 	for shardID := range allShards {
-		if shardID == coordinatorID {
-			continue
-		}
 		g.Go(func(ctx context.Context) error {
 			if err := ms.retryTxnOp(ctx, "resolve intents", func(ctx context.Context) error {
 				storeClient, err := ms.leaderClientForShard(ctx, shardID)

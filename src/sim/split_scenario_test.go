@@ -119,7 +119,7 @@ func TestHarness_SplitLifecycle_ReconcilesToTwoServingShards(t *testing.T) {
 	})
 	require.NoErrorf(t, err, "split did not reach two-shard lifecycle\n%s", h.Trace().CompactTrace(128, 16))
 
-	err = h.WaitFor(2*time.Minute, func() error {
+	err = h.WaitFor(90*time.Second, func() error {
 		if err := h.ReconcileOnce(context.Background()); err != nil {
 			return err
 		}
