@@ -319,5 +319,6 @@ func newTransactionHarness(t *testing.T, txnID uuid.UUID) *Harness {
 	require.NoError(t, err)
 
 	startTableOnAllStores(t, h, "accounts")
+	require.NoError(t, h.Advance(2*time.Second))
 	return h
 }

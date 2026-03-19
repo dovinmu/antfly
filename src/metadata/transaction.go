@@ -32,7 +32,11 @@ import (
 	"go.uber.org/zap"
 )
 
-const maxTxnRetryAttempts = 4
+// Distributed transaction control-plane RPCs can cross leader elections,
+// store restarts, and simulator-induced proposal drops. Keep the retry
+// budget long enough to ride out a couple of election intervals without
+// forcing callers to build their own retry loops around ExecuteTransaction.
+const maxTxnRetryAttempts = 20
 
 // collectShards returns the union of shard IDs across writes, deletes, and transforms.
 func collectShards(
@@ -390,7 +394,7 @@ func (ms *MetadataStore) retryTxnUint64Op(ctx context.Context, label string, fn 
 }
 
 func (ms *MetadataStore) txnRetryDelay(attempt int) time.Duration {
-	return time.Duration(attempt+1) * 200 * time.Millisecond
+	return 250 * time.Millisecond
 }
 
 func isRetryableTxnError(err error) bool {

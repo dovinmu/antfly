@@ -63,7 +63,7 @@ func TestRandomTransactionScenario_ReplayableSeedsRemainConsistent(t *testing.T)
 				var secondErr *ScenarioRunError
 				require.True(t, errors.As(err, &firstErr))
 				require.True(t, errors.As(replayErr, &secondErr))
-				require.Equal(t, firstErr.Category, secondErr.Category)
+				require.Equal(t, firstErr.Actions, secondErr.Actions)
 			}
 		})
 	}
