@@ -2,7 +2,6 @@ import type { ChatTurn } from "@antfly/components";
 import { Antfly, ChatBar } from "@antfly/components";
 import { createAIElementsRenderers, turnToStatus } from "@antfly/components/adapters";
 import type { ChatToolName, GeneratorConfig } from "@antfly/sdk";
-import { generatorProviders } from "@antfly/sdk";
 import {
   Bot,
   ChevronDown,
@@ -24,6 +23,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Source, Sources, SourcesContent, SourcesTrigger } from "@/components/ai-elements/sources";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
+import { GeneratorSelector } from "@/components/playground/GeneratorSelector";
 import { ReasoningChainCollapsible } from "@/components/playground/ReasoningChainCollapsible";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,20 +31,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useApiConfig } from "@/hooks/use-api-config";
+import { useGeneratorPreference } from "@/hooks/use-generator-preference";
 import { useTable } from "@/hooks/use-table";
-
-type GeneratorProvider = (typeof generatorProviders)[number];
 
 interface StepsConfig {
   classification: { enabled: boolean };
@@ -104,10 +96,11 @@ const aiRenderers = createAIElementsRenderers({
 
 const ChatPlaygroundPage: React.FC = () => {
   const { apiUrl } = useApiConfig();
+  const { dashboardGenerator } = useGeneratorPreference();
   const { selectedTable, chatIndexes } = useTable();
 
   // Config state
-  const [generator, setGenerator] = useState<GeneratorConfig>(DEFAULT_GENERATOR);
+  const [generatorOverride, setGeneratorOverride] = useState<GeneratorConfig | null>(null);
   const [limit, setLimit] = useState(10);
   const [steps, setSteps] = useState<StepsConfig>(DEFAULT_STEPS);
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -118,12 +111,17 @@ const ChatPlaygroundPage: React.FC = () => {
   const [settingsOpen, setSettingsOpen] = useState(
     () => typeof window !== "undefined" && window.innerWidth >= 1024
   );
+  const effectiveGenerator = generatorOverride ?? dashboardGenerator ?? null;
+  const inheritedGeneratorLabel = dashboardGenerator ? "Dashboard default" : "Server default";
+  const inheritedGeneratorDescription = dashboardGenerator
+    ? `Use the dashboard default generator (${dashboardGenerator.provider}/${dashboardGenerator.model}).`
+    : "Use the generator configured in the Antfly server config and omit any local override.";
 
   // Chat bar key to force reset
   const [chatKey, setChatKey] = useState(0);
 
   const handleReset = useCallback(() => {
-    setGenerator(DEFAULT_GENERATOR);
+    setGeneratorOverride(null);
     setLimit(10);
     setSteps(DEFAULT_STEPS);
     setSystemPrompt("");
@@ -197,52 +195,13 @@ const ChatPlaygroundPage: React.FC = () => {
                     {/* Generator Config */}
                     <div className="space-y-4">
                       <Label className="text-sm font-medium">Generator</Label>
-                      <div className="grid grid-cols-3 gap-4">
-                        <div className="space-y-2">
-                          <Label className="text-xs text-muted-foreground">Provider</Label>
-                          <Select
-                            value={generator.provider}
-                            onValueChange={(v) =>
-                              setGenerator((g) => ({ ...g, provider: v as GeneratorProvider }))
-                            }
-                          >
-                            <SelectTrigger>
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {generatorProviders.map((p) => (
-                                <SelectItem key={p} value={p}>
-                                  {p}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div className="space-y-2">
-                          <Label className="text-xs text-muted-foreground">Model</Label>
-                          <Input
-                            value={generator.model}
-                            onChange={(e) => setGenerator((g) => ({ ...g, model: e.target.value }))}
-                            placeholder="gpt-4o-mini"
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label className="text-xs text-muted-foreground">Temperature</Label>
-                          <Input
-                            type="number"
-                            value={generator.temperature ?? 0.7}
-                            onChange={(e) =>
-                              setGenerator((g) => ({
-                                ...g,
-                                temperature: parseFloat(e.target.value) || 0.7,
-                              }))
-                            }
-                            min={0}
-                            max={2}
-                            step={0.1}
-                          />
-                        </div>
-                      </div>
+                      <GeneratorSelector
+                        value={generatorOverride}
+                        onChange={setGeneratorOverride}
+                        defaultConfig={DEFAULT_GENERATOR}
+                        defaultLabel={inheritedGeneratorLabel}
+                        defaultDescription={inheritedGeneratorDescription}
+                      />
                     </div>
 
                     {/* Query Options */}
@@ -452,11 +411,7 @@ const ChatPlaygroundPage: React.FC = () => {
               <ChatBar
                 key={chatKey}
                 id="chat-playground"
-                generator={{
-                  provider: generator.provider,
-                  model: generator.model,
-                  temperature: generator.temperature,
-                }}
+                {...(effectiveGenerator ? { generator: effectiveGenerator } : {})}
                 table={selectedTable}
                 semanticIndexes={chatIndexes.length > 0 ? chatIndexes : undefined}
                 agentKnowledge={agentKnowledge || undefined}

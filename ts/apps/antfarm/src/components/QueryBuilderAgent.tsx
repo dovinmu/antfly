@@ -1,50 +1,39 @@
-import type { GeneratorProvider, QueryBuilderRequest, QueryBuilderResult } from "@antfly/sdk";
+import type {
+  GeneratorConfig,
+  GeneratorProvider,
+  QueryBuilderRequest,
+  QueryBuilderResult,
+} from "@antfly/sdk";
 import { ChevronDownIcon, ChevronUpIcon, GearIcon } from "@radix-ui/react-icons";
 import type React from "react";
 import { useState } from "react";
+import {
+  formatGeneratorSummary,
+  GeneratorSelector,
+} from "@/components/playground/GeneratorSelector";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useApi } from "@/hooks/use-api-config";
+import { useGeneratorPreference } from "@/hooks/use-generator-preference";
 import JsonViewer from "./JsonViewer";
 
-const PROVIDER_DEFAULTS: Record<GeneratorProvider, string> = {
-  gemini: "gemini-2.5-flash",
-  vertex: "gemini-2.5-flash",
-  ollama: "llama3.3:70b",
-  openai: "gpt-4.1",
-  openrouter: "openai/gpt-4.1",
-  bedrock: "anthropic.claude-sonnet-4-5-20250929-v1:0",
-  anthropic: "claude-sonnet-4-5-20250929",
-  cohere: "command-r-plus",
-  termite: "gemma-3-1b-it",
-  mock: "mock",
-};
-
-const PROVIDER_LABELS: Record<GeneratorProvider, string> = {
-  gemini: "Google AI (Gemini)",
-  vertex: "Google Cloud Vertex AI",
-  ollama: "Ollama (Local)",
-  openai: "OpenAI",
-  openrouter: "OpenRouter",
-  bedrock: "AWS Bedrock",
-  anthropic: "Anthropic (Claude)",
-  cohere: "Cohere",
-  termite: "Termite (Local)",
-  mock: "Mock (Testing)",
-};
+const QUERY_BUILDER_PROVIDERS: GeneratorProvider[] = [
+  "gemini",
+  "vertex",
+  "openai",
+  "anthropic",
+  "bedrock",
+  "ollama",
+  "cohere",
+  "openrouter",
+  "termite",
+  "mock",
+];
 
 interface QueryBuilderAgentProps {
   tableName?: string;
@@ -58,6 +47,7 @@ const QueryBuilderAgent: React.FC<QueryBuilderAgentProps> = ({
   onQueryGenerated,
 }) => {
   const client = useApi();
+  const { dashboardGenerator } = useGeneratorPreference();
   const [intent, setIntent] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,13 +56,12 @@ const QueryBuilderAgent: React.FC<QueryBuilderAgentProps> = ({
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   // Generator configuration
-  const [provider, setProvider] = useState<GeneratorProvider | "">("");
-  const [model, setModel] = useState("");
-
-  const handleProviderChange = (value: GeneratorProvider) => {
-    setProvider(value);
-    setModel(PROVIDER_DEFAULTS[value] || "");
-  };
+  const [generatorOverride, setGeneratorOverride] = useState<GeneratorConfig | null>(null);
+  const effectiveGenerator = generatorOverride ?? dashboardGenerator ?? null;
+  const inheritedGeneratorLabel = dashboardGenerator ? "Dashboard default" : "Server default";
+  const inheritedGeneratorDescription = dashboardGenerator
+    ? `Use the dashboard default generator (${formatGeneratorSummary(dashboardGenerator)}).`
+    : "Leave empty to use the server's default generator configuration.";
 
   const handleGenerateQuery = async () => {
     if (!intent.trim()) {
@@ -89,13 +78,7 @@ const QueryBuilderAgent: React.FC<QueryBuilderAgentProps> = ({
         intent: intent.trim(),
         ...(tableName && { table: tableName }),
         ...(schemaFields && schemaFields.length > 0 && { schema_fields: schemaFields }),
-        ...(provider &&
-          model && {
-            generator: {
-              provider: provider,
-              model: model,
-            },
-          }),
+        ...(effectiveGenerator ? { generator: effectiveGenerator } : {}),
       };
 
       const data = await client.queryBuilderAgent(request);
@@ -164,9 +147,9 @@ const QueryBuilderAgent: React.FC<QueryBuilderAgentProps> = ({
               <span className="flex items-center gap-2 text-muted-foreground">
                 <GearIcon className="h-4 w-4" />
                 Generator Settings
-                {provider && (
+                {effectiveGenerator && (
                   <Badge variant="secondary" className="font-normal text-xs">
-                    {PROVIDER_LABELS[provider]}
+                    {formatGeneratorSummary(effectiveGenerator)}
                   </Badge>
                 )}
               </span>
@@ -178,43 +161,19 @@ const QueryBuilderAgent: React.FC<QueryBuilderAgentProps> = ({
             </Button>
           </CollapsibleTrigger>
           <CollapsibleContent className="pt-3 space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Label htmlFor="provider">Provider</Label>
-                <Select
-                  value={provider}
-                  onValueChange={(v) => handleProviderChange(v as GeneratorProvider)}
-                >
-                  <SelectTrigger id="provider">
-                    <SelectValue placeholder="Server default" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="gemini">Google AI (Gemini)</SelectItem>
-                    <SelectItem value="vertex">Google Cloud Vertex</SelectItem>
-                    <SelectItem value="openai">OpenAI</SelectItem>
-                    <SelectItem value="anthropic">Anthropic (Claude)</SelectItem>
-                    <SelectItem value="bedrock">AWS Bedrock</SelectItem>
-                    <SelectItem value="ollama">Ollama (Local)</SelectItem>
-                    <SelectItem value="cohere">Cohere</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="model">Model</Label>
-                <Input
-                  id="model"
-                  placeholder={provider ? PROVIDER_DEFAULTS[provider] : "Default"}
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  disabled={!provider}
-                />
-              </div>
-            </div>
-            {!provider && (
-              <p className="text-xs text-muted-foreground">
-                Leave empty to use the server's default generator configuration.
-              </p>
-            )}
+            <GeneratorSelector
+              value={generatorOverride}
+              onChange={setGeneratorOverride}
+              defaultConfig={{
+                provider: "openai",
+                model: "gpt-4.1",
+                temperature: 0.7,
+              }}
+              defaultLabel={inheritedGeneratorLabel}
+              defaultDescription={inheritedGeneratorDescription}
+              providers={QUERY_BUILDER_PROVIDERS}
+              showTemperature={false}
+            />
           </CollapsibleContent>
         </Collapsible>
 
