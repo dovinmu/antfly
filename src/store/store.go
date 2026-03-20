@@ -42,6 +42,11 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// ErrShardInitializing is returned when a shard operation is attempted on a
+// shard that is still initializing. The client package matches this via
+// substring for HTTP error responses.
+var ErrShardInitializing = errors.New("shard is initializing")
+
 var _ StoreIface = (*Store)(nil)
 
 type StoreIface interface {
@@ -344,26 +349,28 @@ func (m *Store) StopRaftGroup(shardID types.ID) error {
 		// (which runs under a different singleflight key) stores a new
 		// initializing shard between our Load and Delete.
 		var shardToClose *Shard
+		var wasInitializing bool
 		m.shardsMap.Compute(shardID, func(shard *Shard, loaded bool) (*Shard, xsync.ComputeOp) {
 			if !loaded {
 				return shard, xsync.CancelOp
 			}
 			if shard.IsInitializing() {
+				wasInitializing = true
 				return shard, xsync.CancelOp // keep in map
 			}
 			shardToClose = shard
 			return shard, xsync.DeleteOp
 		})
 
-		if shardToClose == nil {
-			if _, ok := m.shardsMap.Load(shardID); ok {
-				return nil, errors.New("shard is still initializing")
+		if wasInitializing {
+			return nil, ErrShardInitializing
+		}
+		if shardToClose != nil {
+			if err := shardToClose.Close(); err != nil {
+				m.logger.Warn("Error closing shard while stopping Raft Group",
+					zap.Stringer("shardID", shardID),
+					zap.Error(err))
 			}
-			// Shard wasn't in the map; still clean up disk state below.
-		} else if err := shardToClose.Close(); err != nil {
-			m.logger.Warn("Error closing shard while stopping Raft Group",
-				zap.Stringer("shardID", shardID),
-				zap.Error(err))
 		}
 
 		// TODO (ajr) Delete the snapshots and pebble databases
@@ -469,13 +476,17 @@ func (m *Store) StartRaftGroup(
 			}
 		}()
 		lg := m.logger.With(zap.Stringer("shardID", shardID))
-		if _, ok := m.shardsMap.Load(shardID); ok {
+		// Atomically check if the shard exists and store an initializing
+		// placeholder if not. This prevents a race where a concurrent
+		// StopRaftGroup could wipe disk state in the gap between a
+		// separate Load and Store.
+		if _, alreadyStarted := m.shardsMap.LoadOrCompute(shardID, func() (*Shard, bool) {
+			return db.NewInitializingShard(), false
+		}); alreadyStarted {
 			lg.Info("Shard already started")
 			return nil, nil
 		}
-
 		lg.Debug("Starting Raft Group")
-		m.shardsMap.Store(shardID, db.NewInitializingShard())
 		// If we fail to start the shard, remove it from the map
 		removeShard := true
 		defer func() {
