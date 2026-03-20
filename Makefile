@@ -192,12 +192,13 @@ install-git-hooks:
 	@echo "Configured Git hooks path to .githooks/"
 
 update-deps:
-	$(GO) get -u ./... && $(GO) mod tidy
+	$(GO) get -u ./...
 	@for mod in $(GO_SUBMODULES); do \
 		echo "==> Updating deps in $$mod"; \
-		(cd $$mod && go get -u ./... && go mod tidy) || exit 1; \
+		(cd $$mod && go get -u ./...) || exit 1; \
 	done
 	$(MAKE) -C termite update-deps
+	$(MAKE) tidy
 
 
 # ====================================================================================
@@ -207,7 +208,7 @@ update-deps:
 
 .PHONY: build-omni
 
-build-omni: download-omni-deps tidy
+build-omni: download-omni-deps
 	@echo "Building antfly with ONNX + XLA backends (omni)..."
 	@echo "Platform: $(E2E_PLATFORM)"
 	export ONNXRUNTIME_ROOT=$$(pwd)/termite/onnxruntime && \

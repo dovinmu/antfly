@@ -70,7 +70,7 @@ func (c GenerationError) HTTPStatusCode() int {
 // context in the message (e.g. "openrouter", "openai").
 func AsGenerationError(provider string, err error) GenerationError {
 	if err == nil {
-		return GenerationError{Kind: GenerationErrorUnknown, UserMessage: ""}
+		panic("AsGenerationError called with nil error")
 	}
 
 	if provider == "" {

@@ -101,13 +101,6 @@ func TestAsGenerationError(t *testing.T) {
 			wantContains: "something broke",
 		},
 		{
-			name:        "nil error",
-			provider:    "openai",
-			err:         nil,
-			wantKind:    GenerationErrorUnknown,
-			wantMessage: "",
-		},
-		{
 			name:        "empty provider defaults to unknown",
 			provider:    "",
 			err:         &openrouter.APIError{HTTPStatusCode: 401, Message: "bad key"},
@@ -130,6 +123,15 @@ func TestAsGenerationError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAsGenerationErrorPanicsOnNil(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for nil error")
+		}
+	}()
+	AsGenerationError("openai", nil)
 }
 
 func TestGenerationErrorImplementsError(t *testing.T) {

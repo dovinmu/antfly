@@ -20,7 +20,7 @@ fi
 needs_tidy=false
 for path in $staged_files; do
     case "$path" in
-        *.go|go.mod|go.sum|e2e/go.mod|e2e/go.sum|pkg/client/go.mod|pkg/client/go.sum|pkg/operator/go.mod|pkg/operator/go.sum|pkg/libaf/go.mod|pkg/libaf/go.sum|pkg/docsaf/go.mod|pkg/docsaf/go.sum|pkg/evalaf/go.mod|pkg/evalaf/go.sum|pkg/evalaf/plugins/antfly/go.mod|pkg/evalaf/plugins/antfly/go.sum|pkg/genkit/antfly/go.mod|pkg/genkit/antfly/go.sum|pkg/genkit/openrouter/go.mod|pkg/genkit/openrouter/go.sum)
+        *.go|go.mod|go.sum|*/go.mod|*/go.sum)
             needs_tidy=true
             break
             ;;

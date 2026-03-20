@@ -662,7 +662,7 @@ func (t *TableApi) runGenerationStep(
 				t.logger.Error("Generation step failed", zap.Error(err))
 				if streamCallback != nil {
 					_ = streamCallback(ctx, SSEEventError, map[string]string{
-						"error": ai.AsGenerationError(resolveProviderName(req), err).UserMessage,
+						"error": classifyGenerationError(req, err).UserMessage,
 					})
 				}
 			}
@@ -684,7 +684,7 @@ func (t *TableApi) runGenerationStep(
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				t.logger.Error("Generation step failed", zap.Error(err))
-				classified := ai.AsGenerationError(resolveProviderName(req), err)
+				classified := classifyGenerationError(req, err)
 				result.Status = RetrievalAgentStatusFailed
 				result.Generation = classified.UserMessage
 			}
@@ -814,7 +814,7 @@ func (t *TableApi) RetrievalAgent(w http.ResponseWriter, r *http.Request) {
 			var err error
 			generator, err = ai.NewGenKitGenerator(r.Context(), chain[0].Generator)
 			if err != nil {
-				classified := ai.AsGenerationError(resolveProviderName(&req), err)
+				classified := classifyGenerationError(&req, err)
 				errorResponse(w, classified.UserMessage, classified.HTTPStatusCode())
 				return
 			}
@@ -864,7 +864,7 @@ func (t *TableApi) streamRetrievalPipeline(
 
 	result, err := t.ExecutePipeline(ctx, req, generator, streamCb)
 	if err != nil {
-		classified := ai.AsGenerationError(resolveProviderName(req), err)
+		classified := classifyGenerationError(req, err)
 		_ = streamEvent(w, rc, SSEEventError, map[string]string{"error": classified.UserMessage})
 		return
 	}
@@ -883,7 +883,7 @@ func (t *TableApi) jsonRetrievalPipeline(
 ) {
 	result, err := t.ExecutePipeline(r.Context(), req, generator, nil)
 	if err != nil {
-		classified := ai.AsGenerationError(resolveProviderName(req), err)
+		classified := classifyGenerationError(req, err)
 		errorResponse(w, classified.UserMessage, classified.HTTPStatusCode())
 		return
 	}
@@ -1109,7 +1109,7 @@ func (t *TableApi) RunAgenticRetrieval(
 			t.logger.Error("Classification step failed", zap.Error(err))
 		}
 		if streamCallback != nil {
-			classified := ai.AsGenerationError(resolveProviderName(req), err)
+			classified := classifyGenerationError(req, err)
 			_ = streamCallback(ctx, SSEEventError, map[string]string{"error": classified.UserMessage})
 		}
 		// Continue without classification
@@ -1982,6 +1982,10 @@ func resolveProviderName(req *RetrievalAgentRequest) string {
 		return "unknown"
 	}
 	return string(provider)
+}
+
+func classifyGenerationError(req *RetrievalAgentRequest, err error) ai.GenerationError {
+	return ai.AsGenerationError(resolveProviderName(req), err)
 }
 
 func convertQueryHitsToDocuments(hits []QueryHit) []schema.Document {
