@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useMemo } from "react";
 import Listener from "./Listener";
-import { useSharedContext, type SharedAction, type SharedState } from "./SharedContext";
+import { type SharedAction, type SharedState, useSharedContext } from "./SharedContext";
 import { SharedContextProvider } from "./SharedContextProvider";
 import { initializeAntflyClient } from "./utils";
 
@@ -36,8 +36,8 @@ function SharedConfigSync({
 }
 
 export default function Antfly({ children, url, table, onChange, headers = {} }: AntflyProps) {
-  const headersKey = JSON.stringify(headers);
-  const stableHeaders = useMemo(() => headers, [headersKey]);
+  const _headersKey = JSON.stringify(headers);
+  const stableHeaders = useMemo(() => headers, [headers]);
 
   const initialState: SharedState = {
     url,

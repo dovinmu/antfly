@@ -356,7 +356,9 @@ describe("QueryBox", () => {
             mode="submit"
             initialValue="custom retry"
             autoSubmit={true}
-            renderInput={({ value }) => <textarea aria-label="Custom Query" value={value} readOnly />}
+            renderInput={({ value }) => (
+              <textarea aria-label="Custom Query" value={value} readOnly />
+            )}
             onSubmit={onSubmit}
           />
         </TestWrapper>

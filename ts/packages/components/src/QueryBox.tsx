@@ -100,7 +100,7 @@ export default function QueryBox({
   // Initialize on mount
   useEffect(() => {
     updateWidget(initialValue || "");
-  }, [updateWidget]);
+  }, [updateWidget, initialValue]);
 
   useEffect(() => {
     if (initialValue === undefined || initialValue === lastAppliedInitialValueRef.current) {

@@ -67,6 +67,22 @@ export interface AnswerResultsProps {
   children?: ReactNode;
 }
 
+interface CustomAnswerRendererProps {
+  answer: string;
+  isStreaming: boolean;
+  hits: QueryHit[];
+  renderAnswer: NonNullable<AnswerResultsProps["renderAnswer"]>;
+}
+
+function CustomAnswerRenderer({
+  answer,
+  isStreaming,
+  hits,
+  renderAnswer,
+}: CustomAnswerRendererProps) {
+  return <>{renderAnswer(answer, isStreaming, hits)}</>;
+}
+
 export default function AnswerResults({
   id,
   searchBoxId,
@@ -583,10 +599,18 @@ export default function AnswerResults({
           (renderReasoning
             ? renderReasoning(reasoning, isStreaming)
             : defaultRenderReasoning(reasoning, isStreaming))}
-        {answer &&
-          (renderAnswer
-            ? renderAnswer(answer, isStreaming, hits)
-            : defaultRenderAnswer(answer, isStreaming, hits))}
+        {!error &&
+          answer &&
+          (renderAnswer ? (
+            <CustomAnswerRenderer
+              answer={answer}
+              isStreaming={isStreaming}
+              hits={hits}
+              renderAnswer={renderAnswer}
+            />
+          ) : (
+            defaultRenderAnswer(answer, isStreaming, hits)
+          ))}
         {showConfidence &&
           confidence &&
           !isStreaming &&

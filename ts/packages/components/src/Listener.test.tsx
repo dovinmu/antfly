@@ -385,13 +385,15 @@ describe("Listener", () => {
 
     it("should refetch autosuggest queries when autosuggest configuration changes", async () => {
       const utils = await import("./utils");
-      const msearchSpy = vi.spyOn(utils, "multiquery").mockImplementation(async (_url, requests) => ({
-        responses: requests.map(() => ({
-          status: 200,
-          took: 10,
-          hits: { hits: [], total: 0 },
-        })),
-      }));
+      const msearchSpy = vi
+        .spyOn(utils, "multiquery")
+        .mockImplementation(async (_url, requests) => ({
+          responses: requests.map(() => ({
+            status: 200,
+            took: 10,
+            hits: { hits: [], total: 0 },
+          })),
+        }));
 
       const { container, rerender } = render(
         <TestWrapper>
@@ -438,7 +440,8 @@ describe("Listener", () => {
 
       const latestQueries = msearchSpy.mock.calls[msearchSpy.mock.calls.length - 1][1];
       const autosuggestQuery = latestQueries.find(
-        (request: { query?: { fields?: string[] } }) => request.query?.fields?.[0] === "name__keyword"
+        (request: { query?: { fields?: string[] } }) =>
+          request.query?.fields?.[0] === "name__keyword"
       );
 
       expect(autosuggestQuery).toBeTruthy();
