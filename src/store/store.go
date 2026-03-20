@@ -365,12 +365,14 @@ func (m *Store) StopRaftGroup(shardID types.ID) error {
 		if wasInitializing {
 			return nil, ErrShardInitializing
 		}
-		if shardToClose != nil {
-			if err := shardToClose.Close(); err != nil {
-				m.logger.Warn("Error closing shard while stopping Raft Group",
-					zap.Stringer("shardID", shardID),
-					zap.Error(err))
-			}
+		if shardToClose == nil {
+			// Shard was never in the map; nothing to clean up.
+			return nil, nil
+		}
+		if err := shardToClose.Close(); err != nil {
+			m.logger.Warn("Error closing shard while stopping Raft Group",
+				zap.Stringer("shardID", shardID),
+				zap.Error(err))
 		}
 
 		// TODO (ajr) Delete the snapshots and pebble databases

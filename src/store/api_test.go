@@ -125,8 +125,9 @@ func (m *MockShard) Delete(ctx context.Context, key []byte) error {
 }
 
 func (m *MockShard) Lookup(ctx context.Context, key string) (map[string]any, error) {
-	args := m.Called(key)
-	return args.Get(0).(map[string]any), args.Error(0)
+	args := m.Called(ctx, key)
+	res, _ := args.Get(0).(map[string]any)
+	return res, args.Error(1)
 }
 
 func (m *MockShard) GetTimestamp(key string) (uint64, error) {
