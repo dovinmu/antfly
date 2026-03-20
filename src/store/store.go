@@ -419,7 +419,6 @@ func (m *Store) StopRaftGroup(shardID types.ID) error {
 			zap.Error(err))
 	}
 
-	// TODO (ajr) Delete the snapshots and pebble databases
 	dataDir := m.antflyConfig.GetBaseDir()
 	_ = os.RemoveAll(common.StorageDBDir(dataDir, shardID, m.config.ID)) //nolint:gosec // G703: path from internal config
 	// Clean up snapshots using SnapStore abstraction
