@@ -4,6 +4,7 @@ import type {
   ClassificationTransformationResult,
   GenerationConfidence,
   GeneratorConfig,
+  GeneratorProvider,
   QueryHit,
 } from "@antfly/sdk";
 import { ReloadIcon } from "@radix-ui/react-icons";
@@ -342,7 +343,7 @@ const RagPlaygroundPage: React.FC = () => {
               {formatGeneratorSummary(
                 generationData?.provider && generationData?.model
                   ? {
-                      provider: generationData.provider,
+                      provider: generationData.provider as GeneratorProvider,
                       model: generationData.model,
                     }
                   : effectiveGenerator
