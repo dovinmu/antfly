@@ -101,7 +101,10 @@ export default function Listener({ children, onChange }: ListenerProps) {
 
   const isAutosuggestWidget = (widgetId: string) => widgets.get(widgetId)?.isAutosuggest === true;
 
-  function entriesForGroup<T>(entries: Iterable<[string, T]>, autosuggestOnly: boolean): Array<[string, T]> {
+  function entriesForGroup<T>(
+    entries: Iterable<[string, T]>,
+    autosuggestOnly: boolean
+  ): Array<[string, T]> {
     return Array.from(entries)
       .filter(([widgetId]) => isAutosuggestWidget(widgetId) === autosuggestOnly)
       .sort();
