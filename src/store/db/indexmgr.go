@@ -1042,6 +1042,29 @@ func (im *IndexManager) WaitForBackfills(ctx context.Context) {
 	})
 }
 
+// WaitForNamedBackfills waits for the specified backfillable indexes to
+// complete their backfill. Missing indexes are ignored.
+func (im *IndexManager) WaitForNamedBackfills(ctx context.Context, names []string) {
+	for _, name := range names {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		idx, ok := im.indexes.Load(name)
+		if !ok {
+			continue
+		}
+		backfillable, ok := idx.(indexes.BackfillableIndex)
+		if !ok {
+			continue
+		}
+		im.logger.Debug("Waiting for index backfill to complete", zap.String("index", name))
+		backfillable.WaitForBackfill(ctx)
+		im.logger.Debug("Index backfill completed", zap.String("index", name))
+	}
+}
+
 // Pause pauses the IndexManager and all its indexes to prepare for snapshot.
 // This method:
 // 1. Acquires registerMu to block new index registrations

@@ -32,6 +32,7 @@ import (
 	"github.com/antflydb/antfly/src/store/db/indexes"
 	"github.com/antflydb/antfly/src/store/storeutils"
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -58,6 +59,11 @@ type batchCall struct {
 type searchCall struct {
 	query any
 	err   error
+}
+
+type mockBackfillableIndex struct {
+	*MockIndex
+	backfillDone chan struct{}
 }
 
 func (m *MockIndex) Name() string {
@@ -132,6 +138,16 @@ func (m *MockIndex) Pause(ctx context.Context) error {
 func (m *MockIndex) Resume() {
 }
 
+func (m *mockBackfillableIndex) WaitForBackfill(ctx context.Context) {
+	if m.backfillDone == nil {
+		return
+	}
+	select {
+	case <-m.backfillDone:
+	case <-ctx.Done():
+	}
+}
+
 // Register a mock index type for testing
 func init() {
 	indexes.RegisterIndex(
@@ -140,6 +156,39 @@ func init() {
 			return &MockIndex{name: name}, nil
 		},
 	)
+}
+
+func TestIndexManagerWaitForNamedBackfills(t *testing.T) {
+	t.Parallel()
+
+	im := &IndexManager{
+		logger:  zaptest.NewLogger(t),
+		indexes: xsync.NewMapOf[string, Index](),
+	}
+
+	done := make(chan struct{})
+	im.indexes.Store("embedding_index", &mockBackfillableIndex{
+		MockIndex:    &MockIndex{name: "embedding_index"},
+		backfillDone: done,
+	})
+	im.indexes.Store("full_text_index", &mockBackfillableIndex{
+		MockIndex:    &MockIndex{name: "full_text_index"},
+		backfillDone: make(chan struct{}),
+	})
+
+	waitDone := make(chan struct{})
+	go func() {
+		im.WaitForNamedBackfills(context.Background(), []string{"embedding_index"})
+		close(waitDone)
+	}()
+
+	close(done)
+
+	select {
+	case <-waitDone:
+	case <-time.After(time.Second):
+		t.Fatal("WaitForNamedBackfills blocked on an unrelated index")
+	}
 }
 
 func TestNewIndexManager(t *testing.T) {

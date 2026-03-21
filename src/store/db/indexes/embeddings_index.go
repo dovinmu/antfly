@@ -1413,7 +1413,10 @@ func (ei *EmbeddingIndex) Open(
 	// If we don't wait for the backfill to complete, deleted items
 	// can be revived by the backfill process
 	backfillWait := make(chan struct{})
-	ei.backfillDone = make(chan struct{})
+	ei.backfillDone = nil
+	if rebuild || ei.memOnly {
+		ei.backfillDone = make(chan struct{})
+	}
 	ei.enqueueChan = make(chan int, 5)
 	ei.eg.Go(func() error {
 		defer func() {

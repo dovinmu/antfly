@@ -1837,7 +1837,7 @@ func (db *DBImpl) finalizeSplitInternal(newRange types.Range, destDir1 string) e
 		return fmt.Errorf("re-opening db after range update: %w", err)
 	}
 	if len(denseEmbeddingsToRebuild) > 0 {
-		db.indexManager.WaitForBackfills(context.Background())
+		db.indexManager.WaitForNamedBackfills(context.Background(), denseEmbeddingsToRebuild)
 	}
 
 	return nil

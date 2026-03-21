@@ -440,7 +440,10 @@ func (bi *BleveIndexV2) Open(
 	}
 
 	backfillWait := make(chan struct{})
-	bi.backfillDone = make(chan struct{})
+	bi.backfillDone = nil
+	if rebuild {
+		bi.backfillDone = make(chan struct{})
+	}
 	bi.enqueueChan = make(chan int, 5)
 	bi.eg.Go(func() error {
 		defer func() {
