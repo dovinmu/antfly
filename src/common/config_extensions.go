@@ -94,6 +94,9 @@ func (c *Config) Validate() error {
 	if err := c.validateMaxShardSizeBytes(); err != nil {
 		return fmt.Errorf("max_shard_size_bytes validation failed: %w", err)
 	}
+	if err := c.validateShardMergeSettings(); err != nil {
+		return fmt.Errorf("shard merge settings validation failed: %w", err)
+	}
 
 	// Validate ReplicationFactor
 	if err := c.validateReplicationFactor(); err != nil {
@@ -248,6 +251,24 @@ func (c *Config) validateMaxShardSizeBytes() error {
 		)
 	}
 
+	return nil
+}
+
+func (c *Config) validateShardMergeSettings() error {
+	if c.MinShardsPerTable > 0 && c.MinShardsPerTable > c.MaxShardsPerTable {
+		return fmt.Errorf(
+			"min_shards_per_table must be less than or equal to max_shards_per_table, got %d > %d",
+			c.MinShardsPerTable,
+			c.MaxShardsPerTable,
+		)
+	}
+	if c.MinShardSizeBytes > 0 && c.MinShardSizeBytes >= c.MaxShardSizeBytes {
+		return fmt.Errorf(
+			"min_shard_size_bytes must be less than max_shard_size_bytes, got %d >= %d",
+			c.MinShardSizeBytes,
+			c.MaxShardSizeBytes,
+		)
+	}
 	return nil
 }
 

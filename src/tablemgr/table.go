@@ -69,6 +69,17 @@ type TableManager struct {
 
 type StoreClientFactory func(client *http.Client, id types.ID, url string) client.StoreRPC
 
+func statsRefreshElapsed(
+	oldStats *store.ShardStats,
+	newStats *store.ShardStats,
+	threshold time.Duration,
+) bool {
+	if oldStats == nil || newStats == nil || oldStats.Updated.IsZero() || newStats.Updated.IsZero() {
+		return false
+	}
+	return newStats.Updated.Sub(oldStats.Updated) > threshold
+}
+
 func defaultStoreClientFactory(c *http.Client, id types.ID, url string) client.StoreRPC {
 	return client.NewStoreClient(c, id, url)
 }
@@ -292,7 +303,12 @@ func (tm *TableManager) needsUpdates(
 		// with stats older than 1 minute, so we need to keep persisting to keep stats fresh.
 		if tm.maxShardSizeBytes > 0 && newStorage != nil && newStorage.DiskSize >= tm.maxShardSizeBytes {
 			needsPersist = true
-		} else if oldShardStatus.ShardStats != nil && time.Since(oldShardStatus.ShardStats.Updated) > 30*time.Second {
+		} else if statsRefreshElapsed(oldShardStatus.ShardStats, newShardInfo.ShardStats, 30*time.Second) {
+			// Force a periodic refresh for quiet empty shards so empty-only merge
+			// planning can still rely on fresh metadata.
+			if newStorage != nil && newStorage.Empty {
+				needsPersist = true
+			}
 			// Only force a refresh for shards approaching the split threshold.
 			// The reconciler skips shards with stats older than 1 minute, but that
 			// only matters for split decisions which require fresh size data.
@@ -341,8 +357,7 @@ func (tm *TableManager) needsUpdates(
 			// Time-based fallback: persist minor index stats changes every 30s
 			// so stats don't go completely stale.
 			if !needsPersist && indexStatsChanged &&
-				oldShardStatus.ShardStats != nil &&
-				time.Since(oldShardStatus.ShardStats.Updated) > 30*time.Second {
+				statsRefreshElapsed(oldShardStatus.ShardStats, newShardInfo.ShardStats, 30*time.Second) {
 				needsPersist = true
 			}
 		}
@@ -352,9 +367,14 @@ func (tm *TableManager) needsUpdates(
 		newShardStatus.HasSnapshot = newShardInfo.HasSnapshot
 	}
 	// When persisting, ensure ShardStats.Updated is set to current time
-	// so the reconciler knows the stats are fresh (it skips shards with stats older than 1 minute)
+	// so the reconciler knows the stats are fresh (it skips shards with stats older than 1 minute).
+	// Prefer the storage node's reported timestamp so simulation can use its mock clock.
 	if needsPersist && newShardStatus.ShardStats != nil {
-		newShardStatus.ShardStats.Updated = time.Now()
+		if newShardInfo.ShardStats != nil && !newShardInfo.ShardStats.Updated.IsZero() {
+			newShardStatus.ShardStats.Updated = newShardInfo.ShardStats.Updated
+		} else {
+			newShardStatus.ShardStats.Updated = time.Now()
+		}
 	}
 	if newShardInfo.HasSnapshot && oldShardStatus.RestoreConfig != nil {
 		// If the shard has a snapshot, we can clear the restore config

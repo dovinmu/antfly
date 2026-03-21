@@ -26,6 +26,8 @@ type RandomScenarioConfig struct {
 	TableStartID                types.ID
 	Steps                       int
 	MaxShardSizeBytes           uint64
+	MinShardSizeBytes           uint64
+	MinShardsPerTable           uint64
 	MaxShardsPerTable           uint64
 	SplitTimeout                time.Duration
 	SplitFinalizeGracePeriod    time.Duration
@@ -118,6 +120,9 @@ func RunRandomScenarioWithActions(
 	if cfg.MaxShardSizeBytes == 0 {
 		cfg.MaxShardSizeBytes = 64 * 1024
 	}
+	if cfg.MinShardsPerTable == 0 {
+		cfg.MinShardsPerTable = 1
+	}
 	if cfg.MaxShardsPerTable == 0 {
 		cfg.MaxShardsPerTable = 1
 	}
@@ -145,6 +150,8 @@ func RunRandomScenarioWithActions(
 		StoreIDs:                 cfg.StoreIDs,
 		ReplicationFactor:        cfg.ReplicationFactor,
 		MaxShardSizeBytes:        cfg.MaxShardSizeBytes,
+		MinShardSizeBytes:        cfg.MinShardSizeBytes,
+		MinShardsPerTable:        cfg.MinShardsPerTable,
 		MaxShardsPerTable:        cfg.MaxShardsPerTable,
 		SplitTimeout:             cfg.SplitTimeout,
 		SplitFinalizeGracePeriod: cfg.SplitFinalizeGracePeriod,

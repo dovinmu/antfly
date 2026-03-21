@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/antflydb/antfly/lib/clock"
 	"github.com/antflydb/antfly/lib/inflight"
 	"github.com/antflydb/antfly/lib/pebbleutils"
 	"github.com/antflydb/antfly/lib/raftkv"
@@ -79,6 +80,7 @@ type StoreDB struct {
 
 	// TODO (ajr) Where to store this?
 	created time.Time
+	clock   clock.Clock
 }
 
 func NewStoreDB(
@@ -96,9 +98,13 @@ func NewStoreDB(
 	shardNotifier ShardNotifier,
 	localSplitSourceLookup func(types.ID) *StoreDB,
 	cache *pebbleutils.Cache,
+	clk clock.Clock,
 ) (*StoreDB, error) {
 	if idxs == nil {
 		idxs = make(map[string]indexes.IndexConfig)
+	}
+	if clk == nil {
+		clk = clock.RealClock{}
 	}
 	dataDir := antflyConfig.GetBaseDir()
 	s := &StoreDB{
@@ -109,9 +115,10 @@ func NewStoreDB(
 		snapStore:              snapStore,
 		byteRange:              byteRange,
 		loadSnapshotID:         loadSnapshotID,
-		created:                time.Now().UTC(),
+		created:                clk.Now().UTC(),
 		schema:                 schema,
 		antflyConfig:           antflyConfig,
+		clock:                  clk,
 		localSplitSourceLookup: localSplitSourceLookup,
 		coreDB: NewDBImpl(
 			lg.Named("coreDB"),
@@ -2005,7 +2012,7 @@ func (s *StoreDB) Stats() *DBStats {
 
 	return &DBStats{
 		Created: s.created,
-		Updated: time.Now().UTC(),
+		Updated: s.clock.Now().UTC(),
 		Storage: &DBStorageStats{
 			Empty:    isEmpty,
 			DiskSize: diskSize,

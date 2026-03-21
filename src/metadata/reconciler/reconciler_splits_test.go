@@ -36,6 +36,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3,                                 // replicationFactor
 			map[types.ID]*store.ShardStatus{}, // empty shards
 			1024*1024*100,                     // maxShardSizeBytes
+			0,                                 // minShardSizeBytes (default)
+			1,                                 // minShardsPerTable
 			100,                               // maxShardsPerTable
 			map[types.ID]time.Time{},          // shardCooldown
 			nil,                               // getMedianKey not needed
@@ -77,6 +79,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3,
 			shards,
 			1024*1024*100, // 100MB threshold
+			0,
+			1,
 			100,
 			cooldown,
 			func(ctx context.Context, id types.ID) ([]byte, error) {
@@ -114,6 +118,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3, // Need 3 voters
 			shards,
 			1024*1024*100,
+			0,
+			1,
 			100,
 			map[types.ID]time.Time{},
 			func(ctx context.Context, id types.ID) ([]byte, error) {
@@ -152,6 +158,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3,
 			shards,
 			1024*1024*100,
+			0,
+			1,
 			100,
 			map[types.ID]time.Time{},
 			func(ctx context.Context, id types.ID) ([]byte, error) {
@@ -197,6 +205,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3,
 			shards,
 			1024*1024*100,
+			0,
+			1,
 			100,
 			map[types.ID]time.Time{},
 			func(ctx context.Context, id types.ID) ([]byte, error) {
@@ -236,6 +246,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3,
 			shards,
 			1024*1024*100,
+			0,
+			1,
 			100,
 			map[types.ID]time.Time{},
 			func(ctx context.Context, id types.ID) ([]byte, error) {
@@ -283,6 +295,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3,
 			shards,
 			1024*1024*100, // 100MB threshold
+			0,
+			1,
 			100,
 			map[types.ID]time.Time{},
 			func(ctx context.Context, id types.ID) ([]byte, error) {
@@ -359,6 +373,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3,
 			shards,
 			1024*1024*100,
+			0,
+			1,
 			100,
 			map[types.ID]time.Time{},
 			func(ctx context.Context, id types.ID) ([]byte, error) {
@@ -375,6 +391,297 @@ func TestComputeSplitTransitions(t *testing.T) {
 			assert.Equal(t, shard1, merges[0].MergeShardID, "Empty shard should be merged")
 			assert.Equal(t, "test", merges[0].TableName)
 		}
+	})
+
+	t.Run("empty shard above min shard size is not merged", func(t *testing.T) {
+		now := time.Now()
+		shard1 := types.ID(1)
+		shard2 := types.ID(2)
+
+		shards := map[types.ID]*store.ShardStatus{
+			shard1: {
+				ShardInfo: store.ShardInfo{
+					ShardConfig: store.ShardConfig{
+						ByteRange: [2][]byte{{0x00}, {0x80}},
+					},
+					RaftStatus: &common.RaftStatus{
+						Lead:   1,
+						Voters: common.NewPeerSet(1, 2, 3),
+					},
+					ShardStats: &store.ShardStats{
+						Created: now.Add(-10 * time.Minute),
+						Updated: now,
+						Storage: &store.StorageStats{
+							DiskSize: 1024 * 100,
+							Empty:    true,
+						},
+					},
+				},
+				ID:    shard1,
+				Table: "test",
+				State: store.ShardState_Default,
+			},
+			shard2: {
+				ShardInfo: store.ShardInfo{
+					ShardConfig: store.ShardConfig{
+						ByteRange: [2][]byte{{0x80}, {0xff}},
+					},
+					RaftStatus: &common.RaftStatus{
+						Lead:   1,
+						Voters: common.NewPeerSet(1, 2, 3),
+					},
+					ShardStats: &store.ShardStats{
+						Created: now.Add(-10 * time.Minute),
+						Updated: now,
+						Storage: &store.StorageStats{
+							DiskSize: 1024 * 1024 * 50,
+						},
+					},
+				},
+				ID:    shard2,
+				Table: "test",
+				State: store.ShardState_Default,
+			},
+		}
+
+		splits, merges := computeSplitTransitions(
+			t.Context(),
+			3,
+			shards,
+			1024*1024*100,
+			64*1024, // donor is larger than min-shard threshold, so no merge
+			1,
+			100,
+			map[types.ID]time.Time{},
+			func(ctx context.Context, id types.ID) ([]byte, error) {
+				return []byte("median-key"), nil
+			},
+			RealTimeProvider{},
+			1,
+			1,
+		)
+
+		assert.Empty(t, splits)
+		assert.Empty(t, merges)
+	})
+
+	t.Run("merge age and freshness use time provider", func(t *testing.T) {
+		now := time.Date(2040, 1, 1, 12, 0, 0, 0, time.UTC)
+		shard1 := types.ID(1)
+		shard2 := types.ID(2)
+
+		shards := map[types.ID]*store.ShardStatus{
+			shard1: {
+				ShardInfo: store.ShardInfo{
+					ShardConfig: store.ShardConfig{
+						ByteRange: [2][]byte{{0x00}, {0x80}},
+					},
+					RaftStatus: &common.RaftStatus{
+						Lead:   1,
+						Voters: common.NewPeerSet(1, 2, 3),
+					},
+					ShardStats: &store.ShardStats{
+						Created: now.Add(-10 * time.Minute),
+						Updated: now,
+						Storage: &store.StorageStats{
+							DiskSize: 1024 * 100,
+							Empty:    true,
+						},
+					},
+				},
+				ID:    shard1,
+				Table: "test",
+				State: store.ShardState_Default,
+			},
+			shard2: {
+				ShardInfo: store.ShardInfo{
+					ShardConfig: store.ShardConfig{
+						ByteRange: [2][]byte{{0x80}, {0xff}},
+					},
+					RaftStatus: &common.RaftStatus{
+						Lead:   1,
+						Voters: common.NewPeerSet(1, 2, 3),
+					},
+					ShardStats: &store.ShardStats{
+						Created: now.Add(-10 * time.Minute),
+						Updated: now,
+						Storage: &store.StorageStats{
+							DiskSize: 1024 * 1024 * 50,
+						},
+					},
+				},
+				ID:    shard2,
+				Table: "test",
+				State: store.ShardState_Default,
+			},
+		}
+
+		splits, merges := computeSplitTransitions(
+			t.Context(),
+			3,
+			shards,
+			1024*1024*100,
+			0,
+			1,
+			100,
+			map[types.ID]time.Time{},
+			func(ctx context.Context, id types.ID) ([]byte, error) {
+				return []byte("median-key"), nil
+			},
+			&MockTimeProvider{current: now},
+			1,
+			1,
+		)
+
+		assert.Empty(t, splits)
+		if assert.Len(t, merges, 1, "Aged empty shard should be merge-eligible based on injected time") {
+			assert.Equal(t, shard2, merges[0].ShardID)
+			assert.Equal(t, shard1, merges[0].MergeShardID)
+		}
+	})
+
+	t.Run("min shards per table prevents merge", func(t *testing.T) {
+		now := time.Now()
+		shard1 := types.ID(1)
+		shard2 := types.ID(2)
+
+		shards := map[types.ID]*store.ShardStatus{
+			shard1: {
+				ShardInfo: store.ShardInfo{
+					ShardConfig: store.ShardConfig{
+						ByteRange: [2][]byte{{0x00}, {0x80}},
+					},
+					RaftStatus: &common.RaftStatus{
+						Lead:   1,
+						Voters: common.NewPeerSet(1, 2, 3),
+					},
+					ShardStats: &store.ShardStats{
+						Created: now.Add(-10 * time.Minute),
+						Updated: now,
+						Storage: &store.StorageStats{
+							DiskSize: 1024 * 100,
+							Empty:    true,
+						},
+					},
+				},
+				ID:    shard1,
+				Table: "test",
+				State: store.ShardState_Default,
+			},
+			shard2: {
+				ShardInfo: store.ShardInfo{
+					ShardConfig: store.ShardConfig{
+						ByteRange: [2][]byte{{0x80}, {0xff}},
+					},
+					RaftStatus: &common.RaftStatus{
+						Lead:   1,
+						Voters: common.NewPeerSet(1, 2, 3),
+					},
+					ShardStats: &store.ShardStats{
+						Created: now.Add(-10 * time.Minute),
+						Updated: now,
+						Storage: &store.StorageStats{
+							DiskSize: 1024 * 1024 * 50,
+						},
+					},
+				},
+				ID:    shard2,
+				Table: "test",
+				State: store.ShardState_Default,
+			},
+		}
+
+		splits, merges := computeSplitTransitions(
+			t.Context(),
+			3,
+			shards,
+			1024*1024*100,
+			1024*1024,
+			2, // floor prevents a 2-shard table from collapsing to 1
+			100,
+			map[types.ID]time.Time{},
+			func(ctx context.Context, id types.ID) ([]byte, error) {
+				return []byte("median-key"), nil
+			},
+			RealTimeProvider{},
+			1,
+			1,
+		)
+
+		assert.Empty(t, splits)
+		assert.Empty(t, merges)
+	})
+
+	t.Run("merge receiver must have a healthy leader", func(t *testing.T) {
+		now := time.Now()
+		shard1 := types.ID(1)
+		shard2 := types.ID(2)
+
+		shards := map[types.ID]*store.ShardStatus{
+			shard1: {
+				ShardInfo: store.ShardInfo{
+					ShardConfig: store.ShardConfig{
+						ByteRange: [2][]byte{{0x00}, {0x80}},
+					},
+					RaftStatus: &common.RaftStatus{
+						Lead:   1,
+						Voters: common.NewPeerSet(1, 2, 3),
+					},
+					ShardStats: &store.ShardStats{
+						Created: now.Add(-10 * time.Minute),
+						Updated: now,
+						Storage: &store.StorageStats{
+							DiskSize: 1024 * 100,
+							Empty:    true,
+						},
+					},
+				},
+				ID:    shard1,
+				Table: "test",
+				State: store.ShardState_Default,
+			},
+			shard2: {
+				ShardInfo: store.ShardInfo{
+					ShardConfig: store.ShardConfig{
+						ByteRange: [2][]byte{{0x80}, {0xff}},
+					},
+					RaftStatus: &common.RaftStatus{
+						Lead:   0,
+						Voters: common.NewPeerSet(1, 2, 3),
+					},
+					ShardStats: &store.ShardStats{
+						Created: now.Add(-10 * time.Minute),
+						Updated: now,
+						Storage: &store.StorageStats{
+							DiskSize: 1024 * 1024 * 50,
+						},
+					},
+				},
+				ID:    shard2,
+				Table: "test",
+				State: store.ShardState_Default,
+			},
+		}
+
+		splits, merges := computeSplitTransitions(
+			t.Context(),
+			3,
+			shards,
+			1024*1024*100,
+			1024*1024,
+			1,
+			100,
+			map[types.ID]time.Time{},
+			func(ctx context.Context, id types.ID) ([]byte, error) {
+				return []byte("median-key"), nil
+			},
+			RealTimeProvider{},
+			1,
+			1,
+		)
+
+		assert.Empty(t, splits)
+		assert.Empty(t, merges)
 	})
 
 	t.Run("max shards per table is respected", func(t *testing.T) {
@@ -409,6 +716,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3,
 			shards,
 			1024*1024*100,
+			0,
+			1,
 			3, // Max 3 shards per table - already at limit
 			map[types.ID]time.Time{},
 			func(ctx context.Context, id types.ID) ([]byte, error) {
@@ -472,6 +781,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3,
 			shards,
 			1024*1024*100,
+			0,
+			1,
 			100,
 			map[types.ID]time.Time{},
 			func(ctx context.Context, id types.ID) ([]byte, error) {
@@ -540,6 +851,8 @@ func TestComputeSplitTransitions(t *testing.T) {
 			3,
 			shards,
 			1024*1024*100,
+			0,
+			1,
 			100,
 			map[types.ID]time.Time{},
 			func(ctx context.Context, id types.ID) ([]byte, error) {

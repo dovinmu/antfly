@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/antflydb/antfly/lib/types"
@@ -540,6 +541,17 @@ func (r *Reconciler) executeSplitAndMergeTransitions(
 			zap.Stringer("transition", transition))
 
 		eg.Go(func() error {
+			liveMergeInfo, liveTargetInfo, livePeers, err := r.validateLiveMergeTransition(ctx, transition)
+			if err != nil {
+				r.logger.Warn(
+					"Skipping merge transition after live validation failed",
+					zap.Stringer("mergeShardID", transition.MergeShardID),
+					zap.Stringer("targetShardID", transition.ShardID),
+					zap.Error(err),
+				)
+				return nil
+			}
+
 			newShardConfig, err := r.tableOps.ReassignShardsForMerge(transition)
 			if err != nil {
 				r.logger.Warn(
@@ -552,7 +564,7 @@ func (r *Reconciler) executeSplitAndMergeTransitions(
 
 			// Stop the merge shard on all peers
 			stopEg, _ := errgroup.WithContext(ctx)
-			for peer := range status.Peers {
+			for peer := range livePeers {
 				stopEg.Go(func() error {
 					if err := r.shardOps.StopShard(ctx, transition.MergeShardID, peer); err != nil {
 						if !errors.Is(err, client.ErrNotFound) {
@@ -583,6 +595,11 @@ func (r *Reconciler) executeSplitAndMergeTransitions(
 			}
 
 			r.SetShardCooldown(shardID, r.getCooldownDuration())
+			r.SetShardCooldown(transition.ShardID, r.getCooldownDuration())
+
+			// Keep live data referenced so validation stays coupled to the execution path.
+			_ = liveMergeInfo
+			_ = liveTargetInfo
 			return nil
 		})
 	}
@@ -677,6 +694,67 @@ func (r *Reconciler) executeSplitAndMergeTransitions(
 			return nil
 		})
 	}
+}
+
+func (r *Reconciler) validateLiveMergeTransition(
+	ctx context.Context,
+	transition tablemgr.MergeTransition,
+) (*store.ShardInfo, *store.ShardInfo, map[types.ID]struct{}, error) {
+	mergeLeaderClient, err := r.storeOps.GetLeaderClientForShard(ctx, transition.MergeShardID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading donor leader client: %w", err)
+	}
+	targetLeaderClient, err := r.storeOps.GetLeaderClientForShard(ctx, transition.ShardID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading target leader client: %w", err)
+	}
+
+	mergeStoreStatus, err := mergeLeaderClient.Status(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading donor live status: %w", err)
+	}
+	targetStoreStatus, err := targetLeaderClient.Status(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading target live status: %w", err)
+	}
+
+	mergeInfo, ok := mergeStoreStatus.Shards[transition.MergeShardID]
+	if !ok || mergeInfo == nil {
+		return nil, nil, nil, fmt.Errorf("donor shard %s missing from leader status", transition.MergeShardID)
+	}
+	targetInfo, ok := targetStoreStatus.Shards[transition.ShardID]
+	if !ok || targetInfo == nil {
+		return nil, nil, nil, fmt.Errorf("target shard %s missing from leader status", transition.ShardID)
+	}
+
+	if mergeInfo.ShardStats == nil || mergeInfo.ShardStats.Storage == nil || !mergeInfo.ShardStats.Storage.Empty {
+		return nil, nil, nil, fmt.Errorf("donor shard %s is not empty in live status", transition.MergeShardID)
+	}
+	if targetInfo.ShardStats == nil || targetInfo.ShardStats.Storage == nil {
+		return nil, nil, nil, fmt.Errorf("target shard %s is missing live storage stats", transition.ShardID)
+	}
+	if targetInfo.RaftStatus == nil || targetInfo.RaftStatus.Voters == nil ||
+		uint64(len(targetInfo.RaftStatus.Voters)) != r.config.ReplicationFactor ||
+		targetInfo.RaftStatus.Lead == 0 {
+		return nil, nil, nil, fmt.Errorf("target shard %s is not healthy for merge", transition.ShardID)
+	}
+	if mergeInfo.RaftStatus == nil || mergeInfo.RaftStatus.Voters == nil ||
+		uint64(len(mergeInfo.RaftStatus.Voters)) != r.config.ReplicationFactor ||
+		mergeInfo.RaftStatus.Lead == 0 {
+		return nil, nil, nil, fmt.Errorf("donor shard %s is not healthy for merge", transition.MergeShardID)
+	}
+	if r.config.MaxShardSizeBytes > 0 &&
+		targetInfo.ShardStats.Storage.DiskSize+mergeInfo.ShardStats.Storage.DiskSize >= r.config.MaxShardSizeBytes {
+		return nil, nil, nil, fmt.Errorf("merged live size exceeds max shard size")
+	}
+
+	peers := make(map[types.ID]struct{}, len(mergeInfo.Peers))
+	maps.Copy(peers, mergeInfo.Peers)
+	if len(peers) == 0 {
+		return nil, nil, nil, fmt.Errorf("donor shard %s has no peers in live status", transition.MergeShardID)
+	}
+
+	return mergeInfo, targetInfo, peers, nil
 }
 
 // executeShardTransitionPlan executes the transition plan for ideal shard assignments

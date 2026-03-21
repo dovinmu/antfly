@@ -22,6 +22,7 @@ import (
 	"slices"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/antflydb/antfly/lib/pebbleutils"
 	"github.com/antflydb/antfly/lib/schema"
@@ -624,6 +625,77 @@ func TestUpdateStatuses_NilShardStatsPreservesExisting(t *testing.T) {
 	require.NotNil(t, statusAfter.ShardStats.Storage, "Storage stats should be preserved")
 	assert.Equal(t, uint64(5000), statusAfter.ShardStats.Storage.DiskSize,
 		"DiskSize should be preserved from previous update")
+}
+
+func TestUpdateStatuses_EmptyShardRefreshesReportedTimestamp(t *testing.T) {
+	db := setupTestDB(t)
+
+	tm, err := NewTableManager(db, nil, 0)
+	require.NoError(t, err)
+
+	tableName := "emptyRefreshTable"
+	_, err = tm.CreateTable(
+		tableName,
+		TableConfig{NumShards: 1, StartID: 610, Schema: &schema.TableSchema{}},
+	)
+	require.NoError(t, err)
+
+	shardID := types.ID(610)
+	originalStatus, err := tm.GetShardStatus(shardID)
+	require.NoError(t, err)
+
+	initialUpdated := time.Date(2040, 1, 1, 12, 0, 0, 0, time.UTC)
+	refreshedUpdated := initialUpdated.Add(45 * time.Second)
+
+	err = tm.UpdateStatuses(context.Background(), map[types.ID]*StoreStatus{
+		types.ID(10): {
+			StoreInfo: store.StoreInfo{ID: types.ID(10)},
+			Shards: map[types.ID]*store.ShardInfo{
+				shardID: {
+					ShardConfig: originalStatus.ShardConfig,
+					Peers:       common.NewPeerSet(10),
+					ShardStats: &store.ShardStats{
+						Created: initialUpdated.Add(-10 * time.Minute),
+						Updated: initialUpdated,
+						Storage: &store.StorageStats{
+							DiskSize: 4096,
+							Empty:    true,
+						},
+					},
+					RaftStatus: &common.RaftStatus{Lead: 10},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	err = tm.UpdateStatuses(context.Background(), map[types.ID]*StoreStatus{
+		types.ID(10): {
+			StoreInfo: store.StoreInfo{ID: types.ID(10)},
+			Shards: map[types.ID]*store.ShardInfo{
+				shardID: {
+					ShardConfig: originalStatus.ShardConfig,
+					Peers:       common.NewPeerSet(10),
+					ShardStats: &store.ShardStats{
+						Created: initialUpdated.Add(-10 * time.Minute),
+						Updated: refreshedUpdated,
+						Storage: &store.StorageStats{
+							DiskSize: 4096,
+							Empty:    true,
+						},
+					},
+					RaftStatus: &common.RaftStatus{Lead: 10},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	status, err := tm.GetShardStatus(shardID)
+	require.NoError(t, err)
+	require.NotNil(t, status.ShardStats)
+	assert.Equal(t, refreshedUpdated, status.ShardStats.Updated)
+	assert.True(t, status.ShardStats.Storage.Empty)
 }
 
 func TestTable_FindShardForKey(t *testing.T) {

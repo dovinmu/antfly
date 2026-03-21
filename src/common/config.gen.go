@@ -181,6 +181,12 @@ type Config struct {
 	// MaxShardSizeBytes Maximum size of a shard in bytes. Used to determine when to split shards.
 	MaxShardSizeBytes uint64 `json:"max_shard_size_bytes"`
 
+	// MinShardSizeBytes Minimum size of a shard in bytes before it becomes eligible for automatic merge consideration.
+	MinShardSizeBytes uint64 `json:"min_shard_size_bytes,omitempty,omitzero"`
+
+	// MinShardsPerTable Minimum number of shards to keep for a table.
+	MinShardsPerTable uint64 `json:"min_shards_per_table,omitempty,omitzero"`
+
 	// MaxShardsPerTable Maximum number of shards that can be created for a single table.
 	MaxShardsPerTable uint64       `json:"max_shards_per_table"`
 	Metadata          MetadataInfo `json:"metadata"`

@@ -34,6 +34,8 @@ type HarnessConfig struct {
 	StoreIDs                 []types.ID
 	ReplicationFactor        uint64
 	MaxShardSizeBytes        uint64
+	MinShardSizeBytes        uint64
+	MinShardsPerTable        uint64
 	MaxShardsPerTable        uint64
 	DisableShardAlloc        bool
 	SplitTimeout             time.Duration
@@ -126,6 +128,8 @@ func NewHarness(cfg HarnessConfig) (*Harness, error) {
 	antflyConfig := &common.Config{
 		ReplicationFactor: cfg.ReplicationFactor,
 		MaxShardSizeBytes: cfg.MaxShardSizeBytes,
+		MinShardSizeBytes: cfg.MinShardSizeBytes,
+		MinShardsPerTable: cfg.MinShardsPerTable,
 		MaxShardsPerTable: cfg.MaxShardsPerTable,
 		DisableShardAlloc: cfg.DisableShardAlloc,
 		SplitTimeout:      cfg.SplitTimeout,

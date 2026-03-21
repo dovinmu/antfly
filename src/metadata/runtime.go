@@ -159,6 +159,8 @@ func NewRuntime(
 	reconcilerConfig := reconciler.ReconciliationConfig{
 		ReplicationFactor:        config.ReplicationFactor,
 		MaxShardSizeBytes:        config.MaxShardSizeBytes,
+		MinShardSizeBytes:        config.MinShardSizeBytes,
+		MinShardsPerTable:        config.MinShardsPerTable,
 		MaxShardsPerTable:        config.MaxShardsPerTable,
 		DisableShardAlloc:        config.DisableShardAlloc,
 		ShardCooldownPeriod:      config.ShardCooldownPeriod,
