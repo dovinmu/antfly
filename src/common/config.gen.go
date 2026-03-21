@@ -244,7 +244,10 @@ type Config struct {
 
 	// SplitTimeout Maximum duration for a shard split operation before triggering rollback. Format: duration string like '5m', '30s'. Default: '5m' (five minutes).
 	SplitTimeout time.Duration `json:"split_timeout,omitempty,omitzero"`
-	Storage      StorageConfig `json:"storage"`
+
+	// SplitFinalizeGracePeriod Minimum continuous readiness duration required before finalizing a split. Format: duration string like '15s', '1m'. Default: '15s'.
+	SplitFinalizeGracePeriod time.Duration `json:"split_finalize_grace_period,omitempty,omitzero"`
+	Storage                  StorageConfig `json:"storage"`
 
 	// SwarmMode Bypasses Raft consensus for shards, using direct writes instead. Useful for development and testing with a single node.
 	SwarmMode bool                `json:"swarm_mode,omitempty,omitzero"`
