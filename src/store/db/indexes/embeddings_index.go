@@ -1568,22 +1568,16 @@ func (ei *EmbeddingIndex) Open(
 				return nil
 			}
 
-			// Determine skip point based on whether we're using an enricher
-			skipPoint := func(userKey []byte) bool {
-				return !bytes.HasSuffix(userKey, ei.embedderSuffix)
-			}
-			if ei.embedderConf == nil {
-				skipPoint = func(userKey []byte) bool {
-					return !bytes.HasSuffix(userKey, storeutils.DBRangeStart)
-				}
-			}
-
 			var lastKey []byte
 
 			err = storeutils.Scan(ei.egCtx, ei.db, storeutils.ScanOptions{
 				LowerBound: rebuildFrom,
 				UpperBound: ei.byteRange[1],
-				SkipPoint:  skipPoint,
+				// Embeddings are persisted on explicit embedding keys for both
+				// generated and user-provided vectors, including chunk embeddings.
+				SkipPoint: func(userKey []byte) bool {
+					return !bytes.HasSuffix(userKey, ei.embedderSuffix)
+				},
 			}, func(key []byte, value []byte) (bool, error) {
 				totalScanned++
 				lastKey = slices.Clone(key)
