@@ -675,8 +675,8 @@ github.com/gomlx/go-coreml v0.0.0-20260301010621-8fdf6ad8655e h1:dTMN+0LOhEKnNcx
 github.com/gomlx/go-coreml v0.0.0-20260301010621-8fdf6ad8655e/go.mod h1:iZG+LBo+jgnd44RMPJCVDfYmDaIH5P7mg5p2rVNoaIM=
 github.com/gomlx/go-coreml/gomlx v0.0.0-20260301010621-8fdf6ad8655e h1:+EMDGV26SOEbpzypqAICKVdX8h74bN+mNC8oQMAuWnk=
 github.com/gomlx/go-coreml/gomlx v0.0.0-20260301010621-8fdf6ad8655e/go.mod h1:R++KkcIEfEioRbwtJKJtdVZmjKvx35tmHWLgp868U9Q=
-github.com/gomlx/go-huggingface v0.3.3-0.20260316090437-1a6ca7ca09c4 h1:kB/beMIoOg6RsNeKe3MZpUWrILuNKyZB/I1Vj1K3FXU=
-github.com/gomlx/go-huggingface v0.3.3-0.20260316090437-1a6ca7ca09c4/go.mod h1:SlU1LotT8Qh70wHqxUch1osKv3d7UQkSGqwOizdmXa0=
+github.com/gomlx/go-huggingface v0.3.4 h1:WOBdx7o4J1VMrnJiUWVilmx7XrOsJsGUdAEDMAww0Oc=
+github.com/gomlx/go-huggingface v0.3.4/go.mod h1:0gLN+2vvgZ5TLGLe2KLvaW2m3Gr9bnmjoZEwoBOjmh4=
 github.com/gomlx/go-xla v0.2.2 h1:2YMzXAcmK8BvqFjRnUHHtE2QwKDEts2tRglcFcKhZj8=
 github.com/gomlx/go-xla v0.2.2/go.mod h1:T2CsL/E90te3k4qpuzlXv2uQU2FmLMLfUsRlAGqKSuI=
 github.com/google/certificate-transparency-go v1.3.2 h1:9ahSNZF2o7SYMaKaXhAumVEzXB2QaayzII9C8rv7v+A=

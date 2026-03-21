@@ -259,8 +259,8 @@ github.com/frankban/quicktest v1.14.6 h1:7Xjx+VpznH+oBnejlPUj8oUpdxnVs4f8XU8WnHk
 github.com/frankban/quicktest v1.14.6/go.mod h1:4ptaffx2x8+WTWXmUCuVU6aPUX1/Mz7zb5vbUoiM6w0=
 github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S9k=
 github.com/fsnotify/fsnotify v1.9.0/go.mod h1:8jBTzvmWwFyi3Pb8djgCCO5IBqzKJ/Jwo8TRcHyHii0=
-github.com/getkin/kin-openapi v0.133.0 h1:pJdmNohVIJ97r4AUFtEXRXwESr8b0bD721u/Tz6k8PQ=
-github.com/getkin/kin-openapi v0.133.0/go.mod h1:boAciF6cXk5FhPqe/NQeBTeenbjqU4LhWBf09ILVvWE=
+github.com/getkin/kin-openapi v0.134.0 h1:/L5+1+kfe6dXh8Ot/wqiTgUkjOIEJiC0bbYVziHB8rU=
+github.com/getkin/kin-openapi v0.134.0/go.mod h1:wK6ZLG/VgoETO9pcLJ/VmAtIcl/DNlMayNTb716EUxE=
 github.com/getsentry/sentry-go v0.43.0 h1:XbXLpFicpo8HmBDaInk7dum18G9KSLcjZiyUKS+hLW4=
 github.com/getsentry/sentry-go v0.43.0/go.mod h1:XDotiNZbgf5U8bPDUAfvcFmOnMQQceESxyKaObSssW0=
 github.com/ghemawat/stream v0.0.0-20171120220530-696b145b53b9 h1:r5GgOLGbza2wVHRzK7aAj6lWZjfbAwiu/RDCVOKjRyM=
@@ -323,8 +323,8 @@ github.com/gomlx/go-coreml v0.0.0-20260301010621-8fdf6ad8655e h1:dTMN+0LOhEKnNcx
 github.com/gomlx/go-coreml v0.0.0-20260301010621-8fdf6ad8655e/go.mod h1:iZG+LBo+jgnd44RMPJCVDfYmDaIH5P7mg5p2rVNoaIM=
 github.com/gomlx/go-coreml/gomlx v0.0.0-20260301010621-8fdf6ad8655e h1:+EMDGV26SOEbpzypqAICKVdX8h74bN+mNC8oQMAuWnk=
 github.com/gomlx/go-coreml/gomlx v0.0.0-20260301010621-8fdf6ad8655e/go.mod h1:R++KkcIEfEioRbwtJKJtdVZmjKvx35tmHWLgp868U9Q=
-github.com/gomlx/go-huggingface v0.3.3-0.20260316090437-1a6ca7ca09c4 h1:kB/beMIoOg6RsNeKe3MZpUWrILuNKyZB/I1Vj1K3FXU=
-github.com/gomlx/go-huggingface v0.3.3-0.20260316090437-1a6ca7ca09c4/go.mod h1:SlU1LotT8Qh70wHqxUch1osKv3d7UQkSGqwOizdmXa0=
+github.com/gomlx/go-huggingface v0.3.4 h1:WOBdx7o4J1VMrnJiUWVilmx7XrOsJsGUdAEDMAww0Oc=
+github.com/gomlx/go-huggingface v0.3.4/go.mod h1:0gLN+2vvgZ5TLGLe2KLvaW2m3Gr9bnmjoZEwoBOjmh4=
 github.com/gomlx/go-xla v0.2.2 h1:2YMzXAcmK8BvqFjRnUHHtE2QwKDEts2tRglcFcKhZj8=
 github.com/gomlx/go-xla v0.2.2/go.mod h1:T2CsL/E90te3k4qpuzlXv2uQU2FmLMLfUsRlAGqKSuI=
 github.com/google/dotprompt/go v0.0.0-20260227225921-0911cf9ecf0e h1:pGKaGaqARcyjXNhQ6ZZ89FldngwgpYifR+13CSkH5pY=
@@ -458,10 +458,10 @@ github.com/nlnwa/whatwg-url v0.6.2 h1:jU61lU2ig4LANydbEJmA2nPrtCGiKdtgT0rmMd2VZ/
 github.com/nlnwa/whatwg-url v0.6.2/go.mod h1:x0FPXJzzOEieQtsBT/AKvbiBbQ46YlL6Xa7m02M1ECk=
 github.com/oapi-codegen/runtime v1.3.0 h1:vyK1zc0gDWWXgk2xoQa4+X4RNNc5SL2RbTpJS/4vMYA=
 github.com/oapi-codegen/runtime v1.3.0/go.mod h1:kOdeacKy7t40Rclb1je37ZLFboFxh+YLy0zaPCMibPY=
-github.com/oasdiff/yaml v0.0.0-20250309154309-f31be36b4037 h1:G7ERwszslrBzRxj//JalHPu/3yz+De2J+4aLtSRlHiY=
-github.com/oasdiff/yaml v0.0.0-20250309154309-f31be36b4037/go.mod h1:2bpvgLBZEtENV5scfDFEtB/5+1M4hkQhDQrccEJ/qGw=
-github.com/oasdiff/yaml3 v0.0.0-20250309153720-d2182401db90 h1:bQx3WeLcUWy+RletIKwUIt4x3t8n2SxavmoclizMb8c=
-github.com/oasdiff/yaml3 v0.0.0-20250309153720-d2182401db90/go.mod h1:y5+oSEHCPT/DGrS++Wc/479ERge0zTFxaF8PbGKcg2o=
+github.com/oasdiff/yaml v0.0.1 h1:dPrn0F2PJ7HdzHPndJkArvB2Fw0cwgFdVUKCEkoFuds=
+github.com/oasdiff/yaml v0.0.1/go.mod h1:r8bgVgpWT5iIN/AgP0GljFvB6CicK+yL1nIAbm+8/QQ=
+github.com/oasdiff/yaml3 v0.0.1 h1:kReOSraQLTxuuGNX9aNeJ7tcsvUB2MS+iupdUrWe4Z0=
+github.com/oasdiff/yaml3 v0.0.1/go.mod h1:y5+oSEHCPT/DGrS++Wc/479ERge0zTFxaF8PbGKcg2o=
 github.com/ollama/ollama v0.18.2 h1:RsOY8oZ6TufRiPgsSlKJp4/V/X+oBREscUlEHZfd554=
 github.com/ollama/ollama v0.18.2/go.mod h1:tCX4IMV8DHjl3zY0THxuEkpWDZSOchJpzTuLACpMwFw=
 github.com/onsi/ginkgo/v2 v2.23.4 h1:ktYTpKJAVZnDT4VjxSbiBenUjmlL/5QkBEocaWXiQus=

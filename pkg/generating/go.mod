@@ -15,7 +15,7 @@ require (
 	github.com/antflydb/antfly/pkg/libaf v0.0.1
 	github.com/antflydb/termite/pkg/client v0.0.0
 	github.com/firebase/genkit/go v1.5.0
-	github.com/getkin/kin-openapi v0.133.0
+	github.com/getkin/kin-openapi v0.134.0
 	github.com/oapi-codegen/runtime v1.3.0
 	github.com/openai/openai-go v1.12.0
 	github.com/sethvargo/go-retry v0.3.0
@@ -62,8 +62,8 @@ require (
 	github.com/minio/minio-go/v7 v7.0.99 // indirect
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
 	github.com/oapi-codegen/oapi-codegen/v2 v2.5.1 // indirect
-	github.com/oasdiff/yaml v0.0.0-20250309154309-f31be36b4037 // indirect
-	github.com/oasdiff/yaml3 v0.0.0-20250309153720-d2182401db90 // indirect
+	github.com/oasdiff/yaml v0.0.1 // indirect
+	github.com/oasdiff/yaml3 v0.0.1 // indirect
 	github.com/pdfcpu/pdfcpu v0.11.1 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
