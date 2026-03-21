@@ -1217,6 +1217,7 @@ func (idx *HBCIndex) insertIntoTree(
 				for i := range node.Centroid {
 					node.Centroid[i] = node.Centroid[i]*(nf-1)/nf + q.Transformed()[i]/nf
 				}
+				idx.normalizeCentroidForCosine(node.Centroid)
 			}
 			if err := idx.saveNode(batch, cacheBatch, node, q.Transformed()); err != nil {
 				return fmt.Errorf("saving node: %w", err)
@@ -1407,6 +1408,7 @@ func (idx *HBCIndex) splitLeaf(
 		}
 		vec.AddFloat32(newRoot.Centroid, node2.Centroid)
 		vec.ScaleFloat32(0.5, newRoot.Centroid)
+		idx.normalizeCentroidForCosine(newRoot.Centroid)
 
 		node1.Parent = newRoot.ID
 		node1.Level = leaf.Level + 1
@@ -1581,6 +1583,7 @@ func (idx *HBCIndex) splitInternal(
 		}
 		vec.AddFloat32(newRoot.Centroid, node2.Centroid)
 		vec.ScaleFloat32(0.5, newRoot.Centroid)
+		idx.normalizeCentroidForCosine(newRoot.Centroid)
 
 		node1.Parent = newRoot.ID
 		node2.Parent = newRoot.ID
@@ -1662,6 +1665,12 @@ func (idx *HBCIndex) TransformVector(original vector.T, randomized vector.T) vec
 		vec.NormalizeFloat32(randomized)
 	}
 	return randomized
+}
+
+func (idx *HBCIndex) normalizeCentroidForCosine(centroid vector.T) {
+	if idx.config.DistanceMetric == vector.DistanceMetric_Cosine {
+		vec.NormalizeFloat32(centroid)
+	}
 }
 
 // UnTransformVector inverts the random orthogonal transformation performed by
@@ -2184,6 +2193,7 @@ func (idx *HBCIndex) recomputeLeafCentroid(batch pebble.Reader, leaf *HBCNode) e
 		vec.AddFloat32(leaf.Centroid, tempVec)
 	}
 	vec.ScaleFloat32(1/float32(len(leaf.Members)), leaf.Centroid)
+	idx.normalizeCentroidForCosine(leaf.Centroid)
 	return nil
 }
 
@@ -2205,6 +2215,7 @@ func (idx *HBCIndex) recomputeInternalCentroid(batch pebble.Reader, cacheBatch n
 		vec.AddFloat32(node.Centroid, child.Centroid)
 	}
 	vec.ScaleFloat32(1/float32(len(node.Children)), node.Centroid)
+	idx.normalizeCentroidForCosine(node.Centroid)
 	return nil
 }
 
