@@ -17,11 +17,14 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/ajroetker/go-highway/hwy/contrib/vec"
 	"github.com/antflydb/antfly/lib/pebbleutils"
 	"github.com/antflydb/antfly/lib/schema"
 	"github.com/antflydb/antfly/lib/types"
@@ -667,6 +670,118 @@ func TestBatch_EmbeddingIndexedInVectorIndex(t *testing.T) {
 
 	// The first result should be our key (without suffix)
 	assert.Equal(t, string(key), searchResp.Hits[0].ID)
+}
+
+func TestBatch_CosineEmbeddingsIndexAcceptsNormalizedVectorsAcrossInternalSplits(t *testing.T) {
+	const (
+		indexName  = "test_cosine_idx"
+		numVectors = 20_000
+		dims       = 32
+		batchSize  = 250
+	)
+
+	dir := t.TempDir()
+	lg := zaptest.NewLogger(t)
+
+	db := &DBImpl{
+		logger: lg,
+	}
+	require.NoError(t, db.Open(dir, false, nil, types.Range{nil, []byte{0xFF}}))
+	defer db.Close()
+	defer os.RemoveAll(dir)
+
+	tableSchema := &schema.TableSchema{
+		DefaultType: "default",
+		DocumentSchemas: map[string]schema.DocumentSchema{
+			"default": {
+				Schema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"content": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+
+	indexManager, err := NewIndexManager(
+		lg,
+		&common.Config{},
+		db.pdb,
+		dir,
+		tableSchema,
+		types.Range{nil, []byte{0xFF}},
+		nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetIndexManager(indexManager))
+
+	idxCfg := indexes.NewEmbeddingsConfig(indexName, indexes.EmbeddingsIndexConfig{
+		Dimension:      dims,
+		Field:          "content",
+		DistanceMetric: indexes.DistanceMetricCosine,
+	})
+	require.NoError(t, indexManager.Register(indexName, false, *idxCfg))
+	require.NoError(t, indexManager.Start(false))
+
+	rng := rand.New(rand.NewPCG(42, 1024))
+	for start := 0; start < numVectors; start += batchSize {
+		end := min(start+batchSize, numVectors)
+		writes := make([][2][]byte, 0, end-start)
+		for i := start; i < end; i++ {
+			embedding := make([]float32, dims)
+			for j := range embedding {
+				embedding[j] = rng.Float32()*2 - 1
+			}
+			vec.NormalizeFloat32(embedding)
+
+			docBytes, err := json.Marshal(map[string]any{
+				"content": fmt.Sprintf("document %d", i),
+				"_embeddings": map[string]any{
+					indexName: embedding,
+				},
+			})
+			require.NoError(t, err)
+			writes = append(writes, [2][]byte{
+				[]byte(fmt.Sprintf("doc/%05d", i)),
+				docBytes,
+			})
+		}
+
+		err := db.Batch(t.Context(), writes, nil, Op_SyncLevelEmbeddings)
+		if err != nil && !errors.Is(err, ErrPartialSuccess) {
+			require.NoError(t, err)
+		}
+	}
+
+	require.Eventually(t, func() bool {
+		_, _, indexStats, err := db.Stats()
+		if err != nil {
+			t.Logf("db.Stats error: %v", err)
+			return false
+		}
+		stats, ok := indexStats[indexName]
+		if !ok {
+			t.Logf("index stats for %s not available yet", indexName)
+			return false
+		}
+		embStats, err := stats.AsEmbeddingsIndexStats()
+		if err != nil {
+			t.Logf("embeddings stats decode error: %v", err)
+			return false
+		}
+		if embStats.TotalIndexed < uint64(numVectors) {
+			t.Logf("indexed %d/%d vectors", embStats.TotalIndexed, numVectors)
+			return false
+		}
+		return true
+	}, 60*time.Second, 100*time.Millisecond)
+
+	for _, key := range []string{"doc/00000", "doc/10000", "doc/19999"} {
+		doc, err := db.Get(context.Background(), []byte(key))
+		require.NoError(t, err)
+		require.NotNil(t, doc)
+	}
 }
 
 func TestBatch_EmbeddingTypeConversions(t *testing.T) {
