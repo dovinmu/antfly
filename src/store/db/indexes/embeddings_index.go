@@ -486,7 +486,7 @@ func (s *EmbeddingIndex) Search(ctx context.Context, query any) (any, error) {
 		)
 	}
 	if searchRequest.RerankPolicy == nil {
-		policy := vectorindex.RerankPolicyAuto
+		policy := vectorindex.RerankPolicyBoundary
 		searchRequest.RerankPolicy = &policy
 	}
 	s.resolveSearchEffort(searchRequest)

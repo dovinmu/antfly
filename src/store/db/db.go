@@ -4007,6 +4007,10 @@ func (s *DBImpl) Search(ctx context.Context, encodedReqest []byte) (resp []byte,
 					FilterIDs:     effectiveFilterIDs,
 					Embedding:     vectorReq,
 				}
+				if searchRequest.RerankerConfig != nil {
+					policy := vectorindex.RerankPolicyBoundary
+					req.RerankPolicy = &policy
+				}
 				resp, err := s.routeSearch(ctx, indexToSearch, req, searchRequest.FilterPrefix)
 				if err != nil {
 					return nil, fmt.Errorf("searching vectorindex: %w", err)

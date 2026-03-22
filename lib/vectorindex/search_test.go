@@ -69,13 +69,14 @@ func TestShouldAutoRerank(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "top k order ambiguous",
+			name: "top k order ambiguity alone does not rerank",
 			results: []*Result{
 				{ID: 1, Distance: 1.0, ErrorBound: 0.3},
 				{ID: 2, Distance: 1.2, ErrorBound: 0.3},
+				{ID: 3, Distance: 4.0, ErrorBound: 0.01},
 			},
 			k:    2,
-			want: true,
+			want: false,
 		},
 		{
 			name: "top k boundary ambiguous",
@@ -120,9 +121,95 @@ func TestShouldAutoRerank(t *testing.T) {
 	}
 }
 
+func TestSelectAutoRerankCandidates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		results       []*Result
+		k             int
+		distanceOver  *float32
+		distanceUnder *float32
+		want          []int
+	}{
+		{
+			name: "stable ordering and boundary",
+			results: []*Result{
+				{ID: 1, Distance: 1.0, ErrorBound: 0.01},
+				{ID: 2, Distance: 2.0, ErrorBound: 0.01},
+				{ID: 3, Distance: 3.0, ErrorBound: 0.01},
+			},
+			k:    2,
+			want: nil,
+		},
+		{
+			name: "top k order ambiguity alone does not rerank",
+			results: []*Result{
+				{ID: 1, Distance: 1.0, ErrorBound: 0.3},
+				{ID: 2, Distance: 1.2, ErrorBound: 0.3},
+				{ID: 3, Distance: 3.0, ErrorBound: 0.01},
+			},
+			k:    2,
+			want: nil,
+		},
+		{
+			name: "top k boundary ambiguous reranks boundary pair",
+			results: []*Result{
+				{ID: 1, Distance: 1.0, ErrorBound: 0.05},
+				{ID: 2, Distance: 2.0, ErrorBound: 0.05},
+				{ID: 3, Distance: 2.02, ErrorBound: 0.2},
+				{ID: 4, Distance: 4.0, ErrorBound: 0.01},
+			},
+			k:    2,
+			want: []int{1, 2},
+		},
+		{
+			name: "multiple boundary overlaps rerank only boundary set",
+			results: []*Result{
+				{ID: 1, Distance: 1.0, ErrorBound: 0.01},
+				{ID: 2, Distance: 2.0, ErrorBound: 0.05},
+				{ID: 3, Distance: 2.02, ErrorBound: 0.2},
+				{ID: 4, Distance: 2.04, ErrorBound: 0.2},
+				{ID: 5, Distance: 5.0, ErrorBound: 0.01},
+			},
+			k:    2,
+			want: []int{1, 2, 3},
+		},
+		{
+			name: "distance over threshold ambiguity reranks retained set",
+			results: []*Result{
+				{ID: 1, Distance: 1.0, ErrorBound: 0.2},
+				{ID: 2, Distance: 2.0, ErrorBound: 0.2},
+			},
+			k:            1,
+			distanceOver: f32(1.1),
+			want:         []int{0, 1},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(
+				t,
+				tt.want,
+				selectAutoRerankCandidates(tt.results, tt.k, tt.distanceOver, tt.distanceUnder),
+			)
+		})
+	}
+}
+
 func TestSearchInContextPropagatesErrorBound(t *testing.T) {
 	t.Parallel()
 
+	debug := &SearchDebugInfo{
+		ResolvedRerankPolicy: RerankPolicyBoundary,
+		RerankCandidateCount: 1,
+		ApproxTop: []SearchDebugHit{
+			{ID: 7, Distance: 1.25, ErrorBound: 0.15, LowerBound: 1.10, UpperBound: 1.40},
+		},
+	}
 	idx := &stubVectorIndex{
 		name:  "stub",
 		total: 1,
@@ -134,10 +221,44 @@ func TestSearchInContextPropagatesErrorBound(t *testing.T) {
 	result, err := SearchInContext(context.Background(), idx, &SearchRequest{
 		Embedding: vector.T{0, 1},
 		K:         1,
+		Debug:     debug,
 	})
 	require.NoError(t, err)
 	require.Len(t, result.Hits, 1)
 	assert.Equal(t, float32(1.25), result.Hits[0].Distance)
 	assert.Equal(t, float32(0.15), result.Hits[0].ErrorBound)
 	assert.Equal(t, "doc:7", result.Hits[0].ID)
+	require.NotNil(t, result.Debug)
+	assert.Equal(t, RerankPolicyBoundary, result.Debug.ResolvedRerankPolicy)
+	assert.Equal(t, 1, result.Debug.RerankCandidateCount)
+	require.Len(t, result.Debug.ApproxTop, 1)
+	assert.Equal(t, uint64(7), result.Debug.ApproxTop[0].ID)
+}
+
+func TestPopulateApproxSearchDebug(t *testing.T) {
+	t.Parallel()
+
+	debug := &SearchDebugInfo{}
+	results := []*Result{
+		{ID: 1, Distance: 1.0, ErrorBound: 0.2},
+		{ID: 2, Distance: 1.15, ErrorBound: 0.2},
+		{ID: 3, Distance: 1.4, ErrorBound: 0.4},
+	}
+
+	populateApproxSearchDebug(debug, results, 2, nil, nil, RerankPolicyBoundary)
+
+	assert.Equal(t, RerankPolicyBoundary, debug.ResolvedRerankPolicy)
+	assert.Equal(t, 3, debug.ApproxCandidateCount)
+	assert.Equal(t, 2, debug.TopKCount)
+	require.Len(t, debug.ApproxTop, 2)
+	assert.Equal(t, uint64(1), debug.ApproxTop[0].ID)
+	assert.Equal(t, float32(0.8), debug.ApproxTop[0].LowerBound)
+	assert.Equal(t, float32(1.2), debug.ApproxTop[0].UpperBound)
+	assert.Equal(t, 1, debug.AmbiguousTopKPairs)
+	assert.Equal(t, 1, debug.AmbiguousBoundaryPairs)
+	require.NotNil(t, debug.ClosestPairTopK)
+	assert.True(t, debug.ClosestPairTopK.Overlaps)
+	require.NotNil(t, debug.BoundaryPair)
+	assert.Equal(t, uint64(2), debug.BoundaryPair.Left.ID)
+	assert.Equal(t, uint64(3), debug.BoundaryPair.Right.ID)
 }

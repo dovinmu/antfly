@@ -27,9 +27,9 @@ import (
 type RerankPolicy string
 
 const (
-	RerankPolicyNever  RerankPolicy = "never"
-	RerankPolicyAuto   RerankPolicy = "auto"
-	RerankPolicyAlways RerankPolicy = "always"
+	RerankPolicyNever    RerankPolicy = "never"
+	RerankPolicyBoundary RerankPolicy = "boundary"
+	RerankPolicyAlways   RerankPolicy = "always"
 )
 
 type SearchRequest struct {
@@ -55,6 +55,9 @@ type SearchRequest struct {
 	// candidates after approximate search.
 	// nil uses the index default.
 	RerankPolicy *RerankPolicy `json:"rerank_policy,omitempty"`
+
+	// Debug, when non-nil, is populated with search diagnostics.
+	Debug *SearchDebugInfo `json:"debug,omitempty"`
 
 	FilterPrefix []byte   `json:"filter_prefix,omitempty"`
 	ExcludeIDs   []uint64 `json:"exclude_ids,omitempty"`
@@ -87,11 +90,12 @@ func (ss *SearchStatus) Merge(other *SearchStatus) {
 }
 
 type SearchResult struct {
-	Took    time.Duration  `json:"took,omitempty"`
-	Hits    []*SearchHit   `json:"hits,omitempty"`
-	Status  *SearchStatus  `json:"status,omitempty"`
-	Request *SearchRequest `json:"request,omitempty"`
-	Total   uint64         `json:"total,omitempty"`
+	Took    time.Duration    `json:"took,omitempty"`
+	Hits    []*SearchHit     `json:"hits,omitempty"`
+	Status  *SearchStatus    `json:"status,omitempty"`
+	Request *SearchRequest   `json:"request,omitempty"`
+	Total   uint64           `json:"total,omitempty"`
+	Debug   *SearchDebugInfo `json:"debug,omitempty"`
 }
 
 type SearchHit struct {
@@ -102,6 +106,40 @@ type SearchHit struct {
 	ErrorBound float32        `json:"error_bound,omitempty"`
 	Score      float32        `json:"score,omitempty"`
 	Fields     map[string]any `json:"fields,omitempty"`
+}
+
+type SearchDebugHit struct {
+	ID         uint64  `json:"id,omitempty"`
+	Distance   float32 `json:"distance,omitempty"`
+	ErrorBound float32 `json:"error_bound,omitempty"`
+	LowerBound float32 `json:"lower_bound,omitempty"`
+	UpperBound float32 `json:"upper_bound,omitempty"`
+}
+
+type SearchDebugPair struct {
+	Left        SearchDebugHit `json:"left"`
+	Right       SearchDebugHit `json:"right"`
+	DistanceGap float32        `json:"distance_gap,omitempty"`
+	IntervalGap float32        `json:"interval_gap,omitempty"`
+	Overlaps    bool           `json:"overlaps,omitempty"`
+}
+
+type SearchDebugInfo struct {
+	ResolvedRerankPolicy       RerankPolicy     `json:"resolved_rerank_policy,omitempty"`
+	ExactRerank                bool             `json:"exact_rerank,omitempty"`
+	RerankCandidateCount       int              `json:"rerank_candidate_count,omitempty"`
+	ApproxCandidateCount       int              `json:"approx_candidate_count,omitempty"`
+	TopKCount                  int              `json:"top_k_count,omitempty"`
+	AmbiguousTopKPairs         int              `json:"ambiguous_top_k_pairs,omitempty"`
+	AmbiguousBoundaryPairs     int              `json:"ambiguous_boundary_pairs,omitempty"`
+	AmbiguousDistanceOverHits  int              `json:"ambiguous_distance_over_hits,omitempty"`
+	AmbiguousDistanceUnderHits int              `json:"ambiguous_distance_under_hits,omitempty"`
+	MinDistanceGapTopK         float32          `json:"min_distance_gap_top_k,omitempty"`
+	MinIntervalGapTopK         float32          `json:"min_interval_gap_top_k,omitempty"`
+	ClosestPairTopK            *SearchDebugPair `json:"closest_pair_top_k,omitempty"`
+	BoundaryPair               *SearchDebugPair `json:"boundary_pair,omitempty"`
+	ApproxTop                  []SearchDebugHit `json:"approx_top,omitempty"`
+	ExactTop                   []SearchDebugHit `json:"exact_top,omitempty"`
 }
 
 func (sr *SearchResult) Merge(other *SearchResult) {
@@ -145,5 +183,6 @@ func SearchInContext(
 		},
 		Request: searchRequest,
 		Took:    time.Since(startTime),
+		Debug:   searchRequest.Debug,
 	}, err
 }

@@ -344,7 +344,7 @@ func TestEmbeddingIndex_Search(t *testing.T) {
 	require.True(t, ok)
 	assert.NotNil(t, searchResp.Hits)
 	require.NotNil(t, searchReq.RerankPolicy)
-	assert.Equal(t, vectorindex.RerankPolicyAuto, *searchReq.RerankPolicy)
+	assert.Equal(t, vectorindex.RerankPolicyBoundary, *searchReq.RerankPolicy)
 
 	// Test invalid requests
 	_, err = ei.Search(ctx, nil)
