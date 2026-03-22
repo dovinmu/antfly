@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 type scenarioReplayFn func(context.Context, []ScenarioAction) error
+
+var failureReductionTimeout = 30 * time.Second
 
 func reduceScenarioActions(
 	ctx context.Context,
@@ -126,5 +129,11 @@ func reduceActionsForError[T any](
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return nil, ctx.Err()
 	}
+	return reducer(ctx)
+}
+
+func runFailureReduction(reducer func(context.Context) ([]ScenarioAction, error)) ([]ScenarioAction, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), failureReductionTimeout)
+	defer cancel()
 	return reducer(ctx)
 }

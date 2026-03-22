@@ -929,7 +929,9 @@ func (r *randomScenarioRunner) wrapErr(action string, err error) error {
 	var reduced []ScenarioAction
 	if r.reduceFailures {
 		var reduceErr error
-		reduced, reduceErr = ReduceRandomScenarioFailure(context.Background(), r.cfg, actions, category)
+		reduced, reduceErr = runFailureReduction(func(ctx context.Context) ([]ScenarioAction, error) {
+			return ReduceRandomScenarioFailure(ctx, r.cfg, actions, category)
+		})
 		if reduceErr != nil {
 			r.h.recordEvent("reduce", "failed: %v", reduceErr)
 		}

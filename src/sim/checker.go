@@ -736,13 +736,17 @@ func (c *Checker) isSplitActive(status *store.ShardStatus) bool {
 	if status == nil {
 		return false
 	}
-	if status.SplitState != nil {
+	if splitStateActive(status.SplitState) {
 		return true
 	}
 	if status.State.Transitioning() || status.State == store.ShardState_SplitOffPreSnap {
 		return true
 	}
 	return status.SplitReplayRequired && !status.SplitCutoverReady
+}
+
+func splitStateActive(state *storedb.SplitState) bool {
+	return state != nil && state.GetPhase() != storedb.SplitState_PHASE_NONE
 }
 
 func mergeActive(status *store.ShardStatus) bool {

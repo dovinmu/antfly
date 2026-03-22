@@ -78,6 +78,7 @@ type StoreDB struct {
 	splitReplayMu            sync.Mutex
 
 	proposalQueue *inflight.DedupeQueue
+	backgroundWG  sync.WaitGroup
 
 	// TODO (ajr) Where to store this?
 	created time.Time
@@ -154,8 +155,15 @@ func NewStoreDB(
 		}
 	}
 	// read commits from raft into kvStore map until error
-	go s.readCommits(ctx, commitC, errorC)
-	go func() { _ = s.proposalDequeuer(ctx) }()
+	s.backgroundWG.Add(2)
+	go func() {
+		defer s.backgroundWG.Done()
+		s.readCommits(ctx, commitC, errorC)
+	}()
+	go func() {
+		defer s.backgroundWG.Done()
+		_ = s.proposalDequeuer(ctx)
+	}()
 	// In the case of a restart we need to make sure the byteRange is correct
 	var err error
 	s.byteRange, err = s.coreDB.GetRange()
@@ -2370,10 +2378,11 @@ func (s *StoreDB) CloseDB() error {
 	if s.splitReplayCancel != nil {
 		s.splitReplayCancel()
 	}
+	s.proposalQueue.Close()
+	s.backgroundWG.Wait()
 	if err := s.coreDB.Close(); err != nil {
 		return fmt.Errorf("closing db: %w", err)
 	}
-	s.proposalQueue.Close()
 	return nil
 }
 

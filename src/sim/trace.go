@@ -242,7 +242,7 @@ func computeClusterDigest(snapshot *ClusterSnapshot, note string) (ClusterDigest
 			lead = types.ID(status.RaftStatus.Lead).String()
 		}
 		splitPhase := ""
-		if status.SplitState != nil {
+		if splitStateActive(status.SplitState) {
 			splitPhase = status.SplitState.GetPhase().String()
 			activeSplits++
 		} else if status.State.Transitioning() ||
