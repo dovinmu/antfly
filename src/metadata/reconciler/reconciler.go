@@ -365,16 +365,33 @@ func (r *Reconciler) getSplitFinalizeGracePeriod() time.Duration {
 	return 15 * time.Second
 }
 
-func (r *Reconciler) getAutoSplitPerTableLimit() int {
-	if r.config.AutoSplitPerTableLimit > 0 {
-		return r.config.AutoSplitPerTableLimit
+func (r *Reconciler) getMinShardSizeBytes() uint64 {
+	if r.config.MinShardSizeBytes > 0 {
+		return r.config.MinShardSizeBytes
+	}
+	if r.config.MaxShardSizeBytes == 0 {
+		return 0
+	}
+	return max(r.config.MaxShardSizeBytes/4, 1)
+}
+
+func (r *Reconciler) getMinShardsPerTable() uint64 {
+	if r.config.MinShardsPerTable > 0 {
+		return r.config.MinShardsPerTable
 	}
 	return 1
 }
 
-func (r *Reconciler) getAutoSplitClusterLimit() int {
-	if r.config.AutoSplitClusterLimit > 0 {
-		return r.config.AutoSplitClusterLimit
+func (r *Reconciler) getAutoRangeTransitionPerTableLimit() int {
+	if r.config.AutoRangeTransitionPerTableLimit > 0 {
+		return r.config.AutoRangeTransitionPerTableLimit
+	}
+	return 1
+}
+
+func (r *Reconciler) getAutoRangeTransitionClusterLimit() int {
+	if r.config.AutoRangeTransitionClusterLimit > 0 {
+		return r.config.AutoRangeTransitionClusterLimit
 	}
 	return 1
 }
@@ -407,6 +424,14 @@ func (r *Reconciler) isSplitTimedOut(splitState *db.SplitState) bool {
 	return r.timeProvider.Now().Sub(startedAt) > r.getSplitTimeout()
 }
 
+func (r *Reconciler) isMergeTimedOut(mergeState *db.MergeState) bool {
+	if mergeState == nil || mergeState.GetStartedAtUnixNanos() == 0 {
+		return false
+	}
+	startedAt := time.Unix(0, mergeState.GetStartedAtUnixNanos())
+	return r.timeProvider.Now().Sub(startedAt) > r.getSplitTimeout()
+}
+
 // computeSplitStateActions computes split/merge state advancement actions
 func (r *Reconciler) computeSplitStateActions(current CurrentClusterState, desired DesiredClusterState) []SplitStateAction {
 	actions := []SplitStateAction{}
@@ -426,6 +451,23 @@ func (r *Reconciler) computeSplitStateActions(current CurrentClusterState, desir
 
 	for _, shardID := range sortedShardIDs {
 		shardStatus := desired.Shards[shardID]
+
+		// Check for zero-downtime split state transitions (based on Raft-replicated SplitState)
+		if mergeState := shardStatus.MergeState; mergeState != nil {
+			action := r.computeMergeStatePhaseActionWithDesired(
+				shardID,
+				shardStatus,
+				mergeState,
+				currentShardStatuses,
+				desired.Shards,
+			)
+			if action != nil {
+				actions = append(actions, *action)
+			}
+			if mergeState.GetPhase() != db.MergeState_PHASE_NONE {
+				continue
+			}
+		}
 
 		// Check for zero-downtime split state transitions (based on Raft-replicated SplitState)
 		if splitState := shardStatus.SplitState; splitState != nil {
@@ -471,12 +513,7 @@ func (r *Reconciler) computeSplitStateActions(current CurrentClusterState, desir
 			})
 
 		case store.ShardState_PreMerge:
-			actions = append(actions, SplitStateAction{
-				ShardID:     shardID,
-				State:       shardStatus.State,
-				Action:      SplitStateActionMerge,
-				TargetRange: shardStatus.ByteRange,
-			})
+			continue
 
 		case store.ShardState_PreSplit:
 			// Find the corresponding splitting shard
@@ -537,6 +574,109 @@ func (r *Reconciler) computeSplitStateActions(current CurrentClusterState, desir
 	}
 
 	return actions
+}
+
+func (r *Reconciler) computeMergeStatePhaseActionWithDesired(
+	shardID types.ID,
+	shardStatus *store.ShardStatus,
+	mergeState *db.MergeState,
+	currentShards map[types.ID]*store.ShardStatus,
+	desiredShards map[types.ID]*store.ShardStatus,
+) *SplitStateAction {
+	if mergeState == nil {
+		return nil
+	}
+	receiverShardID := types.ID(mergeState.GetReceiverShardId())
+	if receiverShardID == 0 {
+		return nil
+	}
+	donorShardID := types.ID(mergeState.GetDonorShardId())
+	if donorShardID == 0 {
+		return nil
+	}
+	if receiverShardID != shardID {
+		// Donor shards replicate merge metadata so they can enforce write gates,
+		// but only the receiver should drive the copy/catchup/finalize workflow.
+		return nil
+	}
+	if mergeState.GetPhase() != db.MergeState_PHASE_NONE && r.isMergeTimedOut(mergeState) {
+		return &SplitStateAction{
+			ShardID:      shardID,
+			MergeShardID: donorShardID,
+			State:        shardStatus.State,
+			Action:       SplitStateActionRollbackMerge,
+		}
+	}
+	donorStatus := desiredShards[donorShardID]
+	if donorStatus == nil {
+		return nil
+	}
+
+	switch mergeState.GetPhase() {
+	case db.MergeState_PHASE_PREPARE, db.MergeState_PHASE_COPYING:
+		if mergeState.GetAcceptDonorRange() && !mergeState.GetCopyCompleted() {
+			return &SplitStateAction{
+				ShardID:      shardID,
+				MergeShardID: donorShardID,
+				State:        shardStatus.State,
+				Action:       SplitStateActionCopyMerge,
+				TargetRange:  [2][]byte{mergeState.GetReceiverRangeStart(), mergeState.GetDonorRangeEnd()},
+			}
+		}
+		return &SplitStateAction{
+			ShardID:      shardID,
+			MergeShardID: donorShardID,
+			State:        shardStatus.State,
+			Action:       SplitStateActionCatchUpMerge,
+		}
+
+	case db.MergeState_PHASE_CATCHUP:
+		if mergeState.GetReplaySeq() < donorStatus.MergeDeltaSeq {
+			return &SplitStateAction{
+				ShardID:      shardID,
+				MergeShardID: donorShardID,
+				State:        shardStatus.State,
+				Action:       SplitStateActionCatchUpMerge,
+			}
+		}
+		return &SplitStateAction{
+			ShardID:      shardID,
+			MergeShardID: donorShardID,
+			State:        shardStatus.State,
+			Action:       SplitStateActionSealMerge,
+		}
+
+	case db.MergeState_PHASE_FINALIZING:
+		if shardStatus.IsReadyForMergeCutover() {
+			return &SplitStateAction{
+				ShardID:      shardID,
+				MergeShardID: donorShardID,
+				State:        shardStatus.State,
+				Action:       SplitStateActionFinalizeMerge,
+				TargetRange:  [2][]byte{mergeState.GetReceiverRangeStart(), mergeState.GetDonorRangeEnd()},
+			}
+		}
+		if mergeState.GetFinalSeq() > 0 && mergeState.GetReplaySeq() < mergeState.GetFinalSeq() {
+			return &SplitStateAction{
+				ShardID:      shardID,
+				MergeShardID: donorShardID,
+				State:        shardStatus.State,
+				Action:       SplitStateActionCatchUpMerge,
+			}
+		}
+		return nil
+
+	case db.MergeState_PHASE_ROLLING_BACK:
+		return &SplitStateAction{
+			ShardID:      shardID,
+			MergeShardID: donorShardID,
+			State:        shardStatus.State,
+			Action:       SplitStateActionRollbackMerge,
+		}
+	default:
+		_ = currentShards
+		return nil
+	}
 }
 
 // computeSplitStatePhaseAction computes the action needed for a shard based on its SplitState.Phase.
@@ -831,12 +971,14 @@ func (r *Reconciler) computeSplitAndMergeTransitions(
 		r.config.ReplicationFactor,
 		desired.Shards,
 		r.config.MaxShardSizeBytes,
+		r.getMinShardSizeBytes(),
+		r.getMinShardsPerTable(),
 		r.config.MaxShardsPerTable,
 		r.shardCooldown,
 		r.shardOps.GetMedianKey,
 		r.timeProvider,
-		r.getAutoSplitPerTableLimit(),
-		r.getAutoSplitClusterLimit(),
+		r.getAutoRangeTransitionPerTableLimit(),
+		r.getAutoRangeTransitionClusterLimit(),
 	)
 }
 
@@ -1015,36 +1157,46 @@ func computeSplitTransitions(
 	replicationFactor uint64,
 	shards map[types.ID]*store.ShardStatus,
 	maxShardSizeBytes uint64,
+	minShardSizeBytes uint64,
+	minShardsPerTable uint64,
 	maxShardsPerTable uint64,
 	shardCooldown map[types.ID]time.Time,
 	getMedianKey MedianKeyGetter,
 	timeProvider TimeProvider,
-	autoSplitPerTableLimit int,
-	autoSplitClusterLimit int,
+	autoRangeTransitionPerTableLimit int,
+	autoRangeTransitionClusterLimit int,
 ) ([]tablemgr.SplitTransition, []tablemgr.MergeTransition) {
 	splits := []tablemgr.SplitTransition{}
 	merges := []tablemgr.MergeTransition{}
 
 	// Only do merges 1 at a time per table
 	tablesWithMerges := map[string]int{}
+	plannedRangeTransitionsByShard := make(map[types.ID]struct{})
 
 	// Track shards per table for split limiting
 	shardsPerTable := make(map[string]int)
 	for _, status := range shards {
 		shardsPerTable[status.Table]++
 	}
-	if autoSplitPerTableLimit <= 0 {
-		autoSplitPerTableLimit = 1
+	if minShardsPerTable == 0 {
+		minShardsPerTable = 1
 	}
-	if autoSplitClusterLimit <= 0 {
-		autoSplitClusterLimit = 1
+	if minShardSizeBytes == 0 && maxShardSizeBytes > 0 {
+		minShardSizeBytes = max(maxShardSizeBytes/4, 1)
 	}
-	activeSplitCount := countActiveAutoSplitWork(shards)
-	remainingAutoSplitBudget := max(autoSplitClusterLimit-activeSplitCount, 0)
-	autoSplitsPerTable := make(map[string]int)
+	if autoRangeTransitionPerTableLimit <= 0 {
+		autoRangeTransitionPerTableLimit = 1
+	}
+	if autoRangeTransitionClusterLimit <= 0 {
+		autoRangeTransitionClusterLimit = 1
+	}
+	activeTransitionCount := countActiveRangeTransitionWork(shards)
+	remainingAutoTransitionBudget := max(autoRangeTransitionClusterLimit-activeTransitionCount, 0)
+	autoTransitionsPerTable := make(map[string]int)
 
 	// Build list of candidate shards for split/merge
 	shardIDs := make([]types.ID, 0, len(shards))
+	now := timeProvider.Now()
 	for shardID, status := range shards {
 		// Skip shards in cooldown
 		if cooldownEnd, ok := shardCooldown[shardID]; ok {
@@ -1073,6 +1225,9 @@ func computeSplitTransitions(
 		if status.SplitState != nil && status.SplitState.GetPhase() != db.SplitState_PHASE_NONE {
 			continue
 		}
+		if status.MergeState != nil && status.MergeState.GetPhase() != db.MergeState_PHASE_NONE {
+			continue
+		}
 
 		// Skip split children that are still replaying parent deltas or are
 		// otherwise in split-only serving states. These shards are mid-cutover
@@ -1090,8 +1245,9 @@ func computeSplitTransitions(
 			continue
 		}
 
-		// Skip shards with stale stats (older than 1 minute)
-		if time.Since(status.ShardStats.Updated) > time.Minute {
+		// Skip shards with stale stats (older than 1 minute). Empty-only merges are
+		// still destructive, so they must also rely on fresh metadata.
+		if now.Sub(status.ShardStats.Updated) > time.Minute {
 			continue
 		}
 
@@ -1107,51 +1263,57 @@ func computeSplitTransitions(
 	})
 
 	// Process each candidate shard
-	for _, shardID := range shardIDs {
-		status := shards[shardID]
-		size := status.ShardStats.Storage.DiskSize
-
-		// Check if we've reached max shards for this table
-		if shardsPerTable[status.Table] >= int(maxShardsPerTable) { //nolint:gosec // G115: bounded value, cannot overflow in practice
+	for idx, shardID := range shardIDs {
+		if _, alreadyPlanned := plannedRangeTransitionsByShard[shardID]; alreadyPlanned {
 			continue
 		}
 
-		// Check for merge conditions (empty shard that's been around for a while)
-		// Note: Empty flag is checked before size check because empty shards may have DiskSize > 0
-		if status.ShardStats.Storage.Empty &&
-			time.Since(status.ShardStats.Created) > 5*time.Minute {
+		status := shards[shardID]
+		size := status.ShardStats.Storage.DiskSize
 
-			// Only allow 3 empty shards to be merged at once per table
+		// Check for automatic merge conditions on the adjacent pair to the right.
+		// The left/lower-range shard always survives so merge identity is deterministic.
+		if idx+1 < len(shardIDs) &&
+			remainingAutoTransitionBudget > 0 &&
+			autoTransitionsPerTable[status.Table] < autoRangeTransitionPerTableLimit &&
+			shardsPerTable[status.Table] > int(minShardsPerTable) { //nolint:gosec // G115: bounded value, cannot overflow in practice
+
+			// Only allow 3 automatic merges at once per table
 			if mergeCount, ok := tablesWithMerges[status.Table]; ok && mergeCount >= 3 {
-				continue
-			}
-
-			// Find an adjacent neighbor shard to merge with
-			var neighborShardID types.ID
-			for candidateID, candidateStatus := range shards {
-				// Skip if different table or same shard
-				if candidateStatus.Table != status.Table || candidateID == shardID {
-					continue
+			} else {
+				rightShardID := shardIDs[idx+1]
+				rightStatus := shards[rightShardID]
+				if rightStatus != nil &&
+					rightStatus.Table == status.Table &&
+					bytes.Equal(status.ByteRange[1], rightStatus.ByteRange[0]) &&
+					rightStatus.ShardStats != nil &&
+					rightStatus.ShardStats.Storage != nil {
+					if _, alreadyPlanned := plannedRangeTransitionsByShard[rightShardID]; !alreadyPlanned &&
+						now.Sub(status.ShardStats.Created) > 5*time.Minute &&
+						now.Sub(rightStatus.ShardStats.Created) > 5*time.Minute {
+						rightSize := rightStatus.ShardStats.Storage.DiskSize
+						if (size < minShardSizeBytes || rightSize < minShardSizeBytes) &&
+							size+rightSize < maxShardSizeBytes {
+							merges = append(merges, tablemgr.MergeTransition{
+								ShardID:      shardID,
+								MergeShardID: rightShardID,
+								TableName:    status.Table,
+							})
+							tablesWithMerges[status.Table]++
+							autoTransitionsPerTable[status.Table]++
+							remainingAutoTransitionBudget--
+							plannedRangeTransitionsByShard[shardID] = struct{}{}
+							plannedRangeTransitionsByShard[rightShardID] = struct{}{}
+							shardsPerTable[status.Table]--
+							continue
+						}
+					}
 				}
-
-				// Check if the shards are adjacent (byte ranges touch)
-				if bytes.Equal(candidateStatus.ByteRange[1], status.ByteRange[0]) ||
-					bytes.Equal(candidateStatus.ByteRange[0], status.ByteRange[1]) {
-					neighborShardID = candidateID
-					break
-				}
 			}
+		}
 
-			// Only create merge if we found a neighbor
-			if neighborShardID != 0 {
-				merges = append(merges, tablemgr.MergeTransition{
-					ShardID:      neighborShardID,
-					MergeShardID: shardID,
-					TableName:    status.Table,
-				})
-				tablesWithMerges[status.Table]++
-			}
-
+		// Check if we've reached max shards for this table
+		if shardsPerTable[status.Table] >= int(maxShardsPerTable) { //nolint:gosec // G115: bounded value, cannot overflow in practice
 			continue
 		}
 
@@ -1162,10 +1324,10 @@ func computeSplitTransitions(
 
 		// Check for split conditions (shard exceeds size threshold)
 		if size > maxShardSizeBytes {
-			if remainingAutoSplitBudget <= 0 {
+			if remainingAutoTransitionBudget <= 0 {
 				continue
 			}
-			if autoSplitsPerTable[status.Table] >= autoSplitPerTableLimit {
+			if autoTransitionsPerTable[status.Table] >= autoRangeTransitionPerTableLimit {
 				continue
 			}
 			// Get median key for splitting
@@ -1193,8 +1355,9 @@ func computeSplitTransitions(
 
 			// Increment shard count for this table
 			shardsPerTable[status.Table]++
-			autoSplitsPerTable[status.Table]++
-			remainingAutoSplitBudget--
+			autoTransitionsPerTable[status.Table]++
+			remainingAutoTransitionBudget--
+			plannedRangeTransitionsByShard[shardID] = struct{}{}
 
 			// Create split transition
 			splits = append(splits, tablemgr.SplitTransition{
@@ -1209,20 +1372,85 @@ func computeSplitTransitions(
 	return splits, merges
 }
 
-func countActiveAutoSplitWork(shards map[types.ID]*store.ShardStatus) int {
-	active := 0
+func findAdjacentShardCandidates(
+	shardID types.ID,
+	status *store.ShardStatus,
+	shards map[types.ID]*store.ShardStatus,
+	planned map[types.ID]struct{},
+	replicationFactor uint64,
+) (leftNeighborID, rightNeighborID types.ID) {
+	for candidateID, candidateStatus := range shards {
+		if candidateStatus == nil || candidateID == shardID || candidateStatus.Table != status.Table {
+			continue
+		}
+		if _, alreadyPlanned := planned[candidateID]; alreadyPlanned {
+			continue
+		}
+		if candidateStatus.State.Transitioning() {
+			continue
+		}
+		if candidateStatus.MergeState != nil &&
+			candidateStatus.MergeState.GetPhase() != db.MergeState_PHASE_NONE {
+			continue
+		}
+		if candidateStatus.SplitState != nil &&
+			candidateStatus.SplitState.GetPhase() != db.SplitState_PHASE_NONE {
+			continue
+		}
+		if candidateStatus.SplitReplayRequired && !candidateStatus.SplitCutoverReady {
+			continue
+		}
+		if candidateStatus.RaftStatus == nil || candidateStatus.RaftStatus.Voters == nil ||
+			uint64(len(candidateStatus.RaftStatus.Voters)) != replicationFactor ||
+			candidateStatus.RaftStatus.Lead == 0 {
+			continue
+		}
+		if candidateStatus.ShardStats == nil || candidateStatus.ShardStats.Storage == nil {
+			continue
+		}
+		if bytes.Equal(candidateStatus.ByteRange[1], status.ByteRange[0]) {
+			leftNeighborID = candidateID
+		}
+		if bytes.Equal(candidateStatus.ByteRange[0], status.ByteRange[1]) {
+			rightNeighborID = candidateID
+		}
+	}
+	return leftNeighborID, rightNeighborID
+}
+
+func countActiveRangeTransitionWork(shards map[types.ID]*store.ShardStatus) int {
+	activeKeys := make(map[string]struct{})
 	for _, status := range shards {
 		if status == nil {
 			continue
 		}
 		if status.SplitState != nil && status.SplitState.GetPhase() != db.SplitState_PHASE_NONE {
-			active++
+			key := fmt.Sprintf("split:%s:%d", status.ID, status.SplitState.GetNewShardId())
+			if status.SplitState.GetNewShardId() != 0 {
+				ids := []string{status.ID.String(), types.ID(status.SplitState.GetNewShardId()).String()}
+				slices.Sort(ids)
+				key = "splitpair:" + ids[0] + ":" + ids[1]
+			}
+			activeKeys[key] = struct{}{}
+			continue
+		}
+		if status.MergeState != nil && status.MergeState.GetPhase() != db.MergeState_PHASE_NONE {
+			ids := []string{status.ID.String(), types.ID(status.MergeState.GetDonorShardId()).String()}
+			if status.MergeState.GetReceiverShardId() != 0 {
+				ids[0] = types.ID(status.MergeState.GetReceiverShardId()).String()
+			}
+			slices.Sort(ids)
+			activeKeys["mergepair:"+ids[0]+":"+ids[1]] = struct{}{}
 			continue
 		}
 		switch status.State {
-		case store.ShardState_PreSplit, store.ShardState_Splitting, store.ShardState_SplittingOff, store.ShardState_SplitOffPreSnap:
-			active++
+		case store.ShardState_PreMerge,
+			store.ShardState_PreSplit,
+			store.ShardState_Splitting,
+			store.ShardState_SplittingOff,
+			store.ShardState_SplitOffPreSnap:
+			activeKeys[fmt.Sprintf("state:%s", status.ID)] = struct{}{}
 		}
 	}
-	return active
+	return len(activeKeys)
 }

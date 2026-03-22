@@ -10,6 +10,7 @@ import (
 
 	"github.com/antflydb/antfly/lib/types"
 	"github.com/antflydb/antfly/src/store"
+	storedb "github.com/antflydb/antfly/src/store/db"
 	"github.com/cespare/xxhash/v2"
 )
 
@@ -27,6 +28,7 @@ type ClusterDigest struct {
 	Shards        int       `json:"shards"`
 	HealthyStores int       `json:"healthy_stores"`
 	ActiveSplits  int       `json:"active_splits"`
+	ActiveMerges  int       `json:"active_merges"`
 }
 
 type TraceRecorder struct {
@@ -88,10 +90,61 @@ func (r *TraceRecorder) CompactTrace(maxEvents, maxDigests int) string {
 	if r == nil {
 		return ""
 	}
-	events := r.Events()
-	digests := r.Digests()
+	return compactTrace(r.Events(), r.Digests(), maxEvents, maxDigests, nil)
+}
+
+func (r *TraceRecorder) CompactTraceRetainKinds(maxEvents, maxDigests int, retainKinds ...string) string {
+	if r == nil {
+		return ""
+	}
+	retain := make(map[string]struct{}, len(retainKinds))
+	for _, kind := range retainKinds {
+		if kind == "" {
+			continue
+		}
+		retain[kind] = struct{}{}
+	}
+	return compactTrace(r.Events(), r.Digests(), maxEvents, maxDigests, retain)
+}
+
+func compactTrace(
+	events []TraceEvent,
+	digests []ClusterDigest,
+	maxEvents int,
+	maxDigests int,
+	retainKinds map[string]struct{},
+) string {
 	if maxEvents > 0 && len(events) > maxEvents {
-		events = events[len(events)-maxEvents:]
+		start := len(events) - maxEvents
+		tail := events[start:]
+		if len(retainKinds) > 0 {
+			retained := make([]TraceEvent, 0, len(retainKinds))
+			presentKinds := make(map[string]struct{}, len(tail))
+			for _, event := range tail {
+				presentKinds[event.Kind] = struct{}{}
+			}
+			for kind := range retainKinds {
+				if _, ok := presentKinds[kind]; ok {
+					continue
+				}
+				for i := start - 1; i >= 0; i-- {
+					if events[i].Kind == kind {
+						retained = append(retained, events[i])
+						break
+					}
+				}
+			}
+			if len(retained) > 0 {
+				slices.SortFunc(retained, func(a, b TraceEvent) int {
+					return a.At.Compare(b.At)
+				})
+				events = append(retained, tail...)
+			} else {
+				events = tail
+			}
+		} else {
+			events = tail
+		}
 	}
 	if maxDigests > 0 && len(digests) > maxDigests {
 		digests = digests[len(digests)-maxDigests:]
@@ -113,7 +166,7 @@ func (r *TraceRecorder) CompactTrace(maxEvents, maxDigests int) string {
 		parts = append(parts, "digests:")
 		for _, digest := range digests {
 			parts = append(parts, fmt.Sprintf(
-				"  %s note=%s hash=%s tables=%d shards=%d healthy=%d active_splits=%d",
+				"  %s note=%s hash=%s tables=%d shards=%d healthy=%d active_splits=%d active_merges=%d",
 				digest.At.Format(time.RFC3339Nano),
 				digest.Note,
 				digest.Hash,
@@ -121,6 +174,7 @@ func (r *TraceRecorder) CompactTrace(maxEvents, maxDigests int) string {
 				digest.Shards,
 				digest.HealthyStores,
 				digest.ActiveSplits,
+				digest.ActiveMerges,
 			))
 		}
 	}
@@ -140,6 +194,7 @@ func computeClusterDigest(snapshot *ClusterSnapshot, note string) (ClusterDigest
 		Peers      []string `json:"peers"`
 		Reported   []string `json:"reported"`
 		SplitPhase string   `json:"split_phase,omitempty"`
+		MergePhase string   `json:"merge_phase,omitempty"`
 		Flags      string   `json:"flags,omitempty"`
 	}
 	type storeDigest struct {
@@ -177,6 +232,7 @@ func computeClusterDigest(snapshot *ClusterSnapshot, note string) (ClusterDigest
 	slices.Sort(shardIDs)
 	shards := make([]shardDigest, 0, len(shardIDs))
 	activeSplits := 0
+	activeMerges := 0
 	for _, shardID := range shardIDs {
 		status := snapshot.Shards[shardID]
 		peers := peerSetStrings(status.Peers)
@@ -194,7 +250,16 @@ func computeClusterDigest(snapshot *ClusterSnapshot, note string) (ClusterDigest
 			status.SplitReplayRequired && !status.SplitCutoverReady {
 			activeSplits++
 		}
-		flags := splitFlags(status)
+		mergePhase := ""
+		if status.MergeState != nil {
+			mergePhase = status.MergeState.GetPhase().String()
+			if status.MergeState.GetPhase() != storedb.MergeState_PHASE_NONE {
+				activeMerges++
+			}
+		} else if status.State == store.ShardState_PreMerge {
+			activeMerges++
+		}
+		flags := transitionFlags(status)
 		shards = append(shards, shardDigest{
 			ID:         shardID.String(),
 			Table:      status.Table,
@@ -203,6 +268,7 @@ func computeClusterDigest(snapshot *ClusterSnapshot, note string) (ClusterDigest
 			Peers:      peers,
 			Reported:   reported,
 			SplitPhase: splitPhase,
+			MergePhase: mergePhase,
 			Flags:      flags,
 		})
 	}
@@ -256,6 +322,7 @@ func computeClusterDigest(snapshot *ClusterSnapshot, note string) (ClusterDigest
 		Shards:        len(snapshot.Shards),
 		HealthyStores: healthyStores,
 		ActiveSplits:  activeSplits,
+		ActiveMerges:  activeMerges,
 	}, nil
 }
 
@@ -273,6 +340,40 @@ func peerSetStrings(peerSet map[types.ID]struct{}) []string {
 		out = append(out, peerID.String())
 	}
 	return out
+}
+
+func transitionFlags(status *store.ShardStatus) string {
+	if status == nil {
+		return ""
+	}
+	flags := make([]string, 0, 8)
+	if status.HasSnapshot {
+		flags = append(flags, "snapshot")
+	}
+	if status.Initializing {
+		flags = append(flags, "initializing")
+	}
+	if status.SplitReplayRequired {
+		flags = append(flags, "replay_required")
+	}
+	if status.SplitCutoverReady {
+		flags = append(flags, "cutover_ready")
+	}
+	if status.MergeState != nil {
+		if status.MergeState.GetCopyCompleted() {
+			flags = append(flags, "merge_copy_done")
+		}
+		if status.MergeState.GetCaptureDeltas() {
+			flags = append(flags, "merge_capture")
+		}
+		if status.MergeState.GetAcceptDonorRange() {
+			flags = append(flags, "merge_accept")
+		}
+		if status.MergeState.GetDenyDonorWrites() {
+			flags = append(flags, "merge_deny_writes")
+		}
+	}
+	return strings.Join(flags, ",")
 }
 
 func splitFlags(status *store.ShardStatus) string {

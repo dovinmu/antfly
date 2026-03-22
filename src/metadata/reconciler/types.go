@@ -129,6 +129,10 @@ type ShardOperations interface {
 
 	// MergeRange merges a range into a shard
 	MergeRange(ctx context.Context, shardID types.ID, byteRange [2][]byte) error
+	SetMergeState(ctx context.Context, shardID types.ID, mergeState *db.MergeState) error
+	FinalizeMerge(ctx context.Context, shardID types.ID, byteRange [2][]byte) error
+	ExportRangeChunk(ctx context.Context, shardID types.ID, startKey, endKey, afterKey []byte, limit int) ([][2][]byte, []byte, bool, error)
+	ListMergeDeltaEntriesAfter(ctx context.Context, shardID types.ID, afterSeq uint64) ([]*db.MergeDeltaEntry, error)
 
 	// RollbackSplit rolls back a stuck split operation, restoring the original state.
 	// This clears the SplitState and removes shadow indexes.
@@ -182,6 +186,9 @@ type TableOperations interface {
 
 	// ReassignShardsForMerge reassigns shards for a merge transition
 	ReassignShardsForMerge(transition tablemgr.MergeTransition) (*store.ShardConfig, error)
+	PrepareShardsForMerge(transition tablemgr.MergeTransition) (*store.ShardConfig, error)
+	FinalizeShardsForMerge(transition tablemgr.MergeTransition) (*store.ShardConfig, error)
+	RollbackShardsForMerge(transition tablemgr.MergeTransition) (*store.ShardConfig, error)
 
 	// HasReallocationRequest checks if a manual reallocation has been requested
 	HasReallocationRequest(ctx context.Context) (bool, error)
@@ -217,6 +224,7 @@ type StoreOperations interface {
 	// This is called after PrepareSplit succeeds to ensure the SplitState is immediately
 	// visible to subsequent reconciliation runs, without waiting for heartbeat updates.
 	UpdateShardSplitState(ctx context.Context, shardID types.ID, splitState *db.SplitState) error
+	UpdateShardMergeState(ctx context.Context, shardID types.ID, mergeState *db.MergeState) error
 }
 
 // ============================================================================
@@ -227,17 +235,21 @@ type StoreOperations interface {
 type ReconciliationConfig struct {
 	ReplicationFactor   uint64
 	MaxShardSizeBytes   uint64
+	MinShardSizeBytes   uint64
+	MinShardsPerTable   uint64
 	MaxShardsPerTable   uint64
 	DisableShardAlloc   bool
 	ShardCooldownPeriod time.Duration
-	// AutoSplitPerTableLimit is the maximum number of new automatic split transitions
-	// that may be planned for a single table in one reconciliation cycle.
+	// AutoRangeTransitionPerTableLimit is the maximum number of new automatic range
+	// transitions (splits + merges) that may be planned for a single table in one
+	// reconciliation cycle.
 	// If zero, defaults to 1.
-	AutoSplitPerTableLimit int
-	// AutoSplitClusterLimit is the maximum number of in-flight automatic splits
-	// allowed cluster-wide. If the cluster is already at or above this budget,
-	// no new automatic splits will be planned. If zero, defaults to 1.
-	AutoSplitClusterLimit int
+	AutoRangeTransitionPerTableLimit int
+	// AutoRangeTransitionClusterLimit is the maximum number of in-flight automatic
+	// range transitions (splits + merges) allowed cluster-wide. If the cluster is
+	// already at or above this budget, no new automatic transitions will be planned.
+	// If zero, defaults to 1.
+	AutoRangeTransitionClusterLimit int
 	// SplitTimeout is the maximum duration for a split operation before triggering rollback.
 	// If zero, defaults to 5 minutes.
 	SplitTimeout time.Duration
@@ -355,6 +367,7 @@ const (
 // SplitStateAction represents a split/merge state advancement action
 type SplitStateAction struct {
 	ShardID      types.ID
+	MergeShardID types.ID
 	State        store.ShardState
 	Action       SplitStateActionType
 	NewShardID   types.ID  // For split operations
@@ -377,6 +390,12 @@ const (
 	SplitStateActionPrepare           // Initiate prepare phase (shadow index, dual-write)
 	SplitStateActionTransitionToSplit // Move from PREPARE to SPLITTING (create archive)
 	SplitStateActionRollback          // Timeout reached, revert to pre-split state
+	SplitStateActionPrepareMerge
+	SplitStateActionCopyMerge
+	SplitStateActionCatchUpMerge
+	SplitStateActionSealMerge
+	SplitStateActionFinalizeMerge
+	SplitStateActionRollbackMerge
 )
 
 // ShardMovements represents movements of shards between nodes

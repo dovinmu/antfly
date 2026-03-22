@@ -662,6 +662,7 @@ func (m *Store) StartRaftGroup(
 			return shard.StoreDB()
 		},
 		m.cache,
+		m.clockOrReal(),
 	)
 	if err2 != nil {
 		// First, trigger Raft node shutdown by closing the proposal channels.

@@ -29,7 +29,6 @@ import (
 	"github.com/antflydb/antfly/pkg/libaf/json"
 	"github.com/antflydb/antfly/src/common"
 	"github.com/antflydb/antfly/src/snapstore"
-	"github.com/antflydb/antfly/src/store/storeutils"
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -173,6 +172,39 @@ func TestValidateBatchKeys(t *testing.T) {
 	})
 }
 
+func TestDBBatch_AllowsReceiverMergeDonorRangeOnApply(t *testing.T) {
+	dir := t.TempDir()
+
+	lg := zaptest.NewLogger(t)
+	snapStore, err := snapstore.NewLocalSnapStore(dir, 1, 1)
+	require.NoError(t, err)
+
+	coreDB := NewDBImplForTest(lg, snapStore)
+	require.NoError(t, coreDB.Open(filepath.Join(dir, "receiver"), false, nil, types.Range{nil, []byte{0x80}}))
+
+	mergeState := MergeState_builder{
+		Phase:              MergeState_PHASE_PREPARE,
+		DonorShardId:       2,
+		ReceiverShardId:    1,
+		DonorRangeStart:    []byte{0x80},
+		DonorRangeEnd:      []byte{0xff},
+		ReceiverRangeStart: nil,
+		ReceiverRangeEnd:   []byte{0x80},
+	}.Build()
+	mergeState.SetAcceptDonorRange(true)
+	require.NoError(t, coreDB.SetMergeState(mergeState))
+
+	key := []byte{0x90}
+	key = append(key, []byte("/docs/90")...)
+	value := []byte(`{"doc":"right"}`)
+
+	require.NoError(t, coreDB.Batch(context.Background(), [][2][]byte{{key, value}}, nil, Op_SyncLevelWrite))
+
+	doc, err := coreDB.Get(context.Background(), key)
+	require.NoError(t, err)
+	require.Equal(t, "right", doc["doc"])
+}
+
 func TestDBWrapperSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	t.Cleanup(func() { os.RemoveAll("./antflydb") })
@@ -264,6 +296,28 @@ func newTestStoreDBForSplitReplay(t *testing.T, root string, shardID, nodeID typ
 	}
 }
 
+func appendTestSplitDelta(
+	t *testing.T,
+	db DB,
+	timestamp uint64,
+	writes [][2][]byte,
+	deletes [][]byte,
+) {
+	t.Helper()
+
+	impl, ok := db.(*DBImpl)
+	require.True(t, ok)
+
+	pdb := impl.getPDB()
+	require.NotNil(t, pdb)
+
+	batch := pdb.NewBatch()
+	defer func() { require.NoError(t, batch.Close()) }()
+
+	require.NoError(t, impl.appendSplitDelta(batch, writes, deletes, timestamp))
+	require.NoError(t, batch.Commit(pebble.Sync))
+}
+
 func TestSplit_AlreadyAppliedIsIdempotent(t *testing.T) {
 	splitKey := []byte("m")
 	newShardID := uint64(42)
@@ -324,8 +378,7 @@ func TestStartSplitReplayIfNeeded_AppliesParentSplitDeltas(t *testing.T) {
 
 	value, err := json.Marshal(map[string]any{"name": "mango"})
 	require.NoError(t, err)
-	writeCtx := storeutils.WithTimestamp(context.Background(), 123)
-	require.NoError(t, parent.coreDB.Batch(writeCtx, [][2][]byte{{[]byte("mango"), value}}, nil, Op_SyncLevelWrite))
+	appendTestSplitDelta(t, parent.coreDB, 123, [][2][]byte{{[]byte("mango"), value}}, nil)
 
 	require.Eventually(t, func() bool {
 		doc, err := child.coreDB.Get(context.Background(), []byte("mango"))
@@ -440,8 +493,7 @@ func TestApplyOpFinalizeSplit_WaitsForLocalChildReplayBeforeDeletingParentRange(
 
 	value, err := json.Marshal(map[string]any{"name": "mango"})
 	require.NoError(t, err)
-	writeCtx := storeutils.WithTimestamp(context.Background(), 456)
-	require.NoError(t, parent.coreDB.Batch(writeCtx, [][2][]byte{{[]byte("mango"), value}}, nil, Op_SyncLevelWrite))
+	appendTestSplitDelta(t, parent.coreDB, 456, [][2][]byte{{[]byte("mango"), value}}, nil)
 
 	require.NoError(t, parent.applyOpFinalizeSplit(context.Background(), FinalizeSplitOp_builder{
 		NewRangeEnd: splitKey,

@@ -181,6 +181,12 @@ type Config struct {
 	// MaxShardSizeBytes Maximum size of a shard in bytes. Used to determine when to split shards.
 	MaxShardSizeBytes uint64 `json:"max_shard_size_bytes"`
 
+	// MinShardSizeBytes Minimum size of a shard in bytes before it becomes eligible for automatic merge consideration.
+	MinShardSizeBytes uint64 `json:"min_shard_size_bytes,omitempty,omitzero"`
+
+	// MinShardsPerTable Minimum number of shards to keep for a table.
+	MinShardsPerTable uint64 `json:"min_shards_per_table,omitempty,omitzero"`
+
 	// MaxShardsPerTable Maximum number of shards that can be created for a single table.
 	MaxShardsPerTable uint64       `json:"max_shards_per_table"`
 	Metadata          MetadataInfo `json:"metadata"`
@@ -247,7 +253,13 @@ type Config struct {
 
 	// SplitFinalizeGracePeriod Minimum continuous readiness duration required before finalizing a split. Format: duration string like '15s', '1m'. Default: '15s'.
 	SplitFinalizeGracePeriod time.Duration `json:"split_finalize_grace_period,omitempty,omitzero"`
-	Storage                  StorageConfig `json:"storage"`
+
+	// AutoRangeTransitionPerTableLimit Maximum number of new automatic split/merge transitions a single table may start in one reconciliation cycle.
+	AutoRangeTransitionPerTableLimit int `json:"auto_range_transition_per_table_limit,omitempty,omitzero"`
+
+	// AutoRangeTransitionClusterLimit Maximum number of in-flight automatic split/merge transitions allowed cluster-wide.
+	AutoRangeTransitionClusterLimit int           `json:"auto_range_transition_cluster_limit,omitempty,omitzero"`
+	Storage                         StorageConfig `json:"storage"`
 
 	// SwarmMode Bypasses Raft consensus for shards, using direct writes instead. Useful for development and testing with a single node.
 	SwarmMode bool                `json:"swarm_mode,omitempty,omitzero"`

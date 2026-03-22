@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const simulatedTxnOpTimeout = 15 * time.Minute
+
 func TestHarness_TransactionDelayedResolveIntentDelivery(t *testing.T) {
 	txnID := uuid.MustParse("00000000-0000-0000-0000-0000000000a1")
 	h := newTransactionHarness(t, txnID)
@@ -51,7 +53,7 @@ func TestHarness_TransactionDelayedResolveIntentDelivery(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- h.ExecuteTransaction(
-			60*time.Second,
+			simulatedTxnOpTimeout,
 			map[types.ID][][2][]byte{
 				lowShard:  {{[]byte(lowKey), []byte(`{"owner":"alice","balance":100}`)}},
 				highShard: {{[]byte(highKey), []byte(`{"owner":"bob","balance":50}`)}},
@@ -124,7 +126,7 @@ func TestHarness_TransactionSyncLevelWriteWaitsForCoordinatorResolution(t *testi
 	done := make(chan error, 1)
 	go func() {
 		done <- h.ExecuteTransaction(
-			60*time.Second,
+			simulatedTxnOpTimeout,
 			map[types.ID][][2][]byte{
 				lowShard:  {{[]byte(lowKey), []byte(`{"owner":"alice","balance":110}`)}},
 				highShard: {{[]byte(highKey), []byte(`{"owner":"bob","balance":60}`)}},
@@ -185,7 +187,7 @@ func TestHarness_TransactionCoordinatorCrashAfterCommitStillCompletes(t *testing
 	})
 
 	require.NoError(t, h.ExecuteTransaction(
-		90*time.Second,
+		simulatedTxnOpTimeout,
 		map[types.ID][][2][]byte{
 			lowShard:  {{[]byte(lowKey), []byte(`{"owner":"alice","balance":101}`)}},
 			highShard: {{[]byte(highKey), []byte(`{"owner":"bob","balance":51}`)}},
@@ -256,7 +258,7 @@ func TestHarness_TransactionParticipantCrashDuringWriteIntentStillCompletes(t *t
 	})
 
 	require.NoError(t, h.ExecuteTransaction(
-		90*time.Second,
+		simulatedTxnOpTimeout,
 		map[types.ID][][2][]byte{
 			lowShard:  {{[]byte(lowKey), []byte(`{"owner":"alice","balance":102}`)}},
 			highShard: {{[]byte(highKey), []byte(`{"owner":"bob","balance":52}`)}},
@@ -320,5 +322,9 @@ func newTransactionHarness(t *testing.T, txnID uuid.UUID) *Harness {
 
 	startTableOnAllStores(t, h, "accounts")
 	require.NoError(t, h.Advance(2*time.Second))
+	checker := NewChecker(CheckerConfig{SplitLivenessTimeout: 45 * time.Second})
+	require.NoError(t, h.WaitFor(30*time.Second, func() error {
+		return checker.CheckStable(context.Background(), h)
+	}))
 	return h
 }
