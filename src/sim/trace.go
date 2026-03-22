@@ -90,10 +90,61 @@ func (r *TraceRecorder) CompactTrace(maxEvents, maxDigests int) string {
 	if r == nil {
 		return ""
 	}
-	events := r.Events()
-	digests := r.Digests()
+	return compactTrace(r.Events(), r.Digests(), maxEvents, maxDigests, nil)
+}
+
+func (r *TraceRecorder) CompactTraceRetainKinds(maxEvents, maxDigests int, retainKinds ...string) string {
+	if r == nil {
+		return ""
+	}
+	retain := make(map[string]struct{}, len(retainKinds))
+	for _, kind := range retainKinds {
+		if kind == "" {
+			continue
+		}
+		retain[kind] = struct{}{}
+	}
+	return compactTrace(r.Events(), r.Digests(), maxEvents, maxDigests, retain)
+}
+
+func compactTrace(
+	events []TraceEvent,
+	digests []ClusterDigest,
+	maxEvents int,
+	maxDigests int,
+	retainKinds map[string]struct{},
+) string {
 	if maxEvents > 0 && len(events) > maxEvents {
-		events = events[len(events)-maxEvents:]
+		start := len(events) - maxEvents
+		tail := events[start:]
+		if len(retainKinds) > 0 {
+			retained := make([]TraceEvent, 0, len(retainKinds))
+			presentKinds := make(map[string]struct{}, len(tail))
+			for _, event := range tail {
+				presentKinds[event.Kind] = struct{}{}
+			}
+			for kind := range retainKinds {
+				if _, ok := presentKinds[kind]; ok {
+					continue
+				}
+				for i := start - 1; i >= 0; i-- {
+					if events[i].Kind == kind {
+						retained = append(retained, events[i])
+						break
+					}
+				}
+			}
+			if len(retained) > 0 {
+				slices.SortFunc(retained, func(a, b TraceEvent) int {
+					return a.At.Compare(b.At)
+				})
+				events = append(retained, tail...)
+			} else {
+				events = tail
+			}
+		} else {
+			events = tail
+		}
 	}
 	if maxDigests > 0 && len(digests) > maxDigests {
 		digests = digests[len(digests)-maxDigests:]

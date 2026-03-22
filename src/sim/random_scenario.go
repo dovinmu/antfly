@@ -913,7 +913,7 @@ func (r *randomScenarioRunner) pickMetadataNodeForDisruption(ctx context.Context
 }
 
 func (r *randomScenarioRunner) wrapErr(action string, err error) error {
-	trace := r.h.Trace().CompactTrace(20, 10)
+	trace := r.h.Trace().CompactTraceRetainKinds(20, 10, "split")
 	category := ClassifyFailureWithTrace(err, trace)
 	if category == FailureCategoryUnknown && strings.Contains(trace, "[split]") {
 		msg := err.Error()

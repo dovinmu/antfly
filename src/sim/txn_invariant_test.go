@@ -49,7 +49,7 @@ func TestChecker_StableRejectsPendingTransactionState(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- h.ExecuteTransaction(
-			90*time.Second,
+			simulatedTxnOpTimeout,
 			map[types.ID][][2][]byte{
 				lowShard:  {{[]byte(lowKey), []byte(`{"owner":"alice","balance":100}`)}},
 				highShard: {{[]byte(highKey), []byte(`{"owner":"bob","balance":50}`)}},
