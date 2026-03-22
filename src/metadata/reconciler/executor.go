@@ -15,22 +15,32 @@
 package reconciler
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/antflydb/antfly/lib/pebbleutils"
 	"github.com/antflydb/antfly/lib/types"
+	json "github.com/antflydb/antfly/pkg/libaf/json"
+	"github.com/antflydb/antfly/src/common"
 	"github.com/antflydb/antfly/src/store"
 	"github.com/antflydb/antfly/src/store/client"
 	"github.com/antflydb/antfly/src/store/db"
+	"github.com/antflydb/antfly/src/store/storeutils"
 	"github.com/antflydb/antfly/src/tablemgr"
+	"github.com/cockroachdb/pebble/v2"
 	"github.com/sethvargo/go-retry"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 )
+
+const mergeSeedArchiveChunkSize = 256
 
 // ExecutePlan executes a reconciliation plan
 func (r *Reconciler) ExecutePlan(
@@ -604,39 +614,24 @@ func (r *Reconciler) executeMergeCopy(
 	if err != nil {
 		return err
 	}
+	donorClient, err := r.storeOps.GetLeaderClientForShard(ctx, donorShardID)
+	if err != nil {
+		return fmt.Errorf("loading donor leader client: %w", err)
+	}
 	receiverClient, err := r.storeOps.GetLeaderClientForShard(ctx, receiverShardID)
 	if err != nil {
 		return fmt.Errorf("loading receiver leader client: %w", err)
 	}
 
-	var afterKey []byte
-	for {
-		writes, nextKey, done, err := r.shardOps.ExportRangeChunk(
-			ctx,
-			donorShardID,
-			donorStatus.ByteRange[0],
-			donorStatus.ByteRange[1],
-			afterKey,
-			256,
-		)
-		if err != nil {
-			return fmt.Errorf("exporting donor range chunk: %w", err)
-		}
-		if len(writes) > 0 {
-			if err := receiverClient.ApplyMergeChunk(
-				ctx,
-				receiverShardID,
-				writes,
-				nil,
-				db.Op_SyncLevelWrite,
-			); err != nil {
-				return fmt.Errorf("copying merge chunk into receiver: %w", err)
-			}
-		}
-		if done {
-			break
-		}
-		afterKey = nextKey
+	if err := r.seedMergeReceiverFromArchive(
+		ctx,
+		donorClient,
+		receiverClient,
+		receiverShardID,
+		donorShardID,
+		donorStatus.ByteRange,
+	); err != nil {
+		return fmt.Errorf("seeding merge receiver from donor archive: %w", err)
 	}
 
 	receiverState := proto.Clone(receiverStatus.MergeState).(*db.MergeState)
@@ -645,6 +640,136 @@ func (r *Reconciler) executeMergeCopy(
 	donorState := proto.Clone(donorStatus.MergeState).(*db.MergeState)
 	donorState.SetPhase(db.MergeState_PHASE_CATCHUP)
 	return r.persistMergeStates(ctx, receiverShardID, receiverState, donorShardID, donorState)
+}
+
+func (r *Reconciler) seedMergeReceiverFromArchive(
+	ctx context.Context,
+	donorClient client.StoreRPC,
+	receiverClient client.StoreRPC,
+	receiverShardID, donorShardID types.ID,
+	donorRange [2][]byte,
+) error {
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("antfly-merge-seed-%s-", donorShardID))
+	if err != nil {
+		return fmt.Errorf("creating merge seed temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	backupDir := filepath.Join(tempDir, "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		return fmt.Errorf("creating merge seed backup dir: %w", err)
+	}
+
+	backupID := fmt.Sprintf("merge-seed-%s-%d", donorShardID, r.timeProvider.Now().UnixNano())
+	if err := donorClient.Backup(ctx, donorShardID, "file://"+backupDir, backupID); err != nil {
+		return fmt.Errorf("creating donor merge seed archive: %w", err)
+	}
+
+	archiveFile, err := resolveMergeSeedArchiveFile(backupDir, backupID, donorShardID)
+	if err != nil {
+		return err
+	}
+	extractDir := filepath.Join(tempDir, "extract")
+	if _, err := common.ExtractArchiveWithResult(archiveFile, extractDir, true); err != nil {
+		return fmt.Errorf("extracting donor merge seed archive: %w", err)
+	}
+
+	pdb, err := pebble.Open(filepath.Join(extractDir, "pebble"), pebbleutils.NewPebbleOpts())
+	if err != nil {
+		return fmt.Errorf("opening extracted donor seed archive pebble db: %w", err)
+	}
+	defer func() { _ = pdb.Close() }()
+
+	lowerBound := storeutils.KeyRangeStart(donorRange[0])
+	var upperBound []byte
+	if len(donorRange[1]) > 0 {
+		upperBound = storeutils.KeyRangeStart(donorRange[1])
+	}
+	iter, err := pdb.NewIter(&pebble.IterOptions{
+		LowerBound: lowerBound,
+		UpperBound: upperBound,
+	})
+	if err != nil {
+		return fmt.Errorf("creating donor seed iterator: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	writes := make([][2][]byte, 0, mergeSeedArchiveChunkSize)
+	flush := func() error {
+		if len(writes) == 0 {
+			return nil
+		}
+		if err := receiverClient.ApplyMergeChunk(
+			ctx,
+			receiverShardID,
+			writes,
+			nil,
+			db.Op_SyncLevelWrite,
+		); err != nil {
+			return err
+		}
+		writes = writes[:0]
+		return nil
+	}
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		key := iter.Key()
+		if bytes.HasPrefix(key, storeutils.MetadataPrefix) || !bytes.HasSuffix(key, storeutils.DBRangeStart) {
+			continue
+		}
+		userKey := bytes.Clone(key[:len(key)-len(storeutils.DBRangeStart)])
+		doc, err := storeutils.DecodeDocumentJSON(iter.Value())
+		if err != nil {
+			return fmt.Errorf("decoding archived donor document %s: %w", types.FormatKey(userKey), err)
+		}
+		docBytes, err := json.Marshal(doc)
+		if err != nil {
+			return fmt.Errorf("marshaling archived donor document %s: %w", types.FormatKey(userKey), err)
+		}
+		writes = append(writes, [2][]byte{userKey, docBytes})
+		if len(writes) == mergeSeedArchiveChunkSize {
+			if err := flush(); err != nil {
+				return fmt.Errorf("applying archived donor merge seed chunk: %w", err)
+			}
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return fmt.Errorf("iterating donor merge seed archive: %w", err)
+	}
+	if err := flush(); err != nil {
+		return fmt.Errorf("applying archived donor merge seed chunk: %w", err)
+	}
+	return nil
+}
+
+func resolveMergeSeedArchiveFile(
+	backupDir string,
+	backupID string,
+	donorShardID types.ID,
+) (string, error) {
+	candidates := []string{
+		filepath.Join(backupDir, common.ShardBackupFileName(backupID, donorShardID)),
+		filepath.Join(backupDir, backupID+".tar.zst"),
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("stating donor merge seed archive %s: %w", candidate, err)
+		}
+	}
+	return "", fmt.Errorf(
+		"donor merge seed archive not found in %s for backup %s shard %s",
+		backupDir,
+		backupID,
+		donorShardID,
+	)
 }
 
 func (r *Reconciler) executeMergeCatchUp(

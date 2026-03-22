@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -31,6 +33,7 @@ import (
 	"github.com/antflydb/antfly/src/tablemgr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -213,6 +216,32 @@ func TestExecutePlan_RemovedStoreCleanup(t *testing.T) {
 		// Should NOT call RemovePeer because it would leave 0 voters
 		mockStoreOps.AssertNotCalled(t, "GetLeaderClientForShard")
 		mockShardOps.AssertNotCalled(t, "RemovePeer")
+	})
+}
+
+func TestResolveMergeSeedArchiveFile(t *testing.T) {
+	t.Run("prefers shard-suffixed archive name", func(t *testing.T) {
+		backupDir := t.TempDir()
+		backupID := "merge-seed-4801-1"
+		donorShardID := types.ID(4801)
+		expected := filepath.Join(backupDir, common.ShardBackupFileName(backupID, donorShardID))
+		require.NoError(t, os.WriteFile(expected, []byte("archive"), 0o644))
+
+		archiveFile, err := resolveMergeSeedArchiveFile(backupDir, backupID, donorShardID)
+		require.NoError(t, err)
+		assert.Equal(t, expected, archiveFile)
+	})
+
+	t.Run("falls back to plain backup archive name", func(t *testing.T) {
+		backupDir := t.TempDir()
+		backupID := "merge-seed-4801-2"
+		donorShardID := types.ID(4801)
+		expected := filepath.Join(backupDir, backupID+".tar.zst")
+		require.NoError(t, os.WriteFile(expected, []byte("archive"), 0o644))
+
+		archiveFile, err := resolveMergeSeedArchiveFile(backupDir, backupID, donorShardID)
+		require.NoError(t, err)
+		assert.Equal(t, expected, archiveFile)
 	})
 }
 
