@@ -107,6 +107,18 @@ components:
           maximum: 46170898227200
           example: 1073741824
           x-go-type: uint64
+        min_shard_size_bytes:
+          type: integer
+          description: "Minimum size of a shard in bytes before it becomes eligible for automatic merge consideration. If unset, defaults to one quarter of max_shard_size_bytes."
+          minimum: 1
+          example: 268435456
+          x-go-type: uint64
+        min_shards_per_table:
+          type: integer
+          description: "Minimum number of shards to keep for a table. Automatic merges will not reduce a table below this count."
+          minimum: 1
+          example: 1
+          x-go-type: uint64
         max_shards_per_table:
           type: integer
           description: "Maximum number of shards that can be created for a single table."

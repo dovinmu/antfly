@@ -363,6 +363,10 @@ func (ms *MetadataStore) retryTxnOp(ctx context.Context, label string, fn func(c
 			if !isRetryableTxnError(err) || attempt == maxTxnRetryAttempts-1 {
 				return err
 			}
+			// Refresh shard and store status before retrying so the next attempt
+			// can re-route away from a stale leader view after elections or
+			// proposal drops.
+			ms.runHealthCheck(ctx)
 			ms.clockOrReal().Sleep(ms.txnRetryDelay(attempt))
 			ms.logger.Debug("Retrying transaction step",
 				zap.String("step", label),
@@ -384,6 +388,10 @@ func (ms *MetadataStore) retryTxnUint64Op(ctx context.Context, label string, fn 
 		if !isRetryableTxnError(err) || attempt == maxTxnRetryAttempts-1 {
 			return 0, err
 		}
+		// Refresh shard and store status before retrying so the next attempt
+		// can re-route away from a stale leader view after elections or
+		// proposal drops.
+		ms.runHealthCheck(ctx)
 		ms.clockOrReal().Sleep(ms.txnRetryDelay(attempt))
 		ms.logger.Debug("Retrying transaction step",
 			zap.String("step", label),

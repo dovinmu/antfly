@@ -1,7 +1,7 @@
 # Dockerfile for Antfly with ONNX + XLA Backends (Omni)
 #
 # This image enables both ONNX Runtime and XLA/TPU backends with runtime selection.
-# Backend priority can be configured via TERMITE_BACKEND_PRIORITY environment variable.
+# Backend priority can be configured via ANTFLY_TERMITE_BACKEND_PRIORITY.
 # Default priority: [onnx, xla, go]
 #
 # Build:
@@ -15,7 +15,9 @@
 #   --build-arg LIBTPU_VERSION=1.12.0        Override libtpu version
 #
 # Runtime environment variables:
-#   TERMITE_BACKEND_PRIORITY    Override backend priority (comma-separated: onnx,xla,go)
+#   ANTFLY_TERMITE_BACKEND_PRIORITY Override backend priority (comma-separated: onnx,xla,go)
+#   ANTFLY_TERMITE_API_URL         Override the termite API listen URL
+#   ANTFLY_TERMITE_MODELS_DIR      Override the termite models directory
 #   ORT_DYLIB_PATH              Custom ONNX Runtime library path
 #   ORTGENAI_DYLIB_PATH         Custom ONNX Runtime GenAI library path (for LLM generation)
 #   GOMLX_BACKEND               Force XLA backend (xla:tpu, xla:cuda, xla:cpu)
@@ -31,6 +33,10 @@ ARG LIBTPU_VERSION=1.12.0
 # Stage 1: Build
 # =============================================================================
 FROM golang:${GO_VERSION} AS builder
+
+LABEL org.opencontainers.image.source=https://github.com/antflydb/antfly
+LABEL org.opencontainers.image.description="AntflyDB - Distributed document database with vector search for AI applications (ONNX + XLA)"
+LABEL org.opencontainers.image.licenses=Elastic-2.0
 
 ARG ONNXRUNTIME_VERSION
 ARG TOKENIZERS_VERSION
@@ -150,11 +156,11 @@ ENV ORTGENAI_DYLIB_PATH="/usr/local/onnxruntime/lib/libonnxruntime-genai.so"
 ENV PJRT_PLUGIN_LIBRARY_PATH="/usr/local/lib/go-xla"
 
 # Default backend priority: ONNX > XLA > Go
-# Can be overridden via TERMITE_BACKEND_PRIORITY or config file
-ENV TERMITE_BACKEND_PRIORITY="onnx,xla,go"
+ENV ANTFLY_TERMITE_BACKEND_PRIORITY="onnx,xla,go"
+ENV ANTFLY_TERMITE_API_URL="http://0.0.0.0:8080"
 
 # Model directory (mounted at runtime, contains embedders/, chunkers/, rerankers/ subdirs)
-ENV TERMITE_MODELS_DIR="/models"
+ENV ANTFLY_TERMITE_MODELS_DIR="/models"
 
 # Create model directories
 RUN mkdir -p /models/embedders /models/chunkers /models/rerankers && \
@@ -170,4 +176,8 @@ USER antfly
 EXPOSE 8080
 
 ENTRYPOINT ["/antfly"]
-CMD ["termite", "--api-url=http://0.0.0.0:8080"]
+
+# Default to single-node swarm mode for easy local usage.
+# Override with a different subcommand (e.g., "metadata", "store", "termite")
+# via Kubernetes Pod args or docker run arguments.
+CMD ["swarm"]

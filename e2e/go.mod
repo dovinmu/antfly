@@ -22,8 +22,8 @@ replace github.com/blevesearch/bleve/v2 => github.com/antflydb/bleve/v2 v2.5.8-a
 replace github.com/tidwall/wal => github.com/ajroetker/wal v0.0.0-antfly000
 
 replace (
-	github.com/gomlx/gomlx => github.com/ajroetker/gomlx v0.0.0-antfly008
-	github.com/gomlx/onnx-gomlx => github.com/ajroetker/onnx-gomlx v0.0.0-antfly008
+	github.com/gomlx/gomlx => github.com/ajroetker/gomlx v0.0.0-antfly011
+	github.com/gomlx/onnx-gomlx => github.com/ajroetker/onnx-gomlx v0.0.0-antfly011
 	github.com/knights-analytics/ortgenai => github.com/ajroetker/ortgenai v0.1.1-antfly002
 )
 
@@ -63,7 +63,7 @@ require (
 	github.com/RaduBerinde/btreemap v0.0.0-20260105202824-d3184786f603 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.16.0 // indirect
 	github.com/a2aproject/a2a-go v0.3.12 // indirect
-	github.com/ajroetker/go-highway v0.0.12 // indirect
+	github.com/ajroetker/go-highway v0.0.13-0.20260309234436-8d249c4caa48 // indirect
 	github.com/ajroetker/go-jpeg2000 v0.0.2 // indirect
 	github.com/ajroetker/pdf v0.0.1-antfly001 // indirect
 	github.com/ajroetker/pdf/render v0.0.1-antfly003 // indirect
@@ -142,7 +142,7 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/firebase/genkit/go v1.5.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/getkin/kin-openapi v0.133.0 // indirect
+	github.com/getkin/kin-openapi v0.134.0 // indirect
 	github.com/getsentry/sentry-go v0.43.0 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 // indirect
@@ -166,9 +166,9 @@ require (
 	github.com/gomlx/exceptions v0.0.3 // indirect
 	github.com/gomlx/go-coreml v0.0.0-20260301010621-8fdf6ad8655e // indirect
 	github.com/gomlx/go-coreml/gomlx v0.0.0-20260301010621-8fdf6ad8655e // indirect
-	github.com/gomlx/go-huggingface v0.3.3-0.20260316090437-1a6ca7ca09c4 // indirect
-	github.com/gomlx/go-xla v0.2.1 // indirect
-	github.com/gomlx/gomlx v0.26.1-0.20260220075116-8da82ca8aaad // indirect
+	github.com/gomlx/go-huggingface v0.3.4 // indirect
+	github.com/gomlx/go-xla v0.2.2 // indirect
+	github.com/gomlx/gomlx v0.27.2 // indirect
 	github.com/gomlx/onnx-gomlx v0.3.5-0.20260130173634-2497f2c7652f // indirect
 	github.com/google/dotprompt/go v0.0.0-20260227225921-0911cf9ecf0e // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
@@ -220,8 +220,8 @@ require (
 	github.com/nikolalohinski/gonja/v2 v2.7.0 // indirect
 	github.com/nlnwa/whatwg-url v0.6.2 // indirect
 	github.com/oapi-codegen/runtime v1.3.0 // indirect
-	github.com/oasdiff/yaml v0.0.0-20250309154309-f31be36b4037 // indirect
-	github.com/oasdiff/yaml3 v0.0.0-20250309153720-d2182401db90 // indirect
+	github.com/oasdiff/yaml v0.0.1 // indirect
+	github.com/oasdiff/yaml3 v0.0.1 // indirect
 	github.com/ollama/ollama v0.18.2 // indirect
 	github.com/openai/openai-go v1.12.0 // indirect
 	github.com/panjf2000/ants/v2 v2.12.0 // indirect

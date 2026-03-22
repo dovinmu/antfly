@@ -54,6 +54,10 @@ func (ms *MetadataStore) leaderClientForShard(
 	if err != nil || status == nil {
 		return nil, fmt.Errorf("no status info available: %w", err)
 	}
+	if ms.shouldFallbackToMergeReceiver(status) {
+		receiverShardID := types.ID(status.MergeState.GetReceiverShardId())
+		return ms.leaderClientForShard(ctx, receiverShardID)
+	}
 	var nodeID types.ID
 	if !ms.config.SwarmMode {
 		// If this is a split-off shard that doesn't have data yet,
@@ -205,6 +209,10 @@ func (ms *MetadataStore) leaderClientForShardWithEffectiveID(
 	// During split, the new shard transitions: SplittingOff -> SplitOffPreSnap -> Default
 	// Until HasSnapshot is true (data has been transferred), reads should go to parent shard.
 	// The parent shard is in PreSplit or Splitting state and still has all the data.
+	if ms.shouldFallbackToMergeReceiver(status) {
+		receiverShardID := types.ID(status.MergeState.GetReceiverShardId())
+		return ms.leaderClientForShardWithEffectiveID(ctx, receiverShardID)
+	}
 	if ms.shouldFallbackToParentShard(status) {
 		parentShardID, err := ms.findParentShardForSplitOff(status)
 		if err == nil {
@@ -332,6 +340,10 @@ func (ms *MetadataStore) leaderClientForShardNoFallback(
 
 	// If shard is in split transition without data, return error to trigger retry
 	// Don't fall back to parent because parent's range has been narrowed and will reject
+	if ms.shouldFallbackToMergeReceiver(status) {
+		receiverShardID := types.ID(status.MergeState.GetReceiverShardId())
+		return ms.leaderClientForShardNoFallback(ctx, receiverShardID)
+	}
 	if ms.shouldFallbackToParentShard(status) {
 		ms.logger.Debug("SPLIT_ROUTING: Shard not ready for writes (no snapshot), returning retry error",
 			zap.Stringer("shardID", shardID),
@@ -363,6 +375,33 @@ func (ms *MetadataStore) leaderClientForShardNoFallback(
 	return shardID, c, nil
 }
 
+// directLeaderClientForShardBypassesSplitFallback returns the shard's own leader
+// without applying split-parent fallback or split-readiness checks.
+// This is only used as a recovery path when stale metadata routed a write to the
+// parent shard and that parent now rejects the key as out of range.
+func (ms *MetadataStore) directLeaderClientForShardBypassesSplitFallback(
+	ctx context.Context,
+	shardID types.ID,
+) (effectiveShardID types.ID, c client.StoreRPC, err error) {
+	status, err := ms.tm.GetShardStatus(shardID)
+	if err != nil || status == nil {
+		return 0, nil, fmt.Errorf("no status info available: %w", err)
+	}
+	if status.RaftStatus == nil {
+		return 0, nil, fmt.Errorf("no raft status available for shard: %w", client.ErrNoRaftStatus)
+	}
+	if status.RaftStatus.Lead == 0 {
+		return 0, nil, ErrShardInitializing
+	}
+
+	var reachable bool
+	c, reachable, err = ms.tm.GetStoreClient(ctx, status.RaftStatus.Lead)
+	if err == nil && reachable {
+		return shardID, c, nil
+	}
+	return 0, nil, ErrNoLeaderElected
+}
+
 // shouldFallbackToParentShard returns true if reads to this shard should be
 // redirected to its parent shard because the split-off shard is not fully ready.
 // Readiness is determined by ShardInfo.IsReadyForSplitReads(), the single source
@@ -384,6 +423,24 @@ func (ms *MetadataStore) shouldFallbackToParentShard(status *store.ShardStatus) 
 	default:
 		return false
 	}
+}
+
+func (ms *MetadataStore) shouldFallbackToMergeReceiver(status *store.ShardStatus) bool {
+	if status == nil || status.MergeState == nil {
+		return false
+	}
+	receiverShardID := types.ID(status.MergeState.GetReceiverShardId())
+	if status.MergeState.GetPhase() != db.MergeState_PHASE_FINALIZING ||
+		receiverShardID == 0 ||
+		receiverShardID == status.ID {
+		return false
+	}
+	allStatuses, err := ms.tm.GetShardStatuses()
+	if err != nil {
+		return false
+	}
+	receiverStatus := allStatuses[receiverShardID]
+	return receiverStatus != nil && receiverStatus.IsReadyForMergeCutover()
 }
 
 // findParentShardForSplitOff finds the parent shard for a shard in SplittingOff or SplitOffPreSnap state.
@@ -652,7 +709,14 @@ func (ms *MetadataStore) forwardInsertToShard(
 		if err != nil {
 			return fmt.Errorf("getting table %s: %w", tableName, err)
 		}
-		shardID, err := findWriteShardForKey(ms.tm, table, key)
+		targetShardID, err := table.FindShardForKey(key)
+		if err != nil {
+			if isTransientShardError(err) {
+				return retry.RetryableError(err)
+			}
+			return fmt.Errorf("finding target shard for key %s: %w", key, err)
+		}
+		shardID, err := resolveWriteShardIDFromTableManager(ms.tm, targetShardID)
 		if err != nil {
 			if isTransientShardError(err) {
 				return retry.RetryableError(err)
@@ -670,6 +734,16 @@ func (ms *MetadataStore) forwardInsertToShard(
 			return err
 		}
 		err = targetClient.Batch(ctx, effectiveShardID, writes, nil, nil, syncLevel)
+		if errors.Is(err, client.ErrKeyOutOfRange) && shardID != targetShardID {
+			effectiveChildID, childClient, childErr := ms.directLeaderClientForShardBypassesSplitFallback(ctx, targetShardID)
+			if childErr != nil {
+				if isTransientShardError(childErr) {
+					return retry.RetryableError(childErr)
+				}
+				return childErr
+			}
+			err = childClient.Batch(ctx, effectiveChildID, writes, nil, nil, syncLevel)
+		}
 		if err != nil && isTransientShardError(err) {
 			return retry.RetryableError(err)
 		}

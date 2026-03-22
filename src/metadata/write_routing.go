@@ -73,6 +73,16 @@ func resolveWriteShardID(
 	if !ok || status == nil {
 		return 0, fmt.Errorf("no status info available for shard %s", shardID)
 	}
+	if status.MergeState != nil &&
+		status.MergeState.GetPhase() == db.MergeState_PHASE_FINALIZING &&
+		status.MergeState.GetReceiverShardId() != 0 {
+		receiverShardID := types.ID(status.MergeState.GetReceiverShardId())
+		if receiverStatus, ok := shardStatuses[receiverShardID]; ok &&
+			receiverStatus != nil &&
+			receiverStatus.IsReadyForMergeCutover() {
+			return receiverShardID, nil
+		}
+	}
 	parentShardID, err := findParentShardForSplitOffStatus(shardStatuses, status)
 	if err == nil {
 		return parentShardID, nil
@@ -88,13 +98,17 @@ func findWriteShardForKey(
 	table *store.Table,
 	key string,
 ) (types.ID, error) {
-	shardStatuses, err := tm.GetShardStatuses()
-	if err != nil {
-		return 0, fmt.Errorf("loading shard statuses: %w", err)
-	}
 	shardID, err := table.FindShardForKey(key)
 	if err != nil {
 		return 0, err
+	}
+	return resolveWriteShardIDFromTableManager(tm, shardID)
+}
+
+func resolveWriteShardIDFromTableManager(tm *tablemgr.TableManager, shardID types.ID) (types.ID, error) {
+	shardStatuses, err := tm.GetShardStatuses()
+	if err != nil {
+		return 0, fmt.Errorf("loading shard statuses: %w", err)
 	}
 	return resolveWriteShardID(shardStatuses, shardID)
 }

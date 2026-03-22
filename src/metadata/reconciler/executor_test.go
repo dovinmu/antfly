@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -31,9 +33,67 @@ import (
 	"github.com/antflydb/antfly/src/tablemgr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
+
+type stubStoreRPC struct {
+	client.StoreRPC
+	id        types.ID
+	status    *store.StoreStatus
+	statusErr error
+}
+
+func (s *stubStoreRPC) ID() types.ID {
+	if s.id != 0 {
+		return s.id
+	}
+	if s.StoreRPC != nil {
+		return s.StoreRPC.ID()
+	}
+	return 0
+}
+
+func (s *stubStoreRPC) Status(ctx context.Context) (*store.StoreStatus, error) {
+	return s.status, s.statusErr
+}
+
+func (s *stubStoreRPC) ApplyMergeChunk(
+	ctx context.Context,
+	shardID types.ID,
+	writes [][2][]byte,
+	deletes [][]byte,
+	syncLevel db.Op_SyncLevel,
+) error {
+	if s.StoreRPC != nil {
+		return s.StoreRPC.ApplyMergeChunk(ctx, shardID, writes, deletes, syncLevel)
+	}
+	return nil
+}
+
+func makeLiveMergeShardInfo(
+	shardID types.ID,
+	peers common.PeerSet,
+	lead types.ID,
+	diskSize uint64,
+	empty bool,
+) *store.ShardInfo {
+	return &store.ShardInfo{
+		Peers: peers,
+		RaftStatus: &common.RaftStatus{
+			Lead:   lead,
+			Voters: peers,
+		},
+		ShardStats: &store.ShardStats{
+			Storage: &store.StorageStats{
+				DiskSize: diskSize,
+				Empty:    empty,
+			},
+			Updated: time.Now(),
+		},
+	}
+}
 
 func TestExecutePlan_RemovedStoreCleanup(t *testing.T) {
 	t.Run("removes peers from shards", func(t *testing.T) {
@@ -71,10 +131,9 @@ func TestExecutePlan_RemovedStoreCleanup(t *testing.T) {
 			mockShardOps,
 			mockTableOps,
 			mockStoreOps,
-			ReconciliationConfig{},
+			ReconciliationConfig{ReplicationFactor: 2},
 			zap.NewNop(),
 		)
-
 		err := reconciler.ExecutePlan(context.Background(), plan, current, DesiredClusterState{})
 		assert.NoError(t, err)
 
@@ -108,7 +167,7 @@ func TestExecutePlan_RemovedStoreCleanup(t *testing.T) {
 			mockShardOps,
 			mockTableOps,
 			mockStoreOps,
-			ReconciliationConfig{},
+			ReconciliationConfig{ReplicationFactor: 2},
 			zap.NewNop(),
 		)
 
@@ -147,7 +206,7 @@ func TestExecutePlan_RemovedStoreCleanup(t *testing.T) {
 			mockShardOps,
 			mockTableOps,
 			mockStoreOps,
-			ReconciliationConfig{},
+			ReconciliationConfig{ReplicationFactor: 2},
 			zap.NewNop(),
 		)
 
@@ -157,6 +216,32 @@ func TestExecutePlan_RemovedStoreCleanup(t *testing.T) {
 		// Should NOT call RemovePeer because it would leave 0 voters
 		mockStoreOps.AssertNotCalled(t, "GetLeaderClientForShard")
 		mockShardOps.AssertNotCalled(t, "RemovePeer")
+	})
+}
+
+func TestResolveMergeSeedArchiveFile(t *testing.T) {
+	t.Run("prefers shard-suffixed archive name", func(t *testing.T) {
+		backupDir := t.TempDir()
+		backupID := "merge-seed-4801-1"
+		donorShardID := types.ID(4801)
+		expected := filepath.Join(backupDir, common.ShardBackupFileName(backupID, donorShardID))
+		require.NoError(t, os.WriteFile(expected, []byte("archive"), 0o644))
+
+		archiveFile, err := resolveMergeSeedArchiveFile(backupDir, backupID, donorShardID)
+		require.NoError(t, err)
+		assert.Equal(t, expected, archiveFile)
+	})
+
+	t.Run("falls back to plain backup archive name", func(t *testing.T) {
+		backupDir := t.TempDir()
+		backupID := "merge-seed-4801-2"
+		donorShardID := types.ID(4801)
+		expected := filepath.Join(backupDir, backupID+".tar.zst")
+		require.NoError(t, os.WriteFile(expected, []byte("archive"), 0o644))
+
+		archiveFile, err := resolveMergeSeedArchiveFile(backupDir, backupID, donorShardID)
+		require.NoError(t, err)
+		assert.Equal(t, expected, archiveFile)
 	})
 }
 
@@ -610,7 +695,24 @@ func TestExecutePlan_MergeTransitions(t *testing.T) {
 
 		shardID := types.ID(1)
 		mergeShardID := types.ID(2)
-		leaderClient := &client.StoreClient{}
+		targetLeaderClient := &stubStoreRPC{
+			id: shardID,
+			status: &store.StoreStatus{
+				ID: shardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					shardID: makeLiveMergeShardInfo(shardID, common.NewPeerSet(10, 20), 10, 1024, false),
+				},
+			},
+		}
+		donorLeaderClient := &stubStoreRPC{
+			id: mergeShardID,
+			status: &store.StoreStatus{
+				ID: mergeShardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					mergeShardID: makeLiveMergeShardInfo(mergeShardID, common.NewPeerSet(10, 20), 10, 0, true),
+				},
+			},
+		}
 		peers := common.NewPeerSet(types.ID(10), types.ID(20))
 
 		transition := tablemgr.MergeTransition{
@@ -636,7 +738,9 @@ func TestExecutePlan_MergeTransitions(t *testing.T) {
 		}
 
 		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, mergeShardID).
-			Return(leaderClient, nil)
+			Return(donorLeaderClient, nil)
+		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, shardID).
+			Return(targetLeaderClient, nil)
 		mockTableOps.On("ReassignShardsForMerge", transition).Return(newConfig, nil)
 		mockShardOps.On("StopShard", mock.Anything, mergeShardID, mock.Anything).Return(nil)
 		mockShardOps.On("MergeRange", mock.Anything, shardID, mock.MatchedBy(func(r [2][]byte) bool {
@@ -648,7 +752,7 @@ func TestExecutePlan_MergeTransitions(t *testing.T) {
 			mockShardOps,
 			mockTableOps,
 			mockStoreOps,
-			ReconciliationConfig{},
+			ReconciliationConfig{ReplicationFactor: 2},
 			zap.NewNop(),
 		)
 
@@ -1359,10 +1463,27 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 
 		shardID := types.ID(1)
 		mergeShardID := types.ID(2)
-		leaderClient := &client.StoreClient{}
 		peer1 := types.ID(10)
 		peer2 := types.ID(20)
 		peer3 := types.ID(30)
+		targetLeaderClient := &stubStoreRPC{
+			id: shardID,
+			status: &store.StoreStatus{
+				ID: shardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					shardID: makeLiveMergeShardInfo(shardID, common.NewPeerSet(peer1, peer2, peer3), peer1, 1024, false),
+				},
+			},
+		}
+		donorLeaderClient := &stubStoreRPC{
+			id: mergeShardID,
+			status: &store.StoreStatus{
+				ID: mergeShardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					mergeShardID: makeLiveMergeShardInfo(mergeShardID, common.NewPeerSet(peer1, peer2, peer3), peer1, 0, true),
+				},
+			},
+		}
 
 		mergeTransition := tablemgr.MergeTransition{
 			ShardID:      shardID,
@@ -1384,7 +1505,9 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 		}
 
 		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, mergeShardID).
-			Return(leaderClient, nil)
+			Return(donorLeaderClient, nil)
+		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, shardID).
+			Return(targetLeaderClient, nil)
 		mockTableOps.On("ReassignShardsForMerge", mergeTransition).Return(newShardConfig, nil)
 		mockShardOps.On("StopShard", mock.Anything, mergeShardID, peer1).Return(nil)
 		mockShardOps.On("StopShard", mock.Anything, mergeShardID, peer2).Return(nil)
@@ -1395,7 +1518,7 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 			mockShardOps,
 			mockTableOps,
 			mockStoreOps,
-			ReconciliationConfig{},
+			ReconciliationConfig{ReplicationFactor: 3},
 			zap.NewNop(),
 		)
 
@@ -1436,7 +1559,7 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 			mockShardOps,
 			mockTableOps,
 			mockStoreOps,
-			ReconciliationConfig{},
+			ReconciliationConfig{ReplicationFactor: 1},
 			zap.NewNop(),
 		)
 
@@ -1462,7 +1585,24 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 
 		shardID := types.ID(1)
 		mergeShardID := types.ID(2)
-		leaderClient := &client.StoreClient{}
+		targetLeaderClient := &stubStoreRPC{
+			id: shardID,
+			status: &store.StoreStatus{
+				ID: shardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					shardID: makeLiveMergeShardInfo(shardID, common.NewPeerSet(10), 10, 1024, false),
+				},
+			},
+		}
+		donorLeaderClient := &stubStoreRPC{
+			id: mergeShardID,
+			status: &store.StoreStatus{
+				ID: mergeShardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					mergeShardID: makeLiveMergeShardInfo(mergeShardID, common.NewPeerSet(10), 10, 0, true),
+				},
+			},
+		}
 
 		mergeTransition := tablemgr.MergeTransition{
 			ShardID:      shardID,
@@ -1480,7 +1620,9 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 		}
 
 		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, mergeShardID).
-			Return(leaderClient, nil)
+			Return(donorLeaderClient, nil)
+		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, shardID).
+			Return(targetLeaderClient, nil)
 		mockTableOps.On("ReassignShardsForMerge", mergeTransition).
 			Return(nil, errors.New("reassignment failed"))
 
@@ -1488,7 +1630,7 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 			mockShardOps,
 			mockTableOps,
 			mockStoreOps,
-			ReconciliationConfig{},
+			ReconciliationConfig{ReplicationFactor: 1},
 			zap.NewNop(),
 		)
 
@@ -1516,9 +1658,25 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 
 		shardID := types.ID(1)
 		mergeShardID := types.ID(2)
-		leaderClient := &client.StoreClient{}
 		peer1 := types.ID(10)
-
+		targetLeaderClient := &stubStoreRPC{
+			id: shardID,
+			status: &store.StoreStatus{
+				ID: shardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					shardID: makeLiveMergeShardInfo(shardID, common.NewPeerSet(peer1), peer1, 1024, false),
+				},
+			},
+		}
+		donorLeaderClient := &stubStoreRPC{
+			id: mergeShardID,
+			status: &store.StoreStatus{
+				ID: mergeShardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					mergeShardID: makeLiveMergeShardInfo(mergeShardID, common.NewPeerSet(peer1), peer1, 0, true),
+				},
+			},
+		}
 		mergeTransition := tablemgr.MergeTransition{
 			ShardID:      shardID,
 			MergeShardID: mergeShardID,
@@ -1539,7 +1697,9 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 		}
 
 		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, mergeShardID).
-			Return(leaderClient, nil)
+			Return(donorLeaderClient, nil)
+		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, shardID).
+			Return(targetLeaderClient, nil)
 		mockTableOps.On("ReassignShardsForMerge", mergeTransition).Return(newShardConfig, nil)
 		mockShardOps.On("StopShard", mock.Anything, mergeShardID, peer1).
 			Return(fmt.Errorf("not found: %w", client.ErrNotFound))
@@ -1549,7 +1709,7 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 			mockShardOps,
 			mockTableOps,
 			mockStoreOps,
-			ReconciliationConfig{},
+			ReconciliationConfig{ReplicationFactor: 1},
 			zap.NewNop(),
 		)
 
@@ -1574,9 +1734,25 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 
 		shardID := types.ID(1)
 		mergeShardID := types.ID(2)
-		leaderClient := &client.StoreClient{}
 		peer1 := types.ID(10)
-
+		targetLeaderClient := &stubStoreRPC{
+			id: shardID,
+			status: &store.StoreStatus{
+				ID: shardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					shardID: makeLiveMergeShardInfo(shardID, common.NewPeerSet(peer1), peer1, 1024, false),
+				},
+			},
+		}
+		donorLeaderClient := &stubStoreRPC{
+			id: mergeShardID,
+			status: &store.StoreStatus{
+				ID: mergeShardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					mergeShardID: makeLiveMergeShardInfo(mergeShardID, common.NewPeerSet(peer1), peer1, 0, true),
+				},
+			},
+		}
 		mergeTransition := tablemgr.MergeTransition{
 			ShardID:      shardID,
 			MergeShardID: mergeShardID,
@@ -1597,7 +1773,9 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 		}
 
 		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, mergeShardID).
-			Return(leaderClient, nil)
+			Return(donorLeaderClient, nil)
+		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, shardID).
+			Return(targetLeaderClient, nil)
 		mockTableOps.On("ReassignShardsForMerge", mergeTransition).Return(newShardConfig, nil)
 		mockShardOps.On("StopShard", mock.Anything, mergeShardID, peer1).Return(nil)
 		mockShardOps.On("MergeRange", mock.Anything, shardID, mock.Anything).
@@ -1607,7 +1785,7 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 			mockShardOps,
 			mockTableOps,
 			mockStoreOps,
-			ReconciliationConfig{},
+			ReconciliationConfig{ReplicationFactor: 1},
 			zap.NewNop(),
 		)
 
@@ -1624,6 +1802,181 @@ func TestExecuteSplitAndMergeTransitions_MergeOperations(t *testing.T) {
 		assert.NoError(t, err)
 		mockShardOps.AssertExpectations(t)
 	})
+
+	t.Run("starts online merge when donor is not empty in live status", func(t *testing.T) {
+		mockShardOps := &MockShardOperations{}
+		mockTableOps := &MockTableOperations{}
+		mockStoreOps := &MockStoreOperations{}
+
+		shardID := types.ID(1)
+		mergeShardID := types.ID(2)
+		peer1 := types.ID(10)
+
+		targetLeaderClient := &stubStoreRPC{
+			id: shardID,
+			status: &store.StoreStatus{
+				ID: shardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					shardID: makeLiveMergeShardInfo(shardID, common.NewPeerSet(peer1), peer1, 1024, false),
+				},
+			},
+		}
+		donorLeaderClient := &stubStoreRPC{
+			id: mergeShardID,
+			status: &store.StoreStatus{
+				ID: mergeShardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					mergeShardID: makeLiveMergeShardInfo(mergeShardID, common.NewPeerSet(peer1), peer1, 512, false),
+				},
+			},
+		}
+
+		mergeTransition := tablemgr.MergeTransition{
+			ShardID:      shardID,
+			MergeShardID: mergeShardID,
+		}
+
+		current := CurrentClusterState{
+			Shards: map[types.ID]*store.ShardInfo{
+				mergeShardID: {
+					Peers:      common.NewPeerSet(peer1),
+					RaftStatus: &common.RaftStatus{Lead: peer1, Voters: common.NewPeerSet(peer1)},
+				},
+			},
+		}
+
+		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, mergeShardID).
+			Return(donorLeaderClient, nil)
+		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, shardID).
+			Return(targetLeaderClient, nil)
+		mockTableOps.On("PrepareShardsForMerge", mergeTransition).
+			Return(&store.ShardConfig{ByteRange: [2][]byte{{0x00}, {0x80}}}, nil)
+		mockShardOps.On(
+			"SetMergeState",
+			mock.Anything,
+			mergeShardID,
+			mock.MatchedBy(func(state *db.MergeState) bool {
+				return state != nil &&
+					state.GetPhase() == db.MergeState_PHASE_PREPARE &&
+					state.GetDonorShardId() == uint64(mergeShardID) &&
+					state.GetReceiverShardId() == uint64(shardID) &&
+					state.GetCaptureDeltas() &&
+					!state.GetAcceptDonorRange()
+			}),
+		).Return(nil)
+		mockShardOps.On(
+			"SetMergeState",
+			mock.Anything,
+			shardID,
+			mock.MatchedBy(func(state *db.MergeState) bool {
+				return state != nil &&
+					state.GetPhase() == db.MergeState_PHASE_PREPARE &&
+					state.GetDonorShardId() == uint64(mergeShardID) &&
+					state.GetReceiverShardId() == uint64(shardID) &&
+					!state.GetCaptureDeltas() &&
+					state.GetAcceptDonorRange()
+			}),
+		).Return(nil)
+		mockStoreOps.On("UpdateShardMergeState", mock.Anything, mergeShardID, mock.Anything).Return(nil)
+		mockStoreOps.On("UpdateShardMergeState", mock.Anything, shardID, mock.Anything).Return(nil)
+
+		reconciler := NewReconciler(
+			mockShardOps,
+			mockTableOps,
+			mockStoreOps,
+			ReconciliationConfig{ReplicationFactor: 1},
+			zap.NewNop(),
+		)
+
+		eg, ctx := errgroup.WithContext(context.Background())
+		reconciler.executeSplitAndMergeTransitions(
+			ctx,
+			eg,
+			current,
+			[]tablemgr.SplitTransition{},
+			[]tablemgr.MergeTransition{mergeTransition},
+		)
+		err := eg.Wait()
+
+		assert.NoError(t, err)
+		mockTableOps.AssertCalled(t, "PrepareShardsForMerge", mergeTransition)
+		mockShardOps.AssertNotCalled(t, "StopShard")
+		mockShardOps.AssertNotCalled(t, "MergeRange")
+	})
+}
+
+func TestExecuteMergeRollback_ResetsMetadata(t *testing.T) {
+	mockShardOps := &MockShardOperations{}
+	mockTableOps := &MockTableOperations{}
+	mockStoreOps := &MockStoreOperations{}
+
+	receiverID := types.ID(1)
+	donorID := types.ID(2)
+	transition := tablemgr.MergeTransition{
+		ShardID:      receiverID,
+		MergeShardID: donorID,
+		TableName:    "users",
+	}
+
+	receiverMergeState := &db.MergeState{}
+	receiverMergeState.SetPhase(db.MergeState_PHASE_CATCHUP)
+	receiverMergeState.SetDonorShardId(uint64(donorID))
+	receiverMergeState.SetReceiverShardId(uint64(receiverID))
+	receiverMergeState.SetAcceptDonorRange(true)
+
+	donorMergeState := &db.MergeState{}
+	donorMergeState.SetPhase(db.MergeState_PHASE_CATCHUP)
+	donorMergeState.SetDonorShardId(uint64(donorID))
+	donorMergeState.SetReceiverShardId(uint64(receiverID))
+
+	mockStoreOps.On("GetShardStatuses").Return(map[types.ID]*store.ShardStatus{
+		receiverID: {
+			ID:    receiverID,
+			Table: "users",
+			State: store.ShardState_PreMerge,
+			ShardInfo: store.ShardInfo{
+				MergeState: receiverMergeState,
+			},
+		},
+		donorID: {
+			ID:    donorID,
+			Table: "users",
+			ShardInfo: store.ShardInfo{
+				MergeState: donorMergeState,
+			},
+		},
+	}, nil)
+	mockShardOps.On(
+		"SetMergeState",
+		mock.Anything,
+		receiverID,
+		mock.MatchedBy(func(state *db.MergeState) bool {
+			return state != nil && state.GetPhase() == db.MergeState_PHASE_ROLLING_BACK
+		}),
+	).Return(nil)
+	mockShardOps.On("SetMergeState", mock.Anything, donorID, (*db.MergeState)(nil)).Return(nil)
+	mockShardOps.On("SetMergeState", mock.Anything, receiverID, (*db.MergeState)(nil)).Return(nil)
+	mockTableOps.On("RollbackShardsForMerge", transition).
+		Return(&store.ShardConfig{ByteRange: [2][]byte{{0x00}, {0x80}}}, nil)
+	mockStoreOps.On("UpdateShardMergeState", mock.Anything, donorID, (*db.MergeState)(nil)).Return(nil)
+	mockStoreOps.On("UpdateShardMergeState", mock.Anything, receiverID, (*db.MergeState)(nil)).Return(nil)
+
+	reconciler := NewReconciler(
+		mockShardOps,
+		mockTableOps,
+		mockStoreOps,
+		ReconciliationConfig{ReplicationFactor: 1},
+		zap.NewNop(),
+	)
+
+	err := reconciler.executeMergeRollback(context.Background(), receiverID, donorID)
+
+	assert.NoError(t, err)
+	mockStoreOps.AssertExpectations(t)
+	mockShardOps.AssertExpectations(t)
+	mockTableOps.AssertExpectations(t)
+	assert.True(t, reconciler.IsShardInCooldown(receiverID))
+	assert.True(t, reconciler.IsShardInCooldown(donorID))
 }
 
 func TestExecuteSplitAndMergeTransitions_SplitOperations(t *testing.T) {
@@ -1895,9 +2248,26 @@ func TestExecuteSplitAndMergeTransitions_ConcurrentOperations(t *testing.T) {
 		// Setup merge transition
 		shardID2 := types.ID(3)
 		mergeShardID := types.ID(4)
-		leaderClient2 := &client.StoreClient{}
 		peer1 := types.ID(30)
 		peer2 := types.ID(40)
+		targetLeaderClient := &stubStoreRPC{
+			id: shardID2,
+			status: &store.StoreStatus{
+				ID: shardID2,
+				Shards: map[types.ID]*store.ShardInfo{
+					shardID2: makeLiveMergeShardInfo(shardID2, common.NewPeerSet(peer1, peer2), peer1, 1024, false),
+				},
+			},
+		}
+		donorLeaderClient := &stubStoreRPC{
+			id: mergeShardID,
+			status: &store.StoreStatus{
+				ID: mergeShardID,
+				Shards: map[types.ID]*store.ShardInfo{
+					mergeShardID: makeLiveMergeShardInfo(mergeShardID, common.NewPeerSet(peer1, peer2), peer1, 0, true),
+				},
+			},
+		}
 
 		mergeTransition := tablemgr.MergeTransition{
 			ShardID:      shardID2,
@@ -1931,7 +2301,9 @@ func TestExecuteSplitAndMergeTransitions_ConcurrentOperations(t *testing.T) {
 
 		// Merge expectations
 		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, mergeShardID).
-			Return(leaderClient2, nil)
+			Return(donorLeaderClient, nil)
+		mockStoreOps.On("GetLeaderClientForShard", mock.Anything, shardID2).
+			Return(targetLeaderClient, nil)
 		mockTableOps.On("ReassignShardsForMerge", mergeTransition).Return(newShardConfig2, nil)
 		mockShardOps.On("StopShard", mock.Anything, mergeShardID, peer1).Return(nil)
 		mockShardOps.On("StopShard", mock.Anything, mergeShardID, peer2).Return(nil)
@@ -1941,7 +2313,7 @@ func TestExecuteSplitAndMergeTransitions_ConcurrentOperations(t *testing.T) {
 			mockShardOps,
 			mockTableOps,
 			mockStoreOps,
-			ReconciliationConfig{},
+			ReconciliationConfig{ReplicationFactor: 2},
 			zap.NewNop(),
 		)
 

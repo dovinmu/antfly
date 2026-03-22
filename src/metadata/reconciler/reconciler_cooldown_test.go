@@ -164,7 +164,7 @@ func TestShardForNodeCooldownCleanup(t *testing.T) {
 
 func TestComputeSplitTransitions_WithCooldown(t *testing.T) {
 	mockTime := &MockTimeProvider{
-		current: time.Now(), // Use current time to avoid stale stats
+		current: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 
 	shardID := types.ID(1)
@@ -201,7 +201,7 @@ func TestComputeSplitTransitions_WithCooldown(t *testing.T) {
 	// Should not split because of cooldown
 	splits, _ := computeSplitTransitions(
 		t.Context(),
-		3, shards, 500*1024*1024, 100, shardCooldown,
+		3, shards, 500*1024*1024, 0, 1, 100, shardCooldown,
 		func(ctx context.Context, id types.ID) ([]byte, error) { return []byte("median"), nil },
 		mockTime,
 		1,
@@ -212,11 +212,12 @@ func TestComputeSplitTransitions_WithCooldown(t *testing.T) {
 
 	// Advance time past cooldown
 	mockTime.Advance(61 * time.Second)
+	shards[shardID].ShardStats.Updated = mockTime.Now()
 
 	// Now should split
 	splits, _ = computeSplitTransitions(
 		t.Context(),
-		3, shards, 500*1024*1024, 100, shardCooldown,
+		3, shards, 500*1024*1024, 0, 1, 100, shardCooldown,
 		func(ctx context.Context, id types.ID) ([]byte, error) { return []byte("median"), nil },
 		mockTime,
 		1,
@@ -285,7 +286,7 @@ func TestMultipleCooldownsWithDifferentDurations(t *testing.T) {
 
 func TestCooldownPreventsRapidSplits(t *testing.T) {
 	mockTime := &MockTimeProvider{
-		current: time.Now(), // Use current time to avoid stale stats
+		current: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 
 	reconciler := NewReconcilerWithTimeProvider(
@@ -337,6 +338,8 @@ func TestCooldownPreventsRapidSplits(t *testing.T) {
 		reconciler.config.ReplicationFactor,
 		shards,
 		reconciler.config.MaxShardSizeBytes,
+		reconciler.config.MinShardSizeBytes,
+		reconciler.config.MinShardsPerTable,
 		reconciler.config.MaxShardsPerTable,
 		reconciler.shardCooldown,
 		getMedianKey,
@@ -355,6 +358,8 @@ func TestCooldownPreventsRapidSplits(t *testing.T) {
 		reconciler.config.ReplicationFactor,
 		shards,
 		reconciler.config.MaxShardSizeBytes,
+		reconciler.config.MinShardSizeBytes,
+		reconciler.config.MinShardsPerTable,
 		reconciler.config.MaxShardsPerTable,
 		reconciler.shardCooldown,
 		getMedianKey,
@@ -366,11 +371,14 @@ func TestCooldownPreventsRapidSplits(t *testing.T) {
 
 	// After cooldown expires, split should be allowed
 	mockTime.Advance(61 * time.Second)
+	shards[shardID].ShardStats.Updated = mockTime.Now()
 	splits, _ = computeSplitTransitions(
 		ctx,
 		reconciler.config.ReplicationFactor,
 		shards,
 		reconciler.config.MaxShardSizeBytes,
+		reconciler.config.MinShardSizeBytes,
+		reconciler.config.MinShardsPerTable,
 		reconciler.config.MaxShardsPerTable,
 		reconciler.shardCooldown,
 		getMedianKey,

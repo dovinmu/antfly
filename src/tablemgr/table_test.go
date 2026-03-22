@@ -22,6 +22,7 @@ import (
 	"slices"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/antflydb/antfly/lib/pebbleutils"
 	"github.com/antflydb/antfly/lib/schema"
@@ -626,6 +627,77 @@ func TestUpdateStatuses_NilShardStatsPreservesExisting(t *testing.T) {
 		"DiskSize should be preserved from previous update")
 }
 
+func TestUpdateStatuses_EmptyShardRefreshesReportedTimestamp(t *testing.T) {
+	db := setupTestDB(t)
+
+	tm, err := NewTableManager(db, nil, 0)
+	require.NoError(t, err)
+
+	tableName := "emptyRefreshTable"
+	_, err = tm.CreateTable(
+		tableName,
+		TableConfig{NumShards: 1, StartID: 610, Schema: &schema.TableSchema{}},
+	)
+	require.NoError(t, err)
+
+	shardID := types.ID(610)
+	originalStatus, err := tm.GetShardStatus(shardID)
+	require.NoError(t, err)
+
+	initialUpdated := time.Date(2040, 1, 1, 12, 0, 0, 0, time.UTC)
+	refreshedUpdated := initialUpdated.Add(45 * time.Second)
+
+	err = tm.UpdateStatuses(context.Background(), map[types.ID]*StoreStatus{
+		types.ID(10): {
+			StoreInfo: store.StoreInfo{ID: types.ID(10)},
+			Shards: map[types.ID]*store.ShardInfo{
+				shardID: {
+					ShardConfig: originalStatus.ShardConfig,
+					Peers:       common.NewPeerSet(10),
+					ShardStats: &store.ShardStats{
+						Created: initialUpdated.Add(-10 * time.Minute),
+						Updated: initialUpdated,
+						Storage: &store.StorageStats{
+							DiskSize: 4096,
+							Empty:    true,
+						},
+					},
+					RaftStatus: &common.RaftStatus{Lead: 10},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	err = tm.UpdateStatuses(context.Background(), map[types.ID]*StoreStatus{
+		types.ID(10): {
+			StoreInfo: store.StoreInfo{ID: types.ID(10)},
+			Shards: map[types.ID]*store.ShardInfo{
+				shardID: {
+					ShardConfig: originalStatus.ShardConfig,
+					Peers:       common.NewPeerSet(10),
+					ShardStats: &store.ShardStats{
+						Created: initialUpdated.Add(-10 * time.Minute),
+						Updated: refreshedUpdated,
+						Storage: &store.StorageStats{
+							DiskSize: 4096,
+							Empty:    true,
+						},
+					},
+					RaftStatus: &common.RaftStatus{Lead: 10},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	status, err := tm.GetShardStatus(shardID)
+	require.NoError(t, err)
+	require.NotNil(t, status.ShardStats)
+	assert.Equal(t, refreshedUpdated, status.ShardStats.Updated)
+	assert.True(t, status.ShardStats.Storage.Empty)
+}
+
 func TestTable_FindShardForKey(t *testing.T) {
 	table := &store.Table{
 		Name: "findKeyTable",
@@ -802,6 +874,60 @@ func TestTableManager_ReassignShardsForSplit(t *testing.T) {
 	require.NoError(t, err, "New shard status not persisted")
 }
 
+func TestNeedsUpdates_PreMergeRetainsMergeStateWhenLeaderHeartbeatOmitsIt(t *testing.T) {
+	db := setupTestDB(t)
+
+	tm, err := NewTableManager(db, nil, 0)
+	require.NoError(t, err)
+
+	mergeState := &storedb.MergeState{}
+	mergeState.SetPhase(storedb.MergeState_PHASE_FINALIZING)
+	mergeState.SetDonorShardId(401)
+	mergeState.SetReceiverShardId(400)
+	mergeState.SetReceiverRangeStart([]byte{0x00})
+	mergeState.SetReceiverRangeEnd([]byte{0x80})
+	mergeState.SetDonorRangeStart([]byte{0x80})
+	mergeState.SetDonorRangeEnd([]byte{0xff})
+	mergeState.SetFinalSeq(7)
+
+	oldStatus := &store.ShardStatus{
+		ID:    types.ID(400),
+		Table: "docs",
+		State: store.ShardState_PreMerge,
+		ShardInfo: store.ShardInfo{
+			ShardConfig: store.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, {0x80}},
+			},
+			Peers:      common.NewPeerSet(42),
+			ReportedBy: common.NewPeerSet(42),
+			RaftStatus: &common.RaftStatus{
+				Lead:   42,
+				Voters: common.NewPeerSet(42),
+			},
+			MergeState: mergeState,
+		},
+	}
+
+	newInfo := &store.ShardInfo{
+		ShardConfig: oldStatus.ShardConfig,
+		Peers:       common.NewPeerSet(42),
+		ReportedBy:  common.NewPeerSet(42),
+		RaftStatus: &common.RaftStatus{
+			Lead:   42,
+			Voters: common.NewPeerSet(42),
+		},
+		MergeState: nil,
+	}
+
+	newStatus, needsUpdate := tm.needsUpdates(oldStatus, newInfo)
+	require.NotNil(t, newStatus)
+	assert.False(t, needsUpdate)
+	require.NotNil(t, newStatus.MergeState)
+	assert.Equal(t, storedb.MergeState_PHASE_FINALIZING, newStatus.MergeState.GetPhase())
+	assert.Equal(t, uint64(401), newStatus.MergeState.GetDonorShardId())
+	assert.Equal(t, store.ShardState_PreMerge, newStatus.State)
+}
+
 func TestTableManager_ReassignShardsForMerge(t *testing.T) {
 	db := setupTestDB(t)
 
@@ -856,7 +982,7 @@ func TestTableManager_ReassignShardsForMerge(t *testing.T) {
 	keptStatus, err := tm.GetShardStatus(shardToKeepID)
 	require.NoError(t, err)
 	assert.Equal(t, mergedConf, &keptStatus.ShardConfig)
-	assert.Equal(t, store.ShardState_PreMerge, keptStatus.State)
+	assert.Equal(t, store.ShardState_Default, keptStatus.State)
 
 	// Verify the other shard is removed from table config
 	table, err = tm.GetTable(tableName)
@@ -883,6 +1009,152 @@ func TestTableManager_ReassignShardsForMerge(t *testing.T) {
 
 	// Test merging non-adjacent shards (should error) - need to set up a specific scenario
 	// For now, this requires more intricate setup of ranges.
+}
+
+func TestTableManager_PrepareShardsForMerge(t *testing.T) {
+	db := setupTestDB(t)
+
+	tm, err := NewTableManager(db, nil, 0)
+	require.NoError(t, err)
+
+	tableName := "prepareMergeTable"
+	_, err = tm.CreateTable(tableName, TableConfig{
+		NumShards: 2,
+		StartID:   300,
+		Schema:    &schema.TableSchema{},
+	})
+	require.NoError(t, err)
+
+	receiverID := types.ID(300)
+	donorID := types.ID(301)
+	transition := MergeTransition{
+		ShardID:      receiverID,
+		MergeShardID: donorID,
+		TableName:    tableName,
+	}
+
+	receiverConf, err := tm.PrepareShardsForMerge(transition)
+	require.NoError(t, err)
+	require.NotNil(t, receiverConf)
+
+	table, err := tm.GetTable(tableName)
+	require.NoError(t, err)
+	assert.Contains(t, table.Shards, receiverID)
+	assert.Contains(t, table.Shards, donorID)
+
+	receiverStatus, err := tm.GetShardStatus(receiverID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ShardState_PreMerge, receiverStatus.State)
+
+	_, err = tm.GetShardStatus(donorID)
+	require.NoError(t, err)
+}
+
+func TestTableManager_FinalizeAndRollbackShardsForMerge(t *testing.T) {
+	t.Run("finalize widens receiver and removes donor", func(t *testing.T) {
+		db := setupTestDB(t)
+
+		tm, err := NewTableManager(db, nil, 0)
+		require.NoError(t, err)
+
+		tableName := "finalizeMergeTable"
+		table, err := tm.CreateTable(tableName, TableConfig{
+			NumShards: 2,
+			StartID:   400,
+			Schema:    &schema.TableSchema{},
+		})
+		require.NoError(t, err)
+
+		receiverID := types.ID(400)
+		donorID := types.ID(401)
+		transition := MergeTransition{
+			ShardID:      receiverID,
+			MergeShardID: donorID,
+			TableName:    tableName,
+		}
+
+		mergeState := &storedb.MergeState{}
+		mergeState.SetPhase(storedb.MergeState_PHASE_FINALIZING)
+		mergeState.SetDonorShardId(uint64(donorID))
+		mergeState.SetReceiverShardId(uint64(receiverID))
+		err = tm.UpdateShardMergeState(context.Background(), receiverID, mergeState)
+		require.NoError(t, err)
+		_, err = tm.PrepareShardsForMerge(transition)
+		require.NoError(t, err)
+
+		finalConf, err := tm.FinalizeShardsForMerge(transition)
+		require.NoError(t, err)
+		require.NotNil(t, finalConf)
+		assert.Equal(t, table.Shards[receiverID].ByteRange[0], finalConf.ByteRange[0])
+		assert.Equal(t, table.Shards[donorID].ByteRange[1], finalConf.ByteRange[1])
+
+		receiverStatus, err := tm.GetShardStatus(receiverID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ShardState_Default, receiverStatus.State)
+		assert.Nil(t, receiverStatus.MergeState)
+
+		_, err = tm.GetShardStatus(donorID)
+		assert.ErrorIs(t, err, ErrNotFound)
+	})
+
+	t.Run("rollback restores receiver default state and keeps donor", func(t *testing.T) {
+		db := setupTestDB(t)
+
+		tm, err := NewTableManager(db, nil, 0)
+		require.NoError(t, err)
+
+		tableName := "rollbackMergeTable"
+		_, err = tm.CreateTable(tableName, TableConfig{
+			NumShards: 2,
+			StartID:   500,
+			Schema:    &schema.TableSchema{},
+		})
+		require.NoError(t, err)
+
+		receiverID := types.ID(500)
+		donorID := types.ID(501)
+		transition := MergeTransition{
+			ShardID:      receiverID,
+			MergeShardID: donorID,
+			TableName:    tableName,
+		}
+
+		_, err = tm.PrepareShardsForMerge(transition)
+		require.NoError(t, err)
+
+		receiverMergeState := &storedb.MergeState{}
+		receiverMergeState.SetPhase(storedb.MergeState_PHASE_CATCHUP)
+		receiverMergeState.SetDonorShardId(uint64(donorID))
+		receiverMergeState.SetReceiverShardId(uint64(receiverID))
+		receiverMergeState.SetAcceptDonorRange(true)
+		err = tm.UpdateShardMergeState(context.Background(), receiverID, receiverMergeState)
+		require.NoError(t, err)
+
+		donorMergeState := &storedb.MergeState{}
+		donorMergeState.SetPhase(storedb.MergeState_PHASE_CATCHUP)
+		donorMergeState.SetDonorShardId(uint64(donorID))
+		donorMergeState.SetReceiverShardId(uint64(receiverID))
+		err = tm.UpdateShardMergeState(context.Background(), donorID, donorMergeState)
+		require.NoError(t, err)
+
+		rolledBackConf, err := tm.RollbackShardsForMerge(transition)
+		require.NoError(t, err)
+		require.NotNil(t, rolledBackConf)
+
+		table, err := tm.GetTable(tableName)
+		require.NoError(t, err)
+		assert.Contains(t, table.Shards, receiverID)
+		assert.Contains(t, table.Shards, donorID)
+
+		receiverStatus, err := tm.GetShardStatus(receiverID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ShardState_Default, receiverStatus.State)
+		assert.Nil(t, receiverStatus.MergeState)
+
+		donorStatus, err := tm.GetShardStatus(donorID)
+		require.NoError(t, err)
+		assert.Nil(t, donorStatus.MergeState)
+	})
 }
 
 func TestTableManager_Persistence(t *testing.T) {

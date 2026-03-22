@@ -5,6 +5,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	json "github.com/antflydb/antfly/pkg/libaf/json"
@@ -52,12 +56,58 @@ func (c *directStoreClient) Batch(
 	}.Build(), false)
 }
 
+func (c *directStoreClient) ApplyMergeChunk(
+	ctx context.Context,
+	shardID types.ID,
+	writes [][2][]byte,
+	deletes [][]byte,
+	_ db.Op_SyncLevel,
+) error {
+	shard, err := c.shard(shardID)
+	if err != nil {
+		return err
+	}
+	return shard.ApplyMergeChunk(ctx, db.BatchOp_builder{
+		Writes:  db.WritesFromTuples(writes),
+		Deletes: deletes,
+		SyncLevel: func() *db.Op_SyncLevel {
+			level := db.Op_SyncLevelInternalMergeCopy
+			return &level
+		}(),
+	}.Build())
+}
+
 func (c *directStoreClient) Backup(ctx context.Context, shardID types.ID, loc, id string) error {
 	shard, err := c.shard(shardID)
 	if err != nil {
 		return err
 	}
-	return shard.Backup(ctx, loc, id)
+	if err := shard.Backup(ctx, loc, id); err != nil {
+		return err
+	}
+	backupDir, ok := strings.CutPrefix(loc, "file://")
+	if !ok {
+		return nil
+	}
+	if err := os.MkdirAll(backupDir, os.ModePerm); err != nil && !os.IsExist(err) { //nolint:gosec // G301: test/sim data dir
+		return fmt.Errorf("creating backup directory: %w", err)
+	}
+	srcPath := filepath.Join(common.SnapDir(c.h.config.GetBaseDir(), shardID, c.nodeID), id+".tar.zst")
+	dstPath := filepath.Join(backupDir, common.ShardBackupFileName(id, shardID))
+	src, err := os.Open(filepath.Clean(srcPath))
+	if err != nil {
+		return fmt.Errorf("opening backup archive %s: %w", srcPath, err)
+	}
+	defer func() { _ = src.Close() }()
+	dst, err := os.Create(filepath.Clean(dstPath))
+	if err != nil {
+		return fmt.Errorf("creating backup archive %s: %w", dstPath, err)
+	}
+	defer func() { _ = dst.Close() }()
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("copying backup archive to %s: %w", dstPath, err)
+	}
+	return nil
 }
 
 func (c *directStoreClient) Lookup(ctx context.Context, shardID types.ID, keys []string) (map[string][]byte, error) {
@@ -123,6 +173,26 @@ func (c *directStoreClient) MergeRange(ctx context.Context, shardID types.ID, by
 		return err
 	}
 	return shard.SetRange(ctx, byteRange)
+}
+
+func (c *directStoreClient) SetMergeState(ctx context.Context, shardID types.ID, state *db.MergeState) error {
+	shard, err := c.shard(shardID)
+	if err != nil {
+		return err
+	}
+	return c.h.runWithProgress(simulatorControlPlaneTimeout, func() error {
+		return shard.SetMergeState(ctx, state)
+	})
+}
+
+func (c *directStoreClient) FinalizeMerge(ctx context.Context, shardID types.ID, byteRange [2][]byte) error {
+	shard, err := c.shard(shardID)
+	if err != nil {
+		return err
+	}
+	return c.h.runWithProgress(simulatorControlPlaneTimeout, func() error {
+		return shard.FinalizeMerge(ctx, byteRange)
+	})
 }
 
 func (c *directStoreClient) UpdateSchema(ctx context.Context, shardID types.ID, tableSchema *schema.TableSchema) error {
@@ -294,6 +364,31 @@ func (c *directStoreClient) Scan(
 		FilterQuery:      opts.FilterQuery,
 		Limit:            opts.Limit,
 	})
+}
+
+func (c *directStoreClient) ExportRangeChunk(
+	ctx context.Context,
+	shardID types.ID,
+	startKey, endKey, afterKey []byte,
+	limit int,
+) ([][2][]byte, []byte, bool, error) {
+	shard, err := c.shard(shardID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return shard.ExportRangeChunk(ctx, startKey, endKey, afterKey, limit)
+}
+
+func (c *directStoreClient) ListMergeDeltaEntriesAfter(
+	ctx context.Context,
+	shardID types.ID,
+	afterSeq uint64,
+) ([]*db.MergeDeltaEntry, error) {
+	shard, err := c.shard(shardID)
+	if err != nil {
+		return nil, err
+	}
+	return shard.ListMergeDeltaEntriesAfter(afterSeq)
 }
 
 func (c *directStoreClient) InitTransaction(
