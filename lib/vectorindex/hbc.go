@@ -2032,6 +2032,223 @@ func insertResultWithCollapse(
 	return true
 }
 
+func (idx *HBCIndex) resolveRerankPolicy(req *SearchRequest) RerankPolicy {
+	if !idx.config.UseQuantization || idx.config.DisableReranking {
+		return RerankPolicyNever
+	}
+	if req != nil && req.RerankPolicy != nil {
+		switch *req.RerankPolicy {
+		case RerankPolicyNever, RerankPolicyBoundary, RerankPolicyAlways:
+			return *req.RerankPolicy
+		}
+	}
+	return RerankPolicyAlways
+}
+
+func resultMaybeCloser(r1 *Result, r2 *Result) bool {
+	return r1.Distance-r1.ErrorBound <= r2.Distance+r2.ErrorBound
+}
+
+func resultDefinitelyCloser(r1 *Result, r2 *Result) bool {
+	return r1.Distance+r1.ErrorBound < r2.Distance-r2.ErrorBound
+}
+
+func resultMaybeOver(r *Result, dist float32) bool {
+	return r.Distance+r.ErrorBound >= dist
+}
+
+func resultDefinitelyOver(r *Result, dist float32) bool {
+	return r.Distance-r.ErrorBound > dist
+}
+
+func resultMaybeUnder(r *Result, dist float32) bool {
+	return r.Distance-r.ErrorBound <= dist
+}
+
+func resultDefinitelyUnder(r *Result, dist float32) bool {
+	return r.Distance+r.ErrorBound < dist
+}
+
+func shouldAutoRerank(
+	results []*Result,
+	k int,
+	distanceOver *float32,
+	distanceUnder *float32,
+) bool {
+	return len(selectAutoRerankCandidates(results, k, distanceOver, distanceUnder)) > 0
+}
+
+func selectAutoRerankCandidates(
+	results []*Result,
+	k int,
+	distanceOver *float32,
+	distanceUnder *float32,
+) []int {
+	limit := min(k, len(results))
+	if limit == 0 {
+		return nil
+	}
+
+	// Threshold ambiguity can change membership after filtering, so rerank the
+	// retained set rather than trying to maintain a smaller safe window here.
+	for i := range limit {
+		res := results[i]
+		if distanceOver != nil && resultMaybeOver(res, *distanceOver) && !resultDefinitelyOver(res, *distanceOver) {
+			return fullResultIndexList(len(results))
+		}
+		if distanceUnder != nil && resultMaybeUnder(res, *distanceUnder) && !resultDefinitelyUnder(res, *distanceUnder) {
+			return fullResultIndexList(len(results))
+		}
+	}
+
+	rerank := make(map[int]struct{}, limit)
+	for i := range limit {
+		for j := limit; j < len(results); j++ {
+			if resultMaybeCloser(results[j], results[i]) {
+				rerank[i] = struct{}{}
+				rerank[j] = struct{}{}
+			}
+		}
+	}
+
+	if len(rerank) == 0 {
+		return nil
+	}
+	indices := make([]int, 0, len(rerank))
+	for idx := range rerank {
+		indices = append(indices, idx)
+	}
+	slices.Sort(indices)
+	return indices
+}
+
+func fullResultIndexList(count int) []int {
+	indices := make([]int, count)
+	for i := range count {
+		indices[i] = i
+	}
+	return indices
+}
+
+func debugHitFromResult(r *Result) SearchDebugHit {
+	return SearchDebugHit{
+		ID:         r.ID,
+		Distance:   r.Distance,
+		ErrorBound: r.ErrorBound,
+		LowerBound: r.Distance - r.ErrorBound,
+		UpperBound: r.Distance + r.ErrorBound,
+	}
+}
+
+func debugPairFromResults(left *Result, right *Result) SearchDebugPair {
+	leftHit := debugHitFromResult(left)
+	rightHit := debugHitFromResult(right)
+	intervalGap := rightHit.LowerBound - leftHit.UpperBound
+	return SearchDebugPair{
+		Left:        leftHit,
+		Right:       rightHit,
+		DistanceGap: right.Distance - left.Distance,
+		IntervalGap: intervalGap,
+		Overlaps:    intervalGap <= 0,
+	}
+}
+
+func populateApproxSearchDebug(
+	debug *SearchDebugInfo,
+	results []*Result,
+	k int,
+	distanceOver *float32,
+	distanceUnder *float32,
+	rerankPolicy RerankPolicy,
+) {
+	if debug == nil {
+		return
+	}
+
+	*debug = SearchDebugInfo{
+		ResolvedRerankPolicy: rerankPolicy,
+		ApproxCandidateCount: len(results),
+		TopKCount:            min(k, len(results)),
+		MinDistanceGapTopK:   math32.MaxFloat32,
+		MinIntervalGapTopK:   math32.MaxFloat32,
+	}
+
+	limit := min(debug.TopKCount, 5)
+	debug.ApproxTop = make([]SearchDebugHit, 0, limit)
+	for i := range limit {
+		debug.ApproxTop = append(debug.ApproxTop, debugHitFromResult(results[i]))
+	}
+
+	topKCount := debug.TopKCount
+	for i := range topKCount {
+		res := results[i]
+		if distanceOver != nil && resultMaybeOver(res, *distanceOver) && !resultDefinitelyOver(res, *distanceOver) {
+			debug.AmbiguousDistanceOverHits++
+		}
+		if distanceUnder != nil && resultMaybeUnder(res, *distanceUnder) && !resultDefinitelyUnder(res, *distanceUnder) {
+			debug.AmbiguousDistanceUnderHits++
+		}
+	}
+
+	for i := range topKCount {
+		for j := i + 1; j < topKCount; j++ {
+			pair := debugPairFromResults(results[i], results[j])
+			if pair.DistanceGap < debug.MinDistanceGapTopK {
+				debug.MinDistanceGapTopK = pair.DistanceGap
+			}
+			if pair.IntervalGap < debug.MinIntervalGapTopK {
+				debug.MinIntervalGapTopK = pair.IntervalGap
+				pairCopy := pair
+				debug.ClosestPairTopK = &pairCopy
+			}
+			if pair.Overlaps {
+				debug.AmbiguousTopKPairs++
+			}
+		}
+	}
+
+	if debug.MinDistanceGapTopK == math32.MaxFloat32 {
+		debug.MinDistanceGapTopK = 0
+	}
+	if debug.MinIntervalGapTopK == math32.MaxFloat32 {
+		debug.MinIntervalGapTopK = 0
+	}
+
+	if topKCount > 0 {
+		for i := topKCount; i < len(results); i++ {
+			pair := debugPairFromResults(results[topKCount-1], results[i])
+			if pair.Overlaps {
+				debug.AmbiguousBoundaryPairs++
+				if debug.BoundaryPair == nil {
+					pairCopy := pair
+					debug.BoundaryPair = &pairCopy
+				}
+			}
+		}
+		if debug.BoundaryPair == nil && len(results) > topKCount {
+			pair := debugPairFromResults(results[topKCount-1], results[topKCount])
+			pairCopy := pair
+			debug.BoundaryPair = &pairCopy
+		}
+	}
+}
+
+func populateExactSearchDebug(debug *SearchDebugInfo, results []*Result, exactRerank bool) {
+	if debug == nil {
+		return
+	}
+	debug.ExactRerank = exactRerank
+	if !exactRerank {
+		debug.ExactTop = nil
+		return
+	}
+	limit := min(len(results), 5)
+	debug.ExactTop = make([]SearchDebugHit, 0, limit)
+	for i := range limit {
+		debug.ExactTop = append(debug.ExactTop, debugHitFromResult(results[i]))
+	}
+}
+
 // Search finds k nearest neighbors
 func (idx *HBCIndex) Search(req *SearchRequest) (r []*Result, err error) {
 	defer func() {
@@ -2400,24 +2617,50 @@ func (idx *HBCIndex) Search(req *SearchRequest) (r []*Result, err error) {
 			Metadata:   metadata,
 			ErrorBound: item.ErrorBounds,
 		}
-		if idx.config.UseQuantization && !idx.config.DisableReranking {
-			res.Vector = make(vector.T, int(idx.config.Dimension))
-			var err error
-			if res.Vector, err = idx.GetVector(idx.indexDB, item.ID, res.Vector); err != nil {
-				// FIXME (ajr) Handle error properly
-				continue
-			}
-			// childDist = vector.MeasureDistance(idx.config.DistanceMetric, req.Embedding, vec)
-		}
 		finalResults = append(finalResults, res)
-	}
-	// Reverse the results to have the closest first
-	if idx.config.UseQuantization && !idx.config.DisableReranking {
-		q.ComputeExactDistances(true, finalResults)
 	}
 	slices.SortFunc(finalResults, func(a, b *Result) int {
 		return cmp.Compare(a.Distance, b.Distance)
 	})
+	rerankPolicy := idx.resolveRerankPolicy(req)
+	populateApproxSearchDebug(req.Debug, finalResults, req.K, req.DistanceOver, req.DistanceUnder, rerankPolicy)
+	exactRerank := rerankPolicy == RerankPolicyAlways
+	rerankCandidates := []int(nil)
+	if rerankPolicy == RerankPolicyAlways {
+		rerankCandidates = fullResultIndexList(len(finalResults))
+	} else if rerankPolicy == RerankPolicyBoundary {
+		rerankCandidates = selectAutoRerankCandidates(
+			finalResults,
+			req.K,
+			req.DistanceOver,
+			req.DistanceUnder,
+		)
+		exactRerank = len(rerankCandidates) > 0
+	}
+	if req.Debug != nil {
+		req.Debug.RerankCandidateCount = len(rerankCandidates)
+	}
+	if exactRerank && len(rerankCandidates) > 0 {
+		exactResults := make([]*Result, 0, len(rerankCandidates))
+		for _, candidateIdx := range rerankCandidates {
+			res := finalResults[candidateIdx]
+			res.Vector = make(vector.T, int(idx.config.Dimension))
+			var err error
+			if res.Vector, err = idx.GetVector(idx.indexDB, res.ID, res.Vector); err != nil {
+				// FIXME (ajr) Handle error properly
+				continue
+			}
+			exactResults = append(exactResults, res)
+		}
+		q.ComputeExactDistances(true, exactResults)
+		for _, res := range exactResults {
+			res.Vector = nil
+		}
+		slices.SortFunc(finalResults, func(a, b *Result) int {
+			return cmp.Compare(a.Distance, b.Distance)
+		})
+	}
+	populateExactSearchDebug(req.Debug, finalResults, exactRerank)
 	if req.DistanceOver != nil {
 		// Trim results that don't satisfy the DistanceOver condition.
 		// Results are sorted ascending by distance, so find the first

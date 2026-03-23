@@ -376,9 +376,14 @@ func (ms *MetadataStore) leaderClientForShardNoFallback(
 }
 
 // directLeaderClientForShardBypassesSplitFallback returns the shard's own leader
-// without applying split-parent fallback or split-readiness checks.
-// This is only used as a recovery path when stale metadata routed a write to the
-// parent shard and that parent now rejects the key as out of range.
+// without applying split-parent fallback. This is only used as a recovery path
+// when stale metadata routed a write to the parent shard and that parent now
+// rejects the key as out of range.
+//
+// The child must still be fully cut over before we write to it directly. If we
+// bypass readiness checks and write into a child that has not yet caught up to
+// the parent's current replay fence, that write can sit outside the parent's
+// replay stream and disappear when the split finishes.
 func (ms *MetadataStore) directLeaderClientForShardBypassesSplitFallback(
 	ctx context.Context,
 	shardID types.ID,
@@ -386,6 +391,11 @@ func (ms *MetadataStore) directLeaderClientForShardBypassesSplitFallback(
 	status, err := ms.tm.GetShardStatus(shardID)
 	if err != nil || status == nil {
 		return 0, nil, fmt.Errorf("no status info available: %w", err)
+	}
+	isSplitChild := status.State == store.ShardState_SplittingOff ||
+		status.State == store.ShardState_SplitOffPreSnap
+	if isSplitChild && !status.CanInitiateSplitCutover() {
+		return 0, nil, ErrShardInitializing
 	}
 	if status.RaftStatus == nil {
 		return 0, nil, fmt.Errorf("no raft status available for shard: %w", client.ErrNoRaftStatus)

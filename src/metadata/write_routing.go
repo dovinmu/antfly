@@ -43,7 +43,7 @@ func isActiveSplitParentStatus(status *store.ShardStatus) bool {
 func shouldRouteWriteToParent(status *store.ShardStatus) bool {
 	switch status.State {
 	case store.ShardState_SplittingOff, store.ShardState_SplitOffPreSnap:
-		return !status.IsReadyForSplitReads()
+		return !status.CanInitiateSplitCutover()
 	default:
 		return false
 	}
@@ -87,8 +87,11 @@ func resolveWriteShardID(
 	if err == nil {
 		return parentShardID, nil
 	}
-	if shouldRouteWriteToParent(status) {
-		return 0, err
+	if status.State == store.ShardState_SplittingOff ||
+		status.State == store.ShardState_SplitOffPreSnap {
+		if !status.IsReadyForSplitReads() {
+			return 0, err
+		}
 	}
 	return shardID, nil
 }

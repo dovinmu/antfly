@@ -619,29 +619,48 @@ func (tm *TableManager) splitOffShardIsReady(parentStatus *store.ShardStatus) bo
 		return false
 	}
 
+	if parentStatus.SplitState != nil && parentStatus.SplitState.GetNewShardId() != 0 {
+		childID := types.ID(parentStatus.SplitState.GetNewShardId())
+		childStatus := allStatuses[childID]
+		if childStatus == nil || childStatus.Table != parentStatus.Table {
+			return false
+		}
+		if !bytes.Equal(childStatus.ByteRange[0], splitKey) {
+			return false
+		}
+		return splitOffShardStatusIsReady(childStatus)
+	}
+
+	var foundCandidate bool
 	for shardID, status := range allStatuses {
 		if status.Table != parentStatus.Table || shardID == parentStatus.ID {
 			continue
 		}
 		// The split-off shard has ByteRange[0] == splitKey (parent's end = child's start)
 		if bytes.Equal(status.ByteRange[0], splitKey) {
-			// Found the split-off shard, check if it's ready
-			switch status.State {
-			case store.ShardState_SplittingOff, store.ShardState_SplitOffPreSnap:
-				return status.IsReadyForSplitReads()
-			case store.ShardState_Default:
-				return status.IsReadyForSplitReads()
-			default:
-				// Unexpected state, be conservative
-				return false
+			foundCandidate = true
+			if splitOffShardStatusIsReady(status) {
+				return true
 			}
 		}
+	}
+	if foundCandidate {
+		return false
 	}
 
 	// If we can't find the split-off shard, allow the transition.
 	// This handles cases where the split was aborted or the split-off shard
 	// was cleaned up for some reason.
 	return true
+}
+
+func splitOffShardStatusIsReady(status *store.ShardStatus) bool {
+	switch status.State {
+	case store.ShardState_SplittingOff, store.ShardState_SplitOffPreSnap, store.ShardState_Default:
+		return status.IsReadyForSplitReads()
+	default:
+		return false
+	}
 }
 
 type StoreStatuses struct {

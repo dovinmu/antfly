@@ -59,3 +59,17 @@ func TestRunRandomScenarioWithActions_UsesProvidedScheduleLength(t *testing.T) {
 	require.Len(t, result.Actions, 3)
 	require.Equal(t, []ScenarioAction{ActionTick, ActionTick, ActionTick}, result.Actions)
 }
+
+func TestRunFailureReduction_UsesTimeoutBudget(t *testing.T) {
+	prev := failureReductionTimeout
+	failureReductionTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		failureReductionTimeout = prev
+	})
+
+	_, err := runFailureReduction(func(ctx context.Context) ([]ScenarioAction, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}

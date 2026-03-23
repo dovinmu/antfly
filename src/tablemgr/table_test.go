@@ -2014,3 +2014,82 @@ func TestSplitOffShardIsReady(t *testing.T) {
 	assert.True(t, tm.splitOffShardIsReady(parentWithNoSplitKey),
 		"Should return true when parent has empty split key (not a real split)")
 }
+
+func TestSplitOffShardIsReady_PrefersReferencedSplitChild(t *testing.T) {
+	db := setupTestDB(t)
+
+	tm, err := NewTableManager(db, nil, 0)
+	require.NoError(t, err)
+
+	tableName := "readyTargetedChildTable"
+	parentShardID := types.ID(1)
+	targetChildID := types.ID(2)
+	staleChildID := types.ID(3)
+	splitKey := []byte("M")
+
+	parentSplitState := &storedb.SplitState{}
+	parentSplitState.SetPhase(storedb.SplitState_PHASE_SPLITTING)
+	parentSplitState.SetSplitKey(splitKey)
+	parentSplitState.SetNewShardId(uint64(targetChildID))
+
+	parentStatus := &store.ShardStatus{
+		ID:    parentShardID,
+		Table: tableName,
+		State: store.ShardState_Splitting,
+		ShardInfo: store.ShardInfo{
+			ShardConfig: store.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+			SplitState: parentSplitState,
+		},
+	}
+	targetChild := &store.ShardStatus{
+		ID:    targetChildID,
+		Table: tableName,
+		State: store.ShardState_SplitOffPreSnap,
+		ShardInfo: store.ShardInfo{
+			ShardConfig: store.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xC0}},
+			},
+			HasSnapshot:         true,
+			Initializing:        false,
+			RaftStatus:          &common.RaftStatus{Lead: 1},
+			SplitReplayRequired: true,
+			SplitCutoverReady:   false,
+		},
+	}
+	staleReadyChild := &store.ShardStatus{
+		ID:    staleChildID,
+		Table: tableName,
+		State: store.ShardState_Default,
+		ShardInfo: store.ShardInfo{
+			ShardConfig: store.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xFF}},
+			},
+			HasSnapshot:         true,
+			Initializing:        false,
+			RaftStatus:          &common.RaftStatus{Lead: 1},
+			SplitReplayRequired: true,
+			SplitCutoverReady:   true,
+		},
+	}
+
+	err = tm.saveStoreAndShardStatuses(nil, map[types.ID]*store.ShardStatus{
+		parentShardID: parentStatus,
+		targetChildID: targetChild,
+		staleChildID:  staleReadyChild,
+	})
+	require.NoError(t, err)
+
+	assert.False(t, tm.splitOffShardIsReady(parentStatus),
+		"Should gate on the SplitState child, not an arbitrary range-matching shard")
+
+	targetChild.SplitCutoverReady = true
+	err = tm.saveStoreAndShardStatuses(nil, map[types.ID]*store.ShardStatus{
+		targetChildID: targetChild,
+	})
+	require.NoError(t, err)
+
+	assert.True(t, tm.splitOffShardIsReady(parentStatus),
+		"Should return true once the SplitState child becomes cutover-ready")
+}

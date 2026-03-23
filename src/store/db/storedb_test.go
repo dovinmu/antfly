@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/antflydb/antfly/lib/inflight"
 	"github.com/antflydb/antfly/lib/pebbleutils"
 	"github.com/antflydb/antfly/lib/types"
 	"github.com/antflydb/antfly/lib/vectorindex"
@@ -273,6 +274,44 @@ func TestDBWrapperSnapshot(t *testing.T) {
 	require.NotEmpty(t, v["_embeddings"])
 	assert.Equal(t, "bazz", v["bar"])
 	assert.EqualValues(t, 1, v["other"])
+}
+
+func TestStoreDBCloseDB_WaitsForBackgroundGoroutines(t *testing.T) {
+	dir := t.TempDir()
+
+	lg := zaptest.NewLogger(t)
+	snapStore, err := snapstore.NewLocalSnapStore(dir, 1, 1)
+	require.NoError(t, err)
+
+	coreDB := NewDBImplForTest(lg, snapStore)
+	require.NoError(t, coreDB.Open(filepath.Join(dir, "db"), false, nil, types.Range{nil, []byte{0xff}}))
+
+	storeDB := &StoreDB{
+		logger:        lg,
+		coreDB:        coreDB,
+		proposalQueue: inflight.NewDedupeQueue(1, 1),
+	}
+
+	backgroundDone := make(chan struct{})
+	storeDB.backgroundWG.Add(1)
+	go func() {
+		defer storeDB.backgroundWG.Done()
+		<-backgroundDone
+	}()
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- storeDB.CloseDB()
+	}()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("CloseDB returned before background goroutines finished: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(backgroundDone)
+	require.NoError(t, <-closeDone)
 }
 
 func newTestStoreDBForSplitReplay(t *testing.T, root string, shardID, nodeID types.ID, byteRange types.Range) *StoreDB {

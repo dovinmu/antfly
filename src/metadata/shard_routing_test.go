@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/antflydb/antfly/lib/pebbleutils"
 	"github.com/antflydb/antfly/lib/types"
@@ -447,6 +448,7 @@ func TestForwardInsertToShard_ReroutesDirectlyToChildWhenParentRoutingIsStale(t 
 	childStatus.HasSnapshot = true
 	childStatus.Initializing = false
 	childStatus.SplitReplayRequired = true
+	childStatus.SplitReplayCaughtUp = true
 	childStatus.SplitCutoverReady = false
 	childStatus.Peers = common.NewPeerSet(childNodeID)
 	childStatus.ReportedBy = common.NewPeerSet(childNodeID)
@@ -469,6 +471,124 @@ func TestForwardInsertToShard_ReroutesDirectlyToChildWhenParentRoutingIsStale(t 
 	require.NoError(t, err)
 	assert.Equal(t, 1, parentRPC.batchHit)
 	assert.Equal(t, 1, childRPC.batchHit)
+}
+
+func TestForwardInsertToShard_DoesNotBypassToChildBeforeCutover(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	tableName := "test_table"
+	table, err := ms.tm.CreateTable(tableName, tablemgr.TableConfig{
+		NumShards: 1,
+		StartID:   100,
+	})
+	require.NoError(t, err)
+	require.Len(t, table.Shards, 1)
+
+	var parentShardID types.ID
+	for shardID := range table.Shards {
+		parentShardID = shardID
+	}
+	childShardID := types.ID(101)
+	parentNodeID := types.ID(1)
+	childNodeID := types.ID(2)
+	splitKey := []byte("m:\x00")
+
+	parentRPC := &stubStoreRPC{
+		id: parentNodeID,
+		batchFn: func(shardID types.ID, writes [][2][]byte) error {
+			assert.Equal(t, parentShardID, shardID)
+			require.Len(t, writes, 1)
+			return &client.ResponseError{
+				StatusCode: http.StatusBadRequest,
+				Body:       "key 6d616e676f out of range [,6d3a00)",
+			}
+		},
+	}
+	childRPC := &stubStoreRPC{
+		id: childNodeID,
+		batchFn: func(shardID types.ID, writes [][2][]byte) error {
+			t.Fatalf("unexpected direct child write to shard %s before cutover", shardID)
+			return nil
+		},
+	}
+	ms.tm.SetStoreClientFactory(func(_ *http.Client, id types.ID, _ string) client.StoreRPC {
+		switch id {
+		case parentNodeID:
+			return parentRPC
+		case childNodeID:
+			return childRPC
+		default:
+			return &stubStoreRPC{id: id}
+		}
+	})
+
+	parentStatus, err := ms.tm.GetShardStatus(parentShardID)
+	require.NoError(t, err)
+	parentStatus.Peers = common.NewPeerSet(parentNodeID)
+	parentStatus.ReportedBy = common.NewPeerSet(parentNodeID)
+	parentStatus.RaftStatus = &common.RaftStatus{
+		Lead:   parentNodeID,
+		Voters: common.NewPeerSet(parentNodeID),
+	}
+	writeShardStatus(t, db, parentStatus)
+
+	_, _, err = ms.tm.ReassignShardsForSplit(tablemgr.SplitTransition{
+		ShardID:      parentShardID,
+		SplitShardID: childShardID,
+		SplitKey:     splitKey,
+		TableName:    tableName,
+	})
+	require.NoError(t, err)
+
+	parentStatus, err = ms.tm.GetShardStatus(parentShardID)
+	require.NoError(t, err)
+	parentStatus.State = store.ShardState_Splitting
+	parentStatus.SplitState = &storedb.SplitState{}
+	parentStatus.SplitState.SetPhase(storedb.SplitState_PHASE_SPLITTING)
+	parentStatus.SplitState.SetSplitKey(splitKey)
+	parentStatus.SplitState.SetNewShardId(uint64(childShardID))
+	parentStatus.SplitState.SetOriginalRangeEnd([]byte{0xff})
+	parentStatus.Peers = common.NewPeerSet(parentNodeID)
+	parentStatus.ReportedBy = common.NewPeerSet(parentNodeID)
+	parentStatus.RaftStatus = &common.RaftStatus{
+		Lead:   parentNodeID,
+		Voters: common.NewPeerSet(parentNodeID),
+	}
+	writeShardStatus(t, db, parentStatus)
+
+	childStatus, err := ms.tm.GetShardStatus(childShardID)
+	require.NoError(t, err)
+	childStatus.State = store.ShardState_SplitOffPreSnap
+	childStatus.HasSnapshot = true
+	childStatus.Initializing = false
+	childStatus.SplitReplayRequired = true
+	childStatus.SplitReplayCaughtUp = false
+	childStatus.SplitCutoverReady = false
+	childStatus.Peers = common.NewPeerSet(childNodeID)
+	childStatus.ReportedBy = common.NewPeerSet(childNodeID)
+	childStatus.RaftStatus = &common.RaftStatus{
+		Lead:   childNodeID,
+		Voters: common.NewPeerSet(childNodeID),
+	}
+	writeShardStatus(t, db, childStatus)
+
+	writeStoreStatus(t, db, parentNodeID, true)
+	writeStoreStatus(t, db, childNodeID, true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err = ms.forwardInsertToShard(
+		ctx,
+		tableName,
+		"mango",
+		map[string]any{"content": "value"},
+		storedb.Op_SyncLevelWrite,
+	)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.GreaterOrEqual(t, parentRPC.batchHit, 1)
+	assert.Equal(t, 0, childRPC.batchHit)
 }
 
 func TestResolveWriteShardID_FinalizingParentIsNotWriteOwner(t *testing.T) {
@@ -560,6 +680,25 @@ func TestShouldRouteWriteToParent_NormalShardReturnsFalse(t *testing.T) {
 	status := &store.ShardStatus{
 		State: store.ShardState_Default,
 	}
+	assert.False(t, shouldRouteWriteToParent(status))
+}
+
+func TestShouldRouteWriteToParent_SplitChildUsesCaughtUpFence(t *testing.T) {
+	status := &store.ShardStatus{
+		State: store.ShardState_SplitOffPreSnap,
+		ShardInfo: storedb.ShardInfo{
+			HasSnapshot:         true,
+			Initializing:        false,
+			RaftStatus:          &common.RaftStatus{Lead: 1},
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: false,
+			SplitCutoverReady:   false,
+		},
+	}
+
+	assert.True(t, shouldRouteWriteToParent(status))
+
+	status.SplitReplayCaughtUp = true
 	assert.False(t, shouldRouteWriteToParent(status))
 }
 
