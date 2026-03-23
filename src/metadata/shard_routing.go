@@ -394,7 +394,7 @@ func (ms *MetadataStore) directLeaderClientForShardBypassesSplitFallback(
 	}
 	isSplitChild := status.State == store.ShardState_SplittingOff ||
 		status.State == store.ShardState_SplitOffPreSnap
-	if isSplitChild && !status.CanInitiateSplitCutover() {
+	if isSplitChild && !status.IsReadyForSplitReads() {
 		return 0, nil, ErrShardInitializing
 	}
 	if status.RaftStatus == nil {

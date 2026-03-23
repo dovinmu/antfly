@@ -358,7 +358,7 @@ func TestResolveWriteShardID_AdjacentShardNotReroutedDuringSplit(t *testing.T) {
 	assert.Equal(t, splittingParentID, resolved)
 }
 
-func TestForwardInsertToShard_ReroutesDirectlyToChildWhenParentRoutingIsStale(t *testing.T) {
+func TestForwardInsertToShard_ReroutesDirectlyToReadyChildWhenParentRoutingIsStale(t *testing.T) {
 	ms, db := setupTestMetadataStore(t)
 
 	tableName := "test_table"
@@ -449,7 +449,7 @@ func TestForwardInsertToShard_ReroutesDirectlyToChildWhenParentRoutingIsStale(t 
 	childStatus.Initializing = false
 	childStatus.SplitReplayRequired = true
 	childStatus.SplitReplayCaughtUp = true
-	childStatus.SplitCutoverReady = false
+	childStatus.SplitCutoverReady = true
 	childStatus.Peers = common.NewPeerSet(childNodeID)
 	childStatus.ReportedBy = common.NewPeerSet(childNodeID)
 	childStatus.RaftStatus = &common.RaftStatus{
@@ -562,7 +562,7 @@ func TestForwardInsertToShard_DoesNotBypassToChildBeforeCutover(t *testing.T) {
 	childStatus.HasSnapshot = true
 	childStatus.Initializing = false
 	childStatus.SplitReplayRequired = true
-	childStatus.SplitReplayCaughtUp = false
+	childStatus.SplitReplayCaughtUp = true
 	childStatus.SplitCutoverReady = false
 	childStatus.Peers = common.NewPeerSet(childNodeID)
 	childStatus.ReportedBy = common.NewPeerSet(childNodeID)
