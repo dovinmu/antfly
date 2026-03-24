@@ -2049,10 +2049,6 @@ func resultMaybeCloser(r1 *Result, r2 *Result) bool {
 	return r1.Distance-r1.ErrorBound <= r2.Distance+r2.ErrorBound
 }
 
-func resultDefinitelyCloser(r1 *Result, r2 *Result) bool {
-	return r1.Distance+r1.ErrorBound < r2.Distance-r2.ErrorBound
-}
-
 func resultMaybeOver(r *Result, dist float32) bool {
 	return r.Distance+r.ErrorBound >= dist
 }
@@ -2214,7 +2210,7 @@ func populateApproxSearchDebug(
 		debug.MinIntervalGapTopK = 0
 	}
 
-	if topKCount > 0 {
+	if topKCount > 0 && topKCount <= len(results) {
 		for i := topKCount; i < len(results); i++ {
 			pair := debugPairFromResults(results[topKCount-1], results[i])
 			if pair.Overlaps {
@@ -2626,9 +2622,10 @@ func (idx *HBCIndex) Search(req *SearchRequest) (r []*Result, err error) {
 	populateApproxSearchDebug(req.Debug, finalResults, req.K, req.DistanceOver, req.DistanceUnder, rerankPolicy)
 	exactRerank := rerankPolicy == RerankPolicyAlways
 	rerankCandidates := []int(nil)
-	if rerankPolicy == RerankPolicyAlways {
+	switch rerankPolicy {
+	case RerankPolicyAlways:
 		rerankCandidates = fullResultIndexList(len(finalResults))
-	} else if rerankPolicy == RerankPolicyBoundary {
+	case RerankPolicyBoundary:
 		rerankCandidates = selectAutoRerankCandidates(
 			finalResults,
 			req.K,
