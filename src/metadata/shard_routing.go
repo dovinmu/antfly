@@ -344,8 +344,8 @@ func (ms *MetadataStore) leaderClientForShardNoFallback(
 		receiverShardID := types.ID(status.MergeState.GetReceiverShardId())
 		return ms.leaderClientForShardNoFallback(ctx, receiverShardID)
 	}
-	if ms.shouldFallbackToParentShard(status) {
-		ms.logger.Debug("SPLIT_ROUTING: Shard not ready for writes (no snapshot), returning retry error",
+	if shouldRouteWriteToParent(status) {
+		ms.logger.Debug("SPLIT_ROUTING: Split child not ready for writes yet, returning retry error",
 			zap.Stringer("shardID", shardID),
 			zap.String("state", status.State.String()),
 			zap.Bool("hasSnapshot", status.HasSnapshot))
@@ -394,7 +394,7 @@ func (ms *MetadataStore) directLeaderClientForShardBypassesSplitFallback(
 	}
 	isSplitChild := status.State == store.ShardState_SplittingOff ||
 		status.State == store.ShardState_SplitOffPreSnap
-	if isSplitChild && !status.IsReadyForSplitReads() {
+	if isSplitChild && shouldRouteWriteToParent(status) {
 		return 0, nil, ErrShardInitializing
 	}
 	if status.RaftStatus == nil {
