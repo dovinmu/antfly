@@ -65,9 +65,10 @@ func (q *QueryRequest) ToRemoteIndexQuery() (*indexes.Query, error) {
 	hasFullText := len(q.FullTextSearch) > 0 && !bytes.Equal(q.FullTextSearch, []byte("null"))
 	hasSemantic := len(q.SemanticSearch) > 0
 	hasGraphSearch := len(q.GraphSearches) > 0
+	hasEmbeddings := len(q.Embeddings) > 0
 
 	// Inject match_all query for limit-only queries (or when no search criteria is specified)
-	if !hasFullText && !hasFilter && !hasSemantic && !hasGraphSearch {
+	if !hasFullText && !hasFilter && !hasSemantic && !hasGraphSearch && !hasEmbeddings {
 		// Create match_all query for queries that only specify a limit or no criteria at all
 		matchAll := query.NewMatchAllQuery()
 		matchAllBytes, _ := json.Marshal(matchAll)
