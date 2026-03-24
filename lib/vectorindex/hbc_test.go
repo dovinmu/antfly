@@ -1700,3 +1700,104 @@ func BenchmarkHBCIndex_ConcurrentSearch(b *testing.B) {
 		}
 	})
 }
+
+// TestHBCIndex_MetricMismatchOnReopen verifies that an index created with one
+// distance metric can be reopened with a different metric without crashing.
+// This reproduces the production crash where quantized data was written with
+// L2Squared (CentroidDotProducts nil) but the index was later reconfigured to
+// Cosine, causing an index-out-of-range panic in EstimateDistances.
+func TestHBCIndex_MetricMismatchOnReopen(t *testing.T) {
+	vectors := []vector.T{
+		{0.00, 0.00},
+		{0.02, 0.01},
+		{0.04, 0.00},
+		{5.00, 5.00},
+		{5.02, 5.01},
+		{5.04, 5.00},
+	}
+	ids := []uint64{1, 2, 3, 4, 5, 6}
+	metadata := [][]byte{
+		[]byte("doc:1"),
+		[]byte("doc:2"),
+		[]byte("doc:3"),
+		[]byte("doc:4"),
+		[]byte("doc:5"),
+		[]byte("doc:6"),
+	}
+	batch := &Batch{
+		IDs:          ids,
+		Vectors:      vectors,
+		MetadataList: metadata,
+	}
+
+	db := setupPebbleWithVectors(t, "test_hbc_metric_mismatch", batch)
+
+	// Step 1: Create index with L2Squared + quantization.
+	config := HBCConfig{
+		Dimension:       2,
+		Name:            "test_hbc_metric_mismatch",
+		BranchingFactor: 2,
+		LeafSize:        2,
+		SearchWidth:     8,
+		CacheSizeNodes:  100,
+		CacheTTL:        5 * time.Minute,
+		UseQuantization: true,
+		DistanceMetric:  vector.DistanceMetric_L2Squared,
+		VectorDB:        db,
+		IndexDB:         db,
+	}
+
+	index, err := NewHBCIndex(config, rand.NewPCG(42, 1024))
+	require.NoError(t, err)
+	require.NoError(t, index.BulkBuild(t.Context(), batch))
+	assert.EqualValues(t, len(ids), index.TotalVectors())
+
+	// Verify search works with L2Squared.
+	results, err := index.Search(&SearchRequest{
+		Embedding: []float32{0.0, 0.0},
+		K:         3,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.NoError(t, index.Close())
+
+	// Step 2: Reopen with Cosine metric. Before the fix, this would crash
+	// with "index out of range [0] with length 0" in EstimateDistances
+	// because the on-disk quantized sets had no CentroidDotProducts.
+	config.DistanceMetric = vector.DistanceMetric_Cosine
+	reopened, err := NewHBCIndex(config, rand.NewPCG(42, 1024))
+	require.NoError(t, err)
+	defer reopened.Close()
+
+	// Normalize query for Cosine distance.
+	query := []float32{0.0, 1.0}
+	results, err = reopened.Search(&SearchRequest{
+		Embedding: query,
+		K:         3,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+
+	// Also test insertion after metric change — this exercises the write
+	// path where stale quantized data would be cleared and re-quantized.
+	newVec := vector.T{0.707, 0.707}
+	vec.NormalizeFloat32(newVec)
+
+	// Write the new vector to pebble first (production does this before
+	// the embedding index processes it).
+	suffix := fmt.Appendf(nil, ":i:%s:e", "test_hbc_metric_mismatch")
+	pbatch := db.NewBatch()
+	vecKey := append([]byte("doc:7"), suffix...)
+	vecData := make([]byte, 0, 8+4*(len(newVec)+1))
+	vecData, err = EncodeEmbeddingWithHashID(vecData, newVec, 0)
+	require.NoError(t, err)
+	require.NoError(t, pbatch.Set(vecKey, vecData, nil))
+	require.NoError(t, pbatch.Commit(pebble.Sync))
+
+	err = reopened.Batch(t.Context(), &Batch{
+		IDs:          []uint64{7},
+		Vectors:      []vector.T{newVec},
+		MetadataList: [][]byte{[]byte("doc:7")},
+	})
+	require.NoError(t, err)
+}

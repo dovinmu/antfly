@@ -342,6 +342,66 @@ func TestRaBitQuantizeEmbeddings(t *testing.T) {
 	require.Equal(t, float32(0.0476), errorBounds[99])
 }
 
+// Test that EstimateDistances detects when a quantized set's metric doesn't
+// match the quantizer's metric. This reproduces a crash where data was
+// quantized with L2Squared (CentroidDotProducts nil) but the quantizer was
+// later reconfigured to Cosine, causing an index-out-of-range panic at
+// raBitSet.GetCentroidDotProducts()[i].
+func TestRaBitQuantizerMetricMismatch(t *testing.T) {
+	var workspace allocator.StackAllocator
+	defer require.True(t, workspace.IsClear())
+
+	// Quantize vectors using L2Squared (default). This intentionally leaves
+	// CentroidDotProducts nil/empty.
+	l2Quantizer := NewRaBitQuantizer(2, 42, vector.DistanceMetric_L2Squared)
+	vectors := vector.MakeSetFromRawData([]float32{5, 2, 1, 2, 6, 5}, 2)
+	centroid := make(vector.T, vectors.GetDims())
+	centroid = vectors.Centroid(centroid)
+	quantizedSet := l2Quantizer.Quantize(&workspace, centroid, vectors)
+
+	// Verify the set has vectors but no CentroidDotProducts.
+	raBitSet := quantizedSet.(*RaBitQuantizedVectorSet)
+	require.Equal(t, 3, raBitSet.GetCount())
+	require.Nil(t, raBitSet.GetCentroidDotProducts())
+
+	// Now create a Cosine quantizer and try to EstimateDistances with the
+	// L2Squared-quantized set. Before the fix, this panicked with
+	// "index out of range [0] with length 0".
+	cosineQuantizer := NewRaBitQuantizer(2, 42, vector.DistanceMetric_Cosine)
+	distances := make([]float32, raBitSet.GetCount())
+	errorBounds := make([]float32, raBitSet.GetCount())
+
+	require.PanicsWithError(t,
+		"RaBitQuantizer metric mismatch: quantizer uses Cosine but set uses L2Squared",
+		func() {
+			cosineQuantizer.EstimateDistances(
+				&workspace, quantizedSet, vector.T{1, 0}, distances, errorBounds)
+		})
+}
+
+// Test that QuantizeWithSet detects metric mismatch between quantizer and set.
+func TestRaBitQuantizerQuantizeWithSetMetricMismatch(t *testing.T) {
+	var workspace allocator.StackAllocator
+	defer require.True(t, workspace.IsClear())
+
+	// Create a set with L2Squared metric.
+	l2Quantizer := NewRaBitQuantizer(2, 42, vector.DistanceMetric_L2Squared)
+	vectors := vector.MakeSetFromRawData([]float32{5, 2, 1, 2}, 2)
+	centroid := make(vector.T, vectors.GetDims())
+	centroid = vectors.Centroid(centroid)
+	quantizedSet := l2Quantizer.Quantize(&workspace, centroid, vectors)
+
+	// Try to add vectors using a Cosine quantizer — should panic.
+	cosineQuantizer := NewRaBitQuantizer(2, 42, vector.DistanceMetric_Cosine)
+	newVectors := vector.MakeSetFromRawData([]float32{0.707, 0.707}, 2)
+
+	require.PanicsWithError(t,
+		"RaBitQuantizer metric mismatch: quantizer uses Cosine but set uses L2Squared",
+		func() {
+			cosineQuantizer.QuantizeWithSet(&workspace, quantizedSet, newVectors)
+		})
+}
+
 // Benchmark quantization of 100 vectors.
 func BenchmarkQuantize(b *testing.B) {
 	var workspace allocator.StackAllocator

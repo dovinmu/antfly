@@ -864,6 +864,16 @@ func (idx *HBCIndex) loadNodeNoCache(db pebble.Reader, nodeID uint64) (*HBCNode,
 			// Deserialize quantized vector set
 			node.QuantizedVectors = idx.deserializeQuantizedSet(quantizedData, node.Parent == 0)
 			_ = closer.Close()
+
+			// Validate that the deserialized set's metric matches the index's
+			// configured metric. A mismatch can occur when the table's
+			// distance_metric is changed after data has already been quantized.
+			// Discard stale data so it will be re-quantized on next write.
+			if rqs, ok := node.QuantizedVectors.(*quantize.RaBitQuantizedVectorSet); ok {
+				if rqs.GetMetric() != idx.config.DistanceMetric {
+					node.QuantizedVectors = nil
+				}
+			}
 		}
 	}
 
@@ -1516,11 +1526,7 @@ func (idx *HBCIndex) insertIntoTree(
 			minDist := float32(math.MaxFloat32)
 			var closestChild uint64
 
-			if idx.config.UseQuantization {
-				// Use quantized distance if available
-				if nodeUnsafe.QuantizedVectors == nil {
-					return fmt.Errorf("quantized vectors not found for node %d", nodeUnsafe.ID)
-				}
+			if idx.config.UseQuantization && nodeUnsafe.QuantizedVectors != nil {
 				tempDists := idx.writerAllocator.AllocFloat32s(nodeUnsafe.QuantizedVectors.GetCount())
 				tempErrorBounds := idx.writerAllocator.AllocFloat32s(nodeUnsafe.QuantizedVectors.GetCount())
 				var quantizer quantize.Quantizer

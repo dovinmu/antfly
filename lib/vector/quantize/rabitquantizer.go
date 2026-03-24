@@ -136,6 +136,10 @@ func (q *RaBitQuantizer) QuantizeWithSet(
 	a allocator.Allocator, quantizedSet QuantizedVectorSet, vectors *vector.Set,
 ) {
 	qs := quantizedSet.(*RaBitQuantizedVectorSet)
+	if qs.GetMetric() != q.distanceMetric {
+		panic(fmt.Errorf("RaBitQuantizer metric mismatch: quantizer uses %s but set uses %s",
+			q.distanceMetric, qs.GetMetric()))
+	}
 	if q.distanceMetric == vector.DistanceMetric_Cosine {
 		vector.ValidateUnitVectorSet(vectors)
 	}
@@ -261,11 +265,14 @@ func (q *RaBitQuantizer) EstimateDistances(
 	distances []float32,
 	errorBounds []float32,
 ) {
+	raBitSet := quantizedSet.(*RaBitQuantizedVectorSet)
+	if raBitSet.GetMetric() != q.distanceMetric {
+		panic(fmt.Errorf("RaBitQuantizer metric mismatch: quantizer uses %s but set uses %s",
+			q.distanceMetric, raBitSet.GetMetric()))
+	}
 	if q.distanceMetric == vector.DistanceMetric_Cosine {
 		vector.ValidateUnitVector(queryVector)
 	}
-
-	raBitSet := quantizedSet.(*RaBitQuantizedVectorSet)
 
 	// Allocate temp space for calculations.
 	tempCodes := allocRaBitQCodes(w, 4, int(raBitSet.GetCodes().GetWidth()))
@@ -468,6 +475,10 @@ func (q *RaBitQuantizer) CalcCentroidDistances(
 	quantizedSet QuantizedVectorSet, distances []float32, spherical bool,
 ) {
 	raBitSet := quantizedSet.(*RaBitQuantizedVectorSet)
+	if raBitSet.GetMetric() != q.distanceMetric {
+		panic(fmt.Errorf("RaBitQuantizer metric mismatch: quantizer uses %s but set uses %s",
+			q.distanceMetric, raBitSet.GetMetric()))
+	}
 
 	switch q.distanceMetric {
 	case vector.DistanceMetric_L2Squared:
