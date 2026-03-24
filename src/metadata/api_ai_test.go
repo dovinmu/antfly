@@ -96,3 +96,52 @@ func TestFilterQueryBuilderExampleDocument(t *testing.T) {
 		"status": "published",
 	}, filtered)
 }
+
+func TestNormalizeQueryBuilderSessionRequest(t *testing.T) {
+	req := &QueryBuilderRequest{Intent: "find published posts"}
+
+	normalizeQueryBuilderSessionRequest(req)
+
+	require.NotEmpty(t, req.SessionId)
+	assert.Contains(t, req.SessionId, "qbs_")
+}
+
+func TestBuildEffectiveQueryBuilderIntentIncludesDecisions(t *testing.T) {
+	req := &QueryBuilderRequest{
+		Intent: "find recent published posts",
+		Decisions: []AgentDecision{
+			{QuestionId: "time_window", Answer: "last 30 days"},
+			{QuestionId: "status_scope", Approved: true},
+		},
+	}
+
+	intent := buildEffectiveQueryBuilderIntent(req)
+
+	assert.Contains(t, intent, "find recent published posts")
+	assert.Contains(t, intent, "Resolved user decisions:")
+	assert.Contains(t, intent, "time_window: last 30 days")
+	assert.Contains(t, intent, "status_scope: approved")
+}
+
+func TestFinalizeQueryBuilderSession(t *testing.T) {
+	req := &QueryBuilderRequest{
+		SessionId:             "qbs_test",
+		MaxInternalIterations: 3,
+		MaxUserClarifications: 2,
+		Decisions:             []AgentDecision{{QuestionId: "time_window", Answer: "last 30 days"}},
+	}
+
+	result := finalizeQueryBuilderSession(req, &QueryBuilderResult{})
+
+	assert.Equal(t, "qbs_test", result.SessionId)
+	assert.Equal(t, AgentStatusCompleted, result.Status)
+	assert.Equal(t, 1, result.Iteration)
+	assert.Equal(t, 1, result.ClarificationCount)
+	assert.Equal(t, 2, result.RemainingInternalIterations)
+	assert.Equal(t, 1, result.RemainingUserClarifications)
+	if assert.Len(t, result.Steps, 1) {
+		assert.Equal(t, AgentStepKindGeneration, result.Steps[0].Kind)
+		assert.Equal(t, "query_builder", result.Steps[0].Name)
+		assert.Equal(t, AgentStepStatusSuccess, result.Steps[0].Status)
+	}
+}

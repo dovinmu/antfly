@@ -132,17 +132,23 @@ type (
 	ChainCondition                     = oapi.ChainCondition
 
 	// Chat/Agent types (used by retrieval agent)
-	ChatMessage          = oapi.ChatMessage
-	ChatMessageRole      = oapi.ChatMessageRole
-	ChatToolCall         = oapi.ChatToolCall
-	ChatToolResult       = oapi.ChatToolResult
-	ChatToolName         = oapi.ChatToolName
-	ChatToolsConfig      = oapi.ChatToolsConfig
-	ClarificationRequest = oapi.ClarificationRequest
-	FetchConfig          = oapi.FetchConfig
-	WebSearchConfig      = oapi.WebSearchConfig
-	FilterSpec           = oapi.FilterSpec
-	FilterSpecOperator   = oapi.FilterSpecOperator
+	ChatMessage        = oapi.ChatMessage
+	ChatMessageRole    = oapi.ChatMessageRole
+	ChatToolCall       = oapi.ChatToolCall
+	ChatToolResult     = oapi.ChatToolResult
+	ChatToolName       = oapi.ChatToolName
+	ChatToolsConfig    = oapi.ChatToolsConfig
+	FetchConfig        = oapi.FetchConfig
+	WebSearchConfig    = oapi.WebSearchConfig
+	FilterSpec         = oapi.FilterSpec
+	FilterSpecOperator = oapi.FilterSpecOperator
+	AgentDecision      = oapi.AgentDecision
+	AgentQuestion      = oapi.AgentQuestion
+	AgentQuestionKind  = oapi.AgentQuestionKind
+	AgentStatus        = oapi.AgentStatus
+	AgentStep          = oapi.AgentStep
+	AgentStepKind      = oapi.AgentStepKind
+	AgentStepStatus    = oapi.AgentStepStatus
 
 	// Query Builder types
 	QueryBuilderRequest = oapi.QueryBuilderRequest
@@ -151,7 +157,6 @@ type (
 	// Retrieval Agent types
 	RetrievalAgentRequest = oapi.RetrievalAgentRequest
 	RetrievalAgentResult  = oapi.RetrievalAgentResult
-	RetrievalAgentStatus  = oapi.RetrievalAgentStatus
 	RetrievalAgentUsage   = oapi.RetrievalAgentUsage
 	IncompleteDetails     = oapi.IncompleteDetails
 	PruneStats            = oapi.PruneStats
@@ -165,11 +170,10 @@ type (
 	SSEToolMode      = oapi.SSEToolMode
 	SSEError         = oapi.SSEError
 
-	RetrievalQueryRequest  = oapi.RetrievalQueryRequest
-	RetrievalReasoningStep = oapi.RetrievalReasoningStep
-	RetrievalStrategy      = oapi.RetrievalStrategy
-	TreeSearchConfig       = oapi.TreeSearchConfig
-	QueryHit               = oapi.QueryHit
+	RetrievalQueryRequest = oapi.RetrievalQueryRequest
+	RetrievalStrategy     = oapi.RetrievalStrategy
+	TreeSearchConfig      = oapi.TreeSearchConfig
+	QueryHit              = oapi.QueryHit
 
 	// Evaluation types
 	EvalConfig    = oapi.EvalConfig
@@ -340,11 +344,32 @@ const (
 	FilterSpecOperatorRange    = oapi.FilterSpecOperatorRange
 	FilterSpecOperatorIn       = oapi.FilterSpecOperatorIn
 
-	// RetrievalAgentStatus values
-	RetrievalAgentStatusCompleted  = oapi.RetrievalAgentStatusCompleted
-	RetrievalAgentStatusInProgress = oapi.RetrievalAgentStatusInProgress
-	RetrievalAgentStatusIncomplete = oapi.RetrievalAgentStatusIncomplete
-	RetrievalAgentStatusFailed     = oapi.RetrievalAgentStatusFailed
+	// AgentQuestionKind values
+	AgentQuestionKindConfirm      = oapi.AgentQuestionKindConfirm
+	AgentQuestionKindSingleChoice = oapi.AgentQuestionKindSingleChoice
+	AgentQuestionKindMultiChoice  = oapi.AgentQuestionKindMultiChoice
+	AgentQuestionKindFreeText     = oapi.AgentQuestionKindFreeText
+	AgentQuestionKindFieldPolicy  = oapi.AgentQuestionKindFieldPolicy
+
+	// AgentStatus values
+	AgentStatusClarificationRequired = oapi.AgentStatusClarificationRequired
+	AgentStatusCompleted             = oapi.AgentStatusCompleted
+	AgentStatusInProgress            = oapi.AgentStatusInProgress
+	AgentStatusIncomplete            = oapi.AgentStatusIncomplete
+	AgentStatusFailed                = oapi.AgentStatusFailed
+
+	// AgentStepKind values
+	AgentStepKindToolCall       = oapi.AgentStepKindToolCall
+	AgentStepKindPlanning       = oapi.AgentStepKindPlanning
+	AgentStepKindClassification = oapi.AgentStepKindClassification
+	AgentStepKindGeneration     = oapi.AgentStepKindGeneration
+	AgentStepKindValidation     = oapi.AgentStepKindValidation
+	AgentStepKindClarification  = oapi.AgentStepKindClarification
+
+	// AgentStepStatus values
+	AgentStepStatusSuccess = oapi.AgentStepStatusSuccess
+	AgentStepStatusError   = oapi.AgentStepStatusError
+	AgentStepStatusSkipped = oapi.AgentStepStatusSkipped
 
 	// RetrievalStrategy values
 	RetrievalStrategySemantic = oapi.RetrievalStrategySemantic

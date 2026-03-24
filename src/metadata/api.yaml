@@ -2566,6 +2566,33 @@ components:
       required:
         - intent
       properties:
+        session_id:
+          type: string
+          description: Correlation identifier for a bounded agent interaction. In Phase 1 this is echoed back to the client but does not imply server-side session persistence.
+        decisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentDecision"
+          description: Structured answers provided by the user as part of client-carried continuation.
+        interactive:
+          type: boolean
+          default: true
+          description: If true, the agent may return clarification questions when needed.
+        max_internal_iterations:
+          type: integer
+          minimum: 0
+          maximum: 20
+          description: Additive bounded-agent field for the query builder. Phase 1 remains a single-pass generation flow, but this field is echoed in result accounting.
+        max_user_clarifications:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: Maximum number of clarification turns the agent may request from the user.
+        require_decision_after:
+          type: integer
+          minimum: 0
+          maximum: 20
+          description: Force a user-facing decision after this many unresolved internal passes.
         example_documents:
           type: array
           items:
@@ -2593,6 +2620,34 @@ components:
       required:
         - query
       properties:
+        session_id:
+          type: string
+          description: Correlation identifier for client-carried continuation.
+        iteration:
+          type: integer
+          description: Number of internal passes consumed while producing this result.
+        clarification_count:
+          type: integer
+          description: Number of user clarification turns already consumed in this interaction.
+        status:
+          $ref: "#/components/schemas/AgentStatus"
+          description: Current status of the bounded query-builder execution.
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentStep"
+          description: Shared bounded-agent execution trace for this query-builder run.
+        remaining_internal_iterations:
+          type: integer
+          description: Remaining internal reasoning passes for this interaction.
+        remaining_user_clarifications:
+          type: integer
+          description: Remaining clarification turns allowed for this interaction.
+        questions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentQuestion"
+          description: Clarification questions exposed in the shared bounded-agent envelope.
         query:
           type: object
           description: |
@@ -2630,20 +2685,6 @@ components:
     # Retrieval Agent - Agentic document retrieval with tool calling
     # ==========================================
 
-    RetrievalAgentStatus:
-      type: string
-      enum:
-        - completed
-        - in_progress
-        - incomplete
-        - failed
-      description: |
-        Current status of the retrieval agent execution:
-        - completed: Agent finished successfully
-        - in_progress: Agent is still executing (streaming context)
-        - incomplete: Agent stopped before completion (see incomplete_details)
-        - failed: Error occurred during execution
-
     IncompleteDetails:
       type: object
       description: Explains why the agent stopped before completion. Present when status is "incomplete".
@@ -2653,16 +2694,16 @@ components:
         reason:
           type: string
           enum:
-            - max_iterations
+            - max_internal_iterations
             - max_tokens
             - no_tools
-            - clarification_needed
+            - clarification_required
           description: |
             Why the agent stopped:
-            - max_iterations: Hit the configured max_iterations limit
+            - max_internal_iterations: Hit the configured max_internal_iterations limit
             - max_tokens: LLM output was truncated
             - no_tools: No tools were available for agentic mode
-            - clarification_needed: Agent needs user input to proceed
+            - clarification_required: The agent needs a user decision before it can continue
 
     RetrievalStrategy:
       type: string
@@ -2731,53 +2772,112 @@ components:
               $ref: "#/components/schemas/TreeSearchConfig"
               description: Optional tree search configuration
 
-    ClarificationRequest:
+    AgentQuestionKind:
+      type: string
+      enum:
+        - confirm
+        - single_choice
+        - multi_choice
+        - free_text
+        - field_policy
+      description: UI rendering/answer handling hint for a bounded agent question
+
+    AgentQuestion:
       type: object
-      description: Request for clarification from the user
       required:
+        - id
+        - kind
         - question
       properties:
+        id:
+          type: string
+          description: Stable question identifier for client-carried continuation
+          example: "clarify_oauth_version"
+        kind:
+          $ref: "#/components/schemas/AgentQuestionKind"
         question:
           type: string
           description: The clarifying question to ask the user
-          example: "Did you mean OAuth 1.0 or OAuth 2.0?"
+        reason:
+          type: string
+          description: Why clarification is needed
         options:
           type: array
           items:
             type: string
           description: Optional list of choices for the user
-          example: ["OAuth 1.0", "OAuth 2.0", "Both"]
-        reason:
+        default_answer:
           type: string
-          description: Why clarification is needed
-          example: "The query mentions OAuth but doesn't specify which version"
+          description: Suggested default answer when the server has a preferred choice
+        affects:
+          type: array
+          items:
+            type: string
+          description: High-level result areas affected by this decision
 
-    RetrievalReasoningStep:
+    AgentDecision:
       type: object
-      description: A step in the retrieval reasoning chain
       required:
-        - step
+        - question_id
+      properties:
+        question_id:
+          type: string
+          description: The question being answered
+        answer:
+          description: User answer, scalar or structured depending on the question kind
+        approved:
+          type: boolean
+          description: Used for confirm/review steps where the draft may be accepted as-is
+
+    AgentStatus:
+      type: string
+      enum:
+        - clarification_required
+        - completed
+        - in_progress
+        - incomplete
+        - failed
+      description: Shared bounded-agent execution status
+
+    AgentStepKind:
+      type: string
+      enum:
+        - tool_call
+        - planning
+        - classification
+        - generation
+        - validation
+        - clarification
+      description: Shared bounded-agent step category
+
+    AgentStepStatus:
+      type: string
+      enum:
+        - success
+        - error
+        - skipped
+      description: Outcome of a shared agent step
+
+    AgentStep:
+      type: object
+      description: A step in the shared bounded-agent execution trace
+      required:
+        - name
         - action
       properties:
         id:
           type: string
           description: Unique step ID for correlation and tracing
-          example: "step_cr3ig20h5tbs73e3ahrg"
-        step:
+        kind:
+          $ref: "#/components/schemas/AgentStepKind"
+        name:
           type: string
-          description: Name of the tool call or action taken
-          example: "semantic_search"
+          description: Stable step name used for correlation across JSON and SSE surfaces
         action:
           type: string
           description: What action was taken
-          example: "Searched for OAuth configuration in doc_embeddings index"
         status:
-          type: string
-          enum:
-            - success
-            - error
-            - skipped
-          description: Outcome of this step
+          $ref: "#/components/schemas/AgentStepStatus"
         error_message:
           type: string
           description: Error details when status is "error"
@@ -2787,7 +2887,7 @@ components:
         details:
           type: object
           additionalProperties: true
-          description: Additional details about the step (e.g., tool arguments, result count)
+          description: Additional details about the step
 
     # --- SSE Event Schemas for Retrieval Agent streaming ---
 
@@ -2813,17 +2913,18 @@ components:
       description: Emitted when a pipeline step begins execution
       required:
         - id
-        - step
+        - name
         - action
       properties:
         id:
           type: string
           description: Unique step ID for correlating with step_completed
           example: "step_cr3ig20h5tbs73e3ahrg"
-        step:
+        kind:
+          $ref: "#/components/schemas/AgentStepKind"
+        name:
           type: string
-          description: Name of the step (e.g., "semantic_search", "tree_search")
-          example: "semantic_search"
+          description: Stable step name used for correlation across JSON and SSE surfaces
         action:
           type: string
           description: Human-readable description of the action being taken
@@ -2832,20 +2933,20 @@ components:
     SSEStepProgress:
       type: object
       description: |
-        Emitted to report progress within a running step. The `step` field
+        Emitted to report progress within a running step. The `name` field
         identifies which step this progress belongs to. Additional properties
         vary by step type (e.g., tree_search includes depth, num_nodes, sufficient, etc.).
       required:
-        - step
+        - name
       properties:
-        step:
+        name:
           type: string
           description: Name of the step this progress belongs to
           example: "tree_search"
       additionalProperties: true
 
     SSEStepCompleted:
-      $ref: "#/components/schemas/RetrievalReasoningStep"
+      $ref: "#/components/schemas/AgentStep"
 
     SSEToolMode:
       type: object
@@ -2963,10 +3064,10 @@ components:
         Request for the retrieval agent. Queries define which tables and indexes
         to search, each as a QueryRequest with optional tree search configuration.
 
-        **Pipeline mode** (default, max_iterations=0): Queries are executed
+        **Pipeline mode** (default, max_internal_iterations=0): Queries are executed
         directly without an LLM tool-calling loop.
 
-        **Agentic mode** (max_iterations > 0): The LLM decides which tools to
+        **Agentic mode** (max_internal_iterations > 0): The LLM decides which tools to
         call, using the queries to determine available tables and indexes.
       required:
         - query
@@ -2984,7 +3085,7 @@ components:
             Queries to execute. Each query carries its own table via the
             QueryRequest table field.
 
-            In pipeline mode (max_iterations=0), these are executed directly.
+            In pipeline mode (max_internal_iterations=0), these are executed directly.
             In agentic mode, these declare which table and indexes are available.
           example:
             - table: "docs"
@@ -2995,15 +3096,7 @@ components:
           type: array
           items:
             $ref: "../../lib/ai/openapi.yaml#/components/schemas/ChatMessage"
-          description: Conversation messages for multi-turn interaction
-        context:
-          type: array
-          items:
-            $ref: "../../lib/ai/openapi.yaml#/components/schemas/ChatMessage"
-          description: |
-            Prior messages for multi-turn clarification.
-            Deprecated: use `messages` instead.
-          deprecated: true
+          description: Optional conversational context for the current turn. Decisions remain the authoritative continuation input for bounded agent interactions.
         agent_knowledge:
           type: string
           description: |
@@ -3017,17 +3110,38 @@ components:
           description: |
             Pre-applied filters from prior interactions. These are applied to
             all search tool invocations.
-        max_iterations:
+        session_id:
+          type: string
+          description: Correlation identifier for a bounded agent interaction. In Phase 1 this is echoed back to the client but does not imply server-side session persistence.
+        decisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentDecision"
+          description: Structured answers provided by the user as part of client-carried continuation.
+        interactive:
+          type: boolean
+          default: true
+          description: If true, the agent may return clarification questions when needed.
+        max_internal_iterations:
           type: integer
           minimum: 0
           maximum: 20
           default: 0
           description: |
-            Maximum number of tool-calling rounds. Controls how many times the
-            LLM can invoke tools before being forced to return results.
+            Maximum number of internal tool-calling rounds.
 
             - 0: Pipeline mode — execute provided queries directly, no LLM loop
             - 1+: Agentic mode — LLM decides which tools to call
+        max_user_clarifications:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: Maximum number of clarification turns the agent may request from the user.
+        require_decision_after:
+          type: integer
+          minimum: 0
+          maximum: 20
+          description: Force a user-facing decision after this many unresolved internal passes.
         max_context_tokens:
           type: integer
           description: |
@@ -3085,8 +3199,8 @@ components:
           format: int64
           description: Unix timestamp (seconds) when the response was created
         status:
-          $ref: "#/components/schemas/RetrievalAgentStatus"
-          description: Current status of the agent execution
+          $ref: "#/components/schemas/AgentStatus"
+          description: Current status of the bounded agent execution
         incomplete_details:
           $ref: "#/components/schemas/IncompleteDetails"
           description: Present when status is "incomplete" — explains why
@@ -3098,17 +3212,34 @@ components:
           items:
             $ref: "#/components/schemas/QueryHit"
           description: Retrieved query hits
-        reasoning_chain:
+        steps:
           type: array
           items:
-            $ref: "#/components/schemas/RetrievalReasoningStep"
-          description: Steps taken during retrieval (tool calls, actions)
+            $ref: "#/components/schemas/AgentStep"
+          description: Shared bounded-agent execution trace for this retrieval run.
         strategy_used:
           $ref: "#/components/schemas/RetrievalStrategy"
           description: Primary strategy that was used (optional in agentic mode)
-        clarification_request:
-          $ref: "#/components/schemas/ClarificationRequest"
-          description: Present when status is "incomplete" with reason "clarification_needed"
+        session_id:
+          type: string
+          description: Correlation identifier for client-carried continuation.
+        iteration:
+          type: integer
+          description: Current internal iteration count for this bounded session.
+        clarification_count:
+          type: integer
+          description: Number of user clarification turns already consumed in this session.
+        remaining_internal_iterations:
+          type: integer
+          description: Remaining internal reasoning/tool-use iterations for this session.
+        remaining_user_clarifications:
+          type: integer
+          description: Remaining clarification turns allowed for this session.
+        questions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentQuestion"
+          description: Clarification questions exposed in the shared bounded-agent envelope.
         applied_filters:
           type: array
           items:
@@ -3122,8 +3253,8 @@ components:
           items:
             $ref: "../../lib/ai/openapi.yaml#/components/schemas/ChatMessage"
           description: |
-            Conversation messages including tool calls and responses.
-            Can be passed back in subsequent requests for multi-turn interaction.
+            Optional conversational context including tool calls and responses.
+            Decisions remain the authoritative continuation input for bounded agent interactions.
         classification:
           $ref: "../../lib/ai/openapi.yaml#/components/schemas/ClassificationTransformationResult"
           description: |
@@ -5072,6 +5203,7 @@ paths:
         - `tool_mode`: Tool calling mode selected (see SSEToolMode)
         - `eval`: Evaluation metrics (see EvalResult)
         - `done`: Retrieval complete (see RetrievalAgentResult)
+        - `done` is the authoritative final bounded-agent envelope for both JSON and SSE consumers
         - `error`: Error occurred (see SSEError)
       operationId: retrievalAgent
       requestBody:

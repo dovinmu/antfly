@@ -127,6 +127,29 @@ func tableResponse(table *store.Table) Table {
 	}
 }
 
+func validateEmbeddingsIndexAPIConfig(
+	ctx context.Context,
+	embeddingsConfig *indexes.EmbeddingsIndexConfig,
+	indexLabel string,
+) error {
+	if embeddingsConfig.IsExternal() {
+		if !embeddingsConfig.Sparse && embeddingsConfig.Dimension <= 0 {
+			return fmt.Errorf("embedding dimension must be set and greater than 0 for external dense %s", indexLabel)
+		}
+		return nil
+	}
+
+	if embeddingsConfig.Embedder == nil {
+		return fmt.Errorf("managed %s must specify an embedder; set external=true for client-supplied embeddings", indexLabel)
+	}
+
+	if err := validateEmbedderConfig(ctx, embeddingsConfig, indexLabel); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func tableStatusResponse(
 	table *store.Table,
 	tm *tablemgr.TableManager,
@@ -415,12 +438,7 @@ func (t *TableApi) CreateTable(w http.ResponseWriter, r *http.Request, tableName
 			)
 			return
 		}
-		if embeddingsConfig.Embedder == nil {
-			// We can have indexes on raw embedding fields
-			tc.Indexes[index] = config
-			continue
-		}
-		if err := validateEmbedderConfig(r.Context(), &embeddingsConfig, fmt.Sprintf("index %q", index)); err != nil {
+		if err := validateEmbeddingsIndexAPIConfig(r.Context(), &embeddingsConfig, fmt.Sprintf("index %q", index)); err != nil {
 			errorResponse(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -655,26 +673,7 @@ func (t *TableApi) CreateIndex(
 		errorResponse(w, fmt.Sprintf("Invalid index configuration: %v", err), http.StatusBadRequest)
 		return
 	}
-	if embeddingsConfig.Embedder == nil {
-		if !embeddingsConfig.Sparse && embeddingsConfig.Dimension <= 0 {
-			errorResponse(
-				w,
-				"Embedding dimension must be set and greater than 0 for dense indexes without an embedder",
-				http.StatusBadRequest,
-			)
-			return
-		}
-		// We can have indexes on raw embedding fields
-		if err := t.ln.addIndexToTable(r.Context(), tableName, indexName, config); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				errorResponse(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-		return
-	}
-
-	if err := validateEmbedderConfig(r.Context(), &embeddingsConfig, fmt.Sprintf("index %q", indexName)); err != nil {
+	if err := validateEmbeddingsIndexAPIConfig(r.Context(), &embeddingsConfig, fmt.Sprintf("index %q", indexName)); err != nil {
 		errorResponse(w, err.Error(), http.StatusBadRequest)
 		return
 	}

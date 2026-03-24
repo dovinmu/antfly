@@ -4,46 +4,28 @@ from typing import Any, TypeVar
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
-T = TypeVar("T", bound="SSEStepProgress")
+T = TypeVar("T", bound="QueryBuilderRequestExampleDocumentsItem")
 
 
 @_attrs_define
-class SSEStepProgress:
-    """Emitted to report progress within a running step. The `name` field
-    identifies which step this progress belongs to. Additional properties
-    vary by step type (e.g., tree_search includes depth, num_nodes, sufficient, etc.).
+class QueryBuilderRequestExampleDocumentsItem:
+    """ """
 
-        Attributes:
-            name (str): Name of the step this progress belongs to Example: tree_search.
-    """
-
-    name: str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        name = self.name
-
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
-        field_dict.update(
-            {
-                "name": name,
-            }
-        )
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        name = d.pop("name")
+        query_builder_request_example_documents_item = cls()
 
-        sse_step_progress = cls(
-            name=name,
-        )
-
-        sse_step_progress.additional_properties = d
-        return sse_step_progress
+        query_builder_request_example_documents_item.additional_properties = d
+        return query_builder_request_example_documents_item
 
     @property
     def additional_keys(self) -> list[str]:

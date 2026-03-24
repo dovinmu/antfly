@@ -17,6 +17,7 @@ package metadata
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -222,6 +223,8 @@ func (t *TableApi) QueryBuilderAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	normalizeQueryBuilderSessionRequest(&req)
+
 	// Auth check for table access
 	if req.Table != "" {
 		if !t.ln.ensureAuth(w, r, usermgr.ResourceTypeTable, req.Table, usermgr.PermissionTypeRead) {
@@ -246,6 +249,8 @@ func (t *TableApi) QueryBuilderAgent(w http.ResponseWriter, r *http.Request) {
 // ExecuteQueryBuilder runs the query builder agent logic without HTTP concerns.
 // It translates a natural language intent into a Bleve query using an LLM.
 func (t *TableApi) ExecuteQueryBuilder(ctx context.Context, req *QueryBuilderRequest) (*QueryBuilderResult, error) {
+	normalizeQueryBuilderSessionRequest(req)
+
 	if req.Intent == "" {
 		return nil, fmt.Errorf("intent cannot be empty")
 	}
@@ -304,17 +309,46 @@ func (t *TableApi) ExecuteQueryBuilder(ctx context.Context, req *QueryBuilderReq
 		}
 	}
 
-	result, err := generator.BuildQueryBleve(ctx, req.Intent, schemaDesc, generationOpts...)
+	result, err := generator.BuildQueryBleve(ctx, buildEffectiveQueryBuilderIntent(req), schemaDesc, generationOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build query: %w", err)
 	}
 
-	return &QueryBuilderResult{
+	return finalizeQueryBuilderSession(req, &QueryBuilderResult{
 		Query:       result.Query,
 		Explanation: result.Explanation,
 		Confidence:  result.Confidence,
 		Warnings:    result.Warnings,
-	}, nil
+	}), nil
+}
+
+func normalizeQueryBuilderSessionRequest(req *QueryBuilderRequest) {
+	req.SessionId = ensureAgentSessionID(req.SessionId, "qbs_")
+}
+
+func buildEffectiveQueryBuilderIntent(req *QueryBuilderRequest) string {
+	return appendDecisionContext(req.Intent, req.Decisions)
+}
+
+func finalizeQueryBuilderSession(req *QueryBuilderRequest, result *QueryBuilderResult) *QueryBuilderResult {
+	result.SessionId = req.SessionId
+	result.Status = AgentStatusCompleted
+	result.ClarificationCount = len(req.Decisions)
+	result.Iteration = 1
+	result.Steps = normalizeAgentSteps([]AgentStep{{
+		Kind:   AgentStepKindGeneration,
+		Name:   "query_builder",
+		Action: "Generated Bleve query from natural language intent",
+		Status: AgentStepStatusSuccess,
+		Details: map[string]any{
+			"table":                  req.Table,
+			"schema_fields":          req.SchemaFields,
+			"example_document_count": len(req.ExampleDocuments),
+		},
+	}})
+	result.RemainingInternalIterations = max(req.MaxInternalIterations-result.Iteration, 0)
+	result.RemainingUserClarifications = max(req.MaxUserClarifications-result.ClarificationCount, 0)
+	return result
 }
 
 // buildSchemaDescription builds a query.SchemaDescription from a TableSchema.
@@ -467,9 +501,7 @@ func (t *TableApi) loadQueryBuilderExampleDocuments(
 func filterQueryBuilderExampleDocument(doc map[string]any, schemaFields []string) map[string]any {
 	filtered := make(map[string]any)
 	if len(schemaFields) == 0 {
-		for key, value := range doc {
-			filtered[key] = value
-		}
+		maps.Copy(filtered, doc)
 		return filtered
 	}
 
