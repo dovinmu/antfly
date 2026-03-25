@@ -17,9 +17,11 @@ package metadata
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -93,6 +95,32 @@ func (q *QueryRequest) ToRemoteIndexQuery() (*indexes.Query, error) {
 				Indices: sparse.Indices,
 				Values:  sparse.Values,
 			}
+		} else if packedSparse, err := v.AsEmbedding3(); err == nil {
+			// Packed sparse: base64-encoded little-endian uint32 indices and float32 values
+			indices, values, err := decodePackedSparse(packedSparse.PackedIndices, packedSparse.PackedValues)
+			if err != nil {
+				return nil, fmt.Errorf("embedding %q: %w", k, err)
+			}
+			if rq.SparseEmbeddings == nil {
+				rq.SparseEmbeddings = make(map[string]indexes.SparseVec)
+			}
+			rq.SparseEmbeddings[k] = indexes.SparseVec{
+				Indices: indices,
+				Values:  values,
+			}
+		} else if packedDense, err := v.AsEmbedding2(); err == nil {
+			// Packed dense: base64-encoded little-endian float32 bytes.
+			// AsEmbedding2 already base64-decoded, so we just reinterpret the raw bytes.
+			if len(packedDense)%4 != 0 {
+				return nil, fmt.Errorf("embedding %q: packed dense byte length %d is not a multiple of 4", k, len(packedDense))
+			}
+			vec := make(vector.T, len(packedDense)/4)
+			for i := range vec {
+				vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(packedDense[i*4:]))
+			}
+			rq.Embeddings[k] = vec
+		} else {
+			return nil, fmt.Errorf("embedding %q: unsupported format (expected float array, sparse object, packed dense base64, or packed sparse base64)", k)
 		}
 	}
 	rq.Fields = q.Fields
@@ -265,6 +293,27 @@ func (q *QueryRequest) ToRemoteIndexQuery() (*indexes.Query, error) {
 	}
 
 	return &rq, nil
+}
+
+// decodePackedSparse decodes base64-decoded little-endian bytes into sparse vector components.
+func decodePackedSparse(rawIndices, rawValues []byte) ([]uint32, []float32, error) {
+	if len(rawIndices)%4 != 0 {
+		return nil, nil, fmt.Errorf("packed_indices byte length %d is not a multiple of 4", len(rawIndices))
+	}
+	if len(rawValues)%4 != 0 {
+		return nil, nil, fmt.Errorf("packed_values byte length %d is not a multiple of 4", len(rawValues))
+	}
+	n := len(rawIndices) / 4
+	if len(rawValues)/4 != n {
+		return nil, nil, fmt.Errorf("packed_indices has %d elements but packed_values has %d", n, len(rawValues)/4)
+	}
+	indices := make([]uint32, n)
+	values := make([]float32, n)
+	for i := range n {
+		indices[i] = binary.LittleEndian.Uint32(rawIndices[i*4:])
+		values[i] = math.Float32frombits(binary.LittleEndian.Uint32(rawValues[i*4:]))
+	}
+	return indices, values, nil
 }
 
 var ErrBadRequest = errors.New("bad request")

@@ -97,6 +97,7 @@ from .edges_response import EdgesResponse
 from .embedder_config import EmbedderConfig
 from .embedder_provider import EmbedderProvider
 from .embedding_type_1 import EmbeddingType1
+from .embedding_type_3 import EmbeddingType3
 from .embeddings_index_config import EmbeddingsIndexConfig
 from .embeddings_index_stats import EmbeddingsIndexStats
 from .error import Error
@@ -407,6 +408,7 @@ __all__ = (
     "EmbeddingsIndexConfig",
     "EmbeddingsIndexStats",
     "EmbeddingType1",
+    "EmbeddingType3",
     "Error",
     "EvalConfig",
     "EvalOptions",

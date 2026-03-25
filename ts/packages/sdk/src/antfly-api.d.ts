@@ -2518,6 +2518,17 @@ export interface components {
         Embedding: number[] | {
             indices: number[];
             values: number[];
+        } | string | {
+            /**
+             * Format: byte
+             * @description Base64-encoded little-endian uint32 bytes for sparse indices
+             */
+            packed_indices: string;
+            /**
+             * Format: byte
+             * @description Base64-encoded little-endian float32 bytes for sparse values
+             */
+            packed_values: string;
         };
         QueryRequest: {
             /**
@@ -2655,9 +2666,11 @@ export interface components {
             /**
              * @description Pre-computed embeddings to use for semantic searches instead of embedding the semantic_search string.
              *     The keys are the index names. Values can be either:
-             *     - **Dense**: an array of floats, e.g. `[0.1, 0.2, 0.3]`
+             *     - **Dense (array)**: an array of floats, e.g. `[0.1, 0.2, 0.3]`
+             *     - **Dense (packed)**: a base64 string of little-endian float32 bytes (~4x more compact)
              *     - **Sparse**: an object with `indices` (array of ints) and `values` (array of floats),
              *       e.g. `{"indices": [1, 5, 100], "values": [0.3, 0.7, 0.1]}`
+             *     - **Sparse (packed)**: an object with `packed_indices` (base64 uint32 LE) and `packed_values` (base64 float32 LE)
              *
              *     Use when you've already generated embeddings on the client side to avoid redundant embedding calls.
              */

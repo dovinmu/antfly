@@ -115,6 +115,13 @@ export type DocumentSchema = components["schemas"]["DocumentSchema"];
 export type Embedding = components["schemas"]["Embedding"];
 export type DenseEmbedding = number[];
 export type SparseEmbedding = { indices: number[]; values: number[] };
+/** Base64-encoded string of little-endian float32 bytes (~4x more compact than DenseEmbedding). */
+export type PackedDenseEmbedding = string;
+/** Packed sparse embedding with base64-encoded little-endian uint32 indices and float32 values. */
+export type PackedSparseEmbedding = {
+  packed_indices: string;
+  packed_values: string;
+};
 
 // Search and aggregation types
 export type AggregationType = components["schemas"]["AggregationType"];

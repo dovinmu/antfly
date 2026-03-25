@@ -17,7 +17,9 @@ limitations under the License.
 package client
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/antflydb/antfly/pkg/client/oapi"
@@ -87,9 +89,11 @@ type (
 	AggregationType    = oapi.AggregationType
 
 	// Embedding types
-	Embedding       = oapi.Embedding
-	DenseEmbedding  = oapi.Embedding0 // []float32
-	SparseEmbedding = oapi.Embedding1 // {Indices []uint32, Values []float32}
+	Embedding            = oapi.Embedding
+	DenseEmbedding       = oapi.Embedding0 // []float32
+	SparseEmbedding      = oapi.Embedding1 // {Indices []uint32, Values []float32}
+	PackedDenseEmbedding  = oapi.Embedding2 // base64-encoded little-endian float32 bytes
+	PackedSparseEmbedding = oapi.Embedding3 // {PackedIndices, PackedValues} as base64 LE bytes
 
 	// Other types
 	AntflyType     = oapi.AntflyType
@@ -242,6 +246,58 @@ type (
 	PathFindWeightMode = oapi.PathFindWeightMode
 	PathWeightMode     = oapi.PathWeightMode
 )
+
+// NewDenseEmbedding creates an Embedding from a float32 slice.
+// The vector is sent as a JSON array of floats on the wire.
+func NewDenseEmbedding(v []float32) Embedding {
+	var emb oapi.Embedding
+	if err := emb.FromEmbedding0(oapi.Embedding0(v)); err != nil {
+		panic(err) // only fails on marshal error, which can't happen for []float32
+	}
+	return emb
+}
+
+// NewPackedDenseEmbedding creates an Embedding from a float32 slice using the
+// packed dense format (base64-encoded little-endian float32 bytes). This is
+// ~4x more compact on the wire than the JSON array format from NewDenseEmbedding.
+func NewPackedDenseEmbedding(v []float32) Embedding {
+	raw := make([]byte, len(v)*4)
+	for i, f := range v {
+		binary.LittleEndian.PutUint32(raw[i*4:], math.Float32bits(f))
+	}
+	var emb oapi.Embedding
+	if err := emb.FromEmbedding2(oapi.Embedding2(raw)); err != nil {
+		panic(err) // only fails on marshal error, which can't happen for []byte
+	}
+	return emb
+}
+
+// NewSparseEmbedding creates a sparse Embedding from indices and values.
+func NewSparseEmbedding(indices []uint32, values []float32) Embedding {
+	var emb oapi.Embedding
+	if err := emb.FromEmbedding1(oapi.Embedding1{Indices: indices, Values: values}); err != nil {
+		panic(err) // only fails on marshal error
+	}
+	return emb
+}
+
+// NewPackedSparseEmbedding creates a sparse Embedding using the packed format
+// (base64-encoded little-endian bytes for both indices and values).
+func NewPackedSparseEmbedding(indices []uint32, values []float32) Embedding {
+	rawIndices := make([]byte, len(indices)*4)
+	for i, idx := range indices {
+		binary.LittleEndian.PutUint32(rawIndices[i*4:], idx)
+	}
+	rawValues := make([]byte, len(values)*4)
+	for i, f := range values {
+		binary.LittleEndian.PutUint32(rawValues[i*4:], math.Float32bits(f))
+	}
+	var emb oapi.Embedding
+	if err := emb.FromEmbedding3(oapi.Embedding3{PackedIndices: rawIndices, PackedValues: rawValues}); err != nil {
+		panic(err) // only fails on marshal error
+	}
+	return emb
+}
 
 // ChunkingModel is just a string - use "fixed" or any ONNX model directory name
 // No predefined constants needed since any model name is valid

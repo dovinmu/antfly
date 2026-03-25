@@ -3470,6 +3470,7 @@ components:
           items:
             type: number
             format: float
+          description: Dense embedding as an array of floats, e.g. `[0.1, 0.2, 0.3]`
         - type: object
           required: [indices, values]
           properties:
@@ -3483,6 +3484,27 @@ components:
               items:
                 type: number
                 format: float
+          description: Sparse embedding with `indices` and `values` arrays
+        - type: string
+          format: byte
+          description: |
+            Packed dense embedding as a base64-encoded string of raw little-endian float32 bytes.
+            This is ~4x more compact than the JSON array format. For example, a 3-dimensional
+            vector `[1.0, 2.0, 3.0]` is encoded as base64(12 bytes of little-endian float32s).
+        - type: object
+          required: [packed_indices, packed_values]
+          properties:
+            packed_indices:
+              type: string
+              format: byte
+              description: Base64-encoded little-endian uint32 bytes for sparse indices
+            packed_values:
+              type: string
+              format: byte
+              description: Base64-encoded little-endian float32 bytes for sparse values
+          description: |
+            Packed sparse embedding with base64-encoded indices and values.
+            Same semantics as the sparse object format but more compact on the wire.
 
     # Generation Agent - Document-to-response generation
     # ==========================================
@@ -3634,9 +3656,11 @@ components:
           description: |
             Pre-computed embeddings to use for semantic searches instead of embedding the semantic_search string.
             The keys are the index names. Values can be either:
-            - **Dense**: an array of floats, e.g. `[0.1, 0.2, 0.3]`
+            - **Dense (array)**: an array of floats, e.g. `[0.1, 0.2, 0.3]`
+            - **Dense (packed)**: a base64 string of little-endian float32 bytes (~4x more compact)
             - **Sparse**: an object with `indices` (array of ints) and `values` (array of floats),
               e.g. `{"indices": [1, 5, 100], "values": [0.3, 0.7, 0.1]}`
+            - **Sparse (packed)**: an object with `packed_indices` (base64 uint32 LE) and `packed_values` (base64 float32 LE)
 
             Use when you've already generated embeddings on the client side to avoid redundant embedding calls.
           additionalProperties:
