@@ -3,6 +3,9 @@ package sim
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"time"
 )
 
@@ -91,8 +94,21 @@ func ReduceRandomScenarioFailure(
 	actions []ScenarioAction,
 	category FailureCategory,
 ) ([]ScenarioAction, error) {
+	parentDir, err := os.MkdirTemp("", fmt.Sprintf("sim-reduce-%d-*", cfg.Seed))
+	if err != nil {
+		return nil, fmt.Errorf("creating temp dir for reduction: %w", err)
+	}
+	defer os.RemoveAll(parentDir)
+	var attempt atomic.Int64
 	return reduceScenarioActions(ctx, actions, category, func(ctx context.Context, reduced []ScenarioAction) error {
-		_, err := RunRandomScenarioWithActions(ctx, cfg, ScenarioRecord{
+		dir := filepath.Join(parentDir, fmt.Sprintf("attempt-%d", attempt.Add(1)))
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return fmt.Errorf("creating reduction attempt dir: %w", err)
+		}
+		defer os.RemoveAll(dir)
+		replayCfg := cfg
+		replayCfg.BaseDir = dir
+		_, err := RunRandomScenarioWithActions(ctx, replayCfg, ScenarioRecord{
 			Kind:    ScenarioKindDocuments,
 			Seed:    cfg.Seed,
 			Actions: reduced,
@@ -107,8 +123,21 @@ func ReduceRandomTransactionScenarioFailure(
 	actions []ScenarioAction,
 	category FailureCategory,
 ) ([]ScenarioAction, error) {
+	parentDir, err := os.MkdirTemp("", fmt.Sprintf("sim-txn-reduce-%d-*", cfg.Seed))
+	if err != nil {
+		return nil, fmt.Errorf("creating temp dir for reduction: %w", err)
+	}
+	defer os.RemoveAll(parentDir)
+	var attempt atomic.Int64
 	return reduceScenarioActions(ctx, actions, category, func(ctx context.Context, reduced []ScenarioAction) error {
-		_, err := RunRandomTransactionScenarioWithActions(ctx, cfg, ScenarioRecord{
+		dir := filepath.Join(parentDir, fmt.Sprintf("attempt-%d", attempt.Add(1)))
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return fmt.Errorf("creating reduction attempt dir: %w", err)
+		}
+		defer os.RemoveAll(dir)
+		replayCfg := cfg
+		replayCfg.BaseDir = dir
+		_, err := RunRandomTransactionScenarioWithActions(ctx, replayCfg, ScenarioRecord{
 			Kind:    ScenarioKindTransactions,
 			Seed:    cfg.Seed,
 			Actions: reduced,
