@@ -425,7 +425,11 @@ func (t *TableApi) CreateTable(w http.ResponseWriter, r *http.Request, tableName
 		// Normalize legacy type names (e.g., aknn_v0 → embeddings)
 		config.Type = indexes.NormalizeIndexType(config.Type)
 
-		if indexes.IsFullTextType(config.Type) || indexes.IsGraphType(config.Type) {
+		if indexes.IsFullTextType(config.Type) {
+			continue
+		}
+		if indexes.IsGraphType(config.Type) {
+			tc.Indexes[index] = config
 			continue
 		}
 
