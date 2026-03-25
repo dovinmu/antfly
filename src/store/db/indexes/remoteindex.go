@@ -475,6 +475,8 @@ func MakeBaseIndexesForShards(
 	return indexes, nil
 }
 
+type RemoteIndexes []*RemoteIndex
+
 // WithFieldFilter returns a copy of each RemoteIndex with the given FieldFilter
 // applied. The underlying client, mapping, and schema are shared (not copied).
 func (r RemoteIndexes) WithFieldFilter(ff *FieldFilter) RemoteIndexes {
@@ -486,8 +488,6 @@ func (r RemoteIndexes) WithFieldFilter(ff *FieldFilter) RemoteIndexes {
 	}
 	return out
 }
-
-type RemoteIndexes []*RemoteIndex
 
 type FullTextPagingOptions struct {
 	OrderBy      []SortField
@@ -974,15 +974,17 @@ func MultiSearch(
 
 	// Fast path: single shard avoids goroutine/channel overhead.
 	if len(indexes) == 1 {
-		sr, err := indexes[0].RemoteSearch(ctx, req)
+		idx := indexes[0]
+		sr, err := idx.RemoteSearch(ctx, req)
 		if err != nil {
-			sr = &RemoteIndexSearchResult{
+			return &RemoteIndexSearchResult{
+				Took: time.Since(searchStart),
 				Status: &RemoteIndexSearchStatus{
 					Total:  1,
 					Failed: 1,
-					Errors: map[string]error{indexes[0].Name(): err},
+					Errors: map[string]error{idx.Name(): err},
 				},
-			}
+			}, nil
 		}
 		if sr == nil {
 			sr = &RemoteIndexSearchResult{}

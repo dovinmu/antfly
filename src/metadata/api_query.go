@@ -386,22 +386,26 @@ func (t *TableApi) getOrCreateBaseIndexes(
 		return cached.(indexes.RemoteIndexes), nil
 	}
 
+	// Evict before construction so concurrent goroutines don't all race
+	// on clear+store after the expensive MakeBaseIndexesForShards call.
+	cacheSize := 0
+	t.baseIndexCache.Range(func(_, _ any) bool {
+		cacheSize++
+		return cacheSize < 64
+	})
+	if cacheSize >= 64 {
+		t.baseIndexCache.Clear()
+	}
+
 	base, err := indexes.MakeBaseIndexesForShards(t.tm.HttpClient(), tableSchema, peers)
 	if err != nil {
 		return nil, err
 	}
 
-	// Evict all entries when the cache grows too large (e.g. after many
-	// schema migrations or topology changes). Hot entries are re-cached
-	// on the next query.
-	count := 0
-	t.baseIndexCache.Range(func(_, _ any) bool { count++; return count < 64 })
-	if count >= 64 {
-		t.baseIndexCache.Clear()
-	}
-
-	t.baseIndexCache.Store(key, base)
-	return base, nil
+	// LoadOrStore ensures only one goroutine's result is cached when
+	// concurrent queries compute the same key simultaneously.
+	actual, _ := t.baseIndexCache.LoadOrStore(key, base)
+	return actual.(indexes.RemoteIndexes), nil
 }
 
 func (t *TableApi) runQuery(ctx context.Context, queryReq *QueryRequest) QueryResult {
