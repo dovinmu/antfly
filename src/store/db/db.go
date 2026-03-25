@@ -2468,21 +2468,31 @@ func (db *DBImpl) extractSpecialFields(docJSON []byte, key []byte) (
 				continue
 			}
 
-			embValue, ok := embValueAny.([]any)
-			if !ok {
-				return nil, nil, nil, nil, nil, false, fmt.Errorf(
-					"embedding for dense index %s must be an array, got %T",
-					indexName, embValueAny,
-				)
-			}
-
+			var embedding vector.T
 			expectedDim := embPreProcessor.GetDimension()
 
-			embedding, err := embeddings.ConvertToFloat32Slice(embValue)
-			if err != nil {
+			switch ev := embValueAny.(type) {
+			case []any:
+				var err error
+				embedding, err = embeddings.ConvertToFloat32Slice(ev)
+				if err != nil {
+					return nil, nil, nil, nil, nil, false, fmt.Errorf(
+						"converting embedding for index %s: %w",
+						indexName, err,
+					)
+				}
+			case string:
+				// Base64-encoded binary vector (from vector.T MarshalJSON)
+				if err := embedding.UnmarshalJSON([]byte(`"` + ev + `"`)); err != nil {
+					return nil, nil, nil, nil, nil, false, fmt.Errorf(
+						"decoding base64 embedding for index %s: %w",
+						indexName, err,
+					)
+				}
+			default:
 				return nil, nil, nil, nil, nil, false, fmt.Errorf(
-					"converting embedding for index %s: %w",
-					indexName, err,
+					"embedding for dense index %s must be an array or base64 string, got %T",
+					indexName, embValueAny,
 				)
 			}
 
