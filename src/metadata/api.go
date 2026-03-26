@@ -73,16 +73,16 @@ var deletesPool = sync.Pool{
 }
 
 type TableApi struct {
-	ln          *MetadataStore
-	tm          *tablemgr.TableManager
-	logger      *zap.Logger
-	pool        *workerpool.Pool
-	joinOnce    sync.Once
-	joinService *JoinService
-	joinInitErr error
-	foreignPool *foreign.PoolManager
-	prunerCache     sync.Map // documentRenderer string → *ai.Pruner
-	baseIndexCache  sync.Map // shardTopologyKey (uint64) → indexes.ShardIndexes
+	ln             *MetadataStore
+	tm             *tablemgr.TableManager
+	logger         *zap.Logger
+	pool           *workerpool.Pool
+	joinOnce       sync.Once
+	joinService    *JoinService
+	joinInitErr    error
+	foreignPool    *foreign.PoolManager
+	prunerCache    sync.Map // documentRenderer string → *ai.Pruner
+	baseIndexCache sync.Map // baseIndexPlanKey (uint64) → *indexes.BaseShardIndexPlan
 }
 type ClusterApi struct {
 	ln     *MetadataStore

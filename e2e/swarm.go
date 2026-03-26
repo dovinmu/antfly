@@ -258,8 +258,25 @@ func startSwarmWithLocalBypass(
 ) {
 	t.Helper()
 
-	// Create metadata runtime inline.
-	metaRuntime, err := metadata.NewRuntime(logger.Named("metadata"), config, metaConf, peers, false, nil)
+	// Create store runtime inline.
+	storeRuntime, err := store.NewRuntime(logger.Named("store"), config, storeConf, nil)
+	if err != nil {
+		t.Fatalf("creating store runtime: %v", err)
+	}
+	t.Cleanup(func() { _ = storeRuntime.Close() })
+
+	// Create metadata runtime with local bypass already selected.
+	metaRuntime, err := metadata.NewRuntime(
+		logger.Named("metadata"),
+		config,
+		metaConf,
+		peers,
+		false,
+		nil,
+		metadata.RuntimeOptions{
+			ExecutionProvider: metadata.NewLocalExecutionProvider(storeRuntime.Store()),
+		},
+	)
 	if err != nil {
 		t.Fatalf("creating metadata runtime: %v", err)
 	}
@@ -292,16 +309,8 @@ func startSwarmWithLocalBypass(
 	case <-time.After(30 * time.Second):
 		t.Fatal("Timeout waiting for metadata in local bypass mode")
 	}
-	// Create store runtime inline.
-	storeRuntime, err := store.NewRuntime(logger.Named("store"), config, storeConf, nil)
-	if err != nil {
-		t.Fatalf("creating store runtime: %v", err)
-	}
-	storeRuntime.StartRaft()
-	t.Cleanup(func() { _ = storeRuntime.Close() })
 
-	// Wire local bypass.
-	metaRuntime.SetLocalStore(metaConf.ID, storeRuntime.Store())
+	storeRuntime.StartRaft()
 	logger.Info("Local shard bypass enabled for e2e test")
 
 	// Start store HTTP server (still needed for raft transport).

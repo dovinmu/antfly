@@ -15,28 +15,36 @@
 package metadata
 
 import (
-	"context"
 	"net/http"
 	"testing"
 
 	"github.com/antflydb/antfly/lib/schema"
 	"github.com/antflydb/antfly/lib/types"
 	"github.com/antflydb/antfly/src/store/db/indexes"
+	"github.com/antflydb/antfly/src/tablemgr"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 )
 
-type testShardSearcher struct{}
-
-func (testShardSearcher) SearchShardTyped(
-	context.Context,
-	types.ID,
-	*indexes.RemoteIndexSearchRequest,
-) (*indexes.RemoteIndexSearchResult, error) {
-	return nil, nil
+type testExecutionProvider struct {
+	calls int
+	out   indexes.ShardIndexes
 }
 
-func TestGetOrCreateBaseIndexes_InvalidatesCacheWhenFactoryChanges(t *testing.T) {
+func (p *testExecutionProvider) MaterializeIndexes(
+	_ *http.Client,
+	_ *indexes.BaseShardIndexPlan,
+	_ map[types.ID][]string,
+) (indexes.ShardIndexes, error) {
+	p.calls++
+	return p.out, nil
+}
+
+func (p *testExecutionProvider) StoreClientFactory() tablemgr.StoreClientFactory {
+	return nil
+}
+
+func TestGetOrCreateBaseIndexPlan_CachesImmutablePlan(t *testing.T) {
 	ms, _ := setupTestMetadataStore(t)
 	api := &TableApi{
 		ln:     ms,
@@ -48,38 +56,33 @@ func TestGetOrCreateBaseIndexes_InvalidatesCacheWhenFactoryChanges(t *testing.T)
 		types.ID(1): {"http://peer-a"},
 	}
 
-	remoteFactory := indexes.ShardIndexFactory(func(
-		tableSchema *schema.TableSchema,
-		shardIDs []types.ID,
-		peers map[types.ID][]string,
-	) (indexes.ShardIndexes, error) {
-		return indexes.MakeRemoteIndexesForShards(http.DefaultClient, tableSchema, shardIDs, peers)
+	first, err := api.getOrCreateBaseIndexPlan(tableSchema, peers)
+	require.NoError(t, err)
+	require.Equal(t, uint32(7), first.SchemaVersion)
+	require.Len(t, first.ShardIDs, 1)
+	require.Equal(t, types.ID(1), first.ShardIDs[0])
+	require.NotNil(t, first.IndexMapping)
+
+	cachedAgain, err := api.getOrCreateBaseIndexPlan(tableSchema, peers)
+	require.NoError(t, err)
+	require.Same(t, first, cachedAgain)
+}
+
+func TestMaterializeIndexes_UsesConfiguredExecutionProvider(t *testing.T) {
+	ms, _ := setupTestMetadataStore(t)
+	provider := &testExecutionProvider{
+		out: indexes.ShardIndexes{
+			&indexes.LocalIndex{},
+		},
+	}
+	ms.executionProvider = provider
+	plan := indexes.NewBaseShardIndexPlan(&schema.TableSchema{Version: 7}, []types.ID{1})
+
+	materialized, err := ms.materializeIndexes(plan, map[types.ID][]string{
+		types.ID(1): {"http://peer-a"},
 	})
-	ms.setShardIndexFactory(remoteFactory)
-
-	first, err := api.getOrCreateBaseIndexes(tableSchema, peers)
 	require.NoError(t, err)
-	require.Len(t, first, 1)
-	_, ok := first[0].(*indexes.RemoteIndex)
-	require.True(t, ok)
-
-	cachedAgain, err := api.getOrCreateBaseIndexes(tableSchema, peers)
-	require.NoError(t, err)
-	require.Same(t, first[0], cachedAgain[0])
-
-	localFactory := indexes.ShardIndexFactory(func(
-		tableSchema *schema.TableSchema,
-		shardIDs []types.ID,
-		_ map[types.ID][]string,
-	) (indexes.ShardIndexes, error) {
-		return indexes.MakeLocalIndexesForShards(testShardSearcher{}, tableSchema, shardIDs), nil
-	})
-	ms.setShardIndexFactory(localFactory)
-
-	afterSwitch, err := api.getOrCreateBaseIndexes(tableSchema, peers)
-	require.NoError(t, err)
-	require.Len(t, afterSwitch, 1)
-	_, ok = afterSwitch[0].(*indexes.LocalIndex)
-	require.True(t, ok)
-	require.NotSame(t, first[0], afterSwitch[0])
+	require.Len(t, materialized, 1)
+	require.Same(t, provider.out[0], materialized[0])
+	require.Equal(t, 1, provider.calls)
 }

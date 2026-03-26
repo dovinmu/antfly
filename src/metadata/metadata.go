@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/antflydb/antfly/lib/clock"
-	"github.com/antflydb/antfly/lib/schema"
 	"github.com/antflydb/antfly/lib/types"
 	"github.com/antflydb/antfly/lib/workerpool"
 	json "github.com/antflydb/antfly/pkg/libaf/json"
@@ -72,27 +71,20 @@ type MetadataStore struct {
 
 	txnIDGenerator func() uuid.UUID
 
-	// makeIndexes builds ShardIndexes for a given schema and set of shards.
-	// Defaults to MakeRemoteIndexesForShards; swarm mode replaces it with
-	// MakeLocalIndexesForShards via Runtime.SetLocalStore.
-	makeIndexes atomic.Pointer[indexes.ShardIndexFactory]
-	// shardIndexFactoryGeneration invalidates base index cache entries when the
-	// shard index construction mode changes (for example remote -> local).
-	shardIndexFactoryGeneration atomic.Uint64
+	// executionProvider chooses local vs remote implementations for query-plane
+	// shard indexes and control-plane StoreRPCs. It is fixed at runtime
+	// construction, which avoids mixed-mode bootstrap states.
+	executionProvider ExecutionProvider
 }
 
-// getIndexes builds base ShardIndexes using the factory configured at startup.
-func (ms *MetadataStore) getIndexes(tableSchema *schema.TableSchema, shardIDs []types.ID, peers map[types.ID][]string) (indexes.ShardIndexes, error) {
-	if f := ms.makeIndexes.Load(); f != nil {
-		return (*f)(tableSchema, shardIDs, peers)
+// materializeIndexes builds fresh ShardIndexes from an immutable base plan
+// using the execution provider configured at runtime startup.
+func (ms *MetadataStore) materializeIndexes(plan *indexes.BaseShardIndexPlan, peers map[types.ID][]string) (indexes.ShardIndexes, error) {
+	provider := ms.executionProvider
+	if provider == nil {
+		provider = DefaultExecutionProvider()
 	}
-	// Default to remote before SetLocalStore is called.
-	return indexes.MakeRemoteIndexesForShards(ms.tm.HttpClient(), tableSchema, shardIDs, peers)
-}
-
-func (ms *MetadataStore) setShardIndexFactory(f indexes.ShardIndexFactory) {
-	ms.makeIndexes.Store(&f)
-	ms.shardIndexFactoryGeneration.Add(1)
+	return provider.MaterializeIndexes(ms.tm.HttpClient(), plan, peers)
 }
 
 func (ms *MetadataStore) clockOrReal() clock.Clock {

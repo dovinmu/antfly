@@ -36,17 +36,30 @@ var _ StoreRPC = (*LocalStoreClient)(nil)
 // bypassing HTTP. Used in swarm mode where metadata and store share a process.
 type LocalStoreClient struct {
 	nodeID types.ID
-	store  store.StoreIface
+	store  func() (store.StoreIface, error)
 }
 
 func NewLocalStoreClient(nodeID types.ID, s store.StoreIface) *LocalStoreClient {
-	return &LocalStoreClient{nodeID: nodeID, store: s}
+	return NewDeferredLocalStoreClient(nodeID, func() (store.StoreIface, error) {
+		return s, nil
+	})
+}
+
+func NewDeferredLocalStoreClient(
+	nodeID types.ID,
+	resolver func() (store.StoreIface, error),
+) *LocalStoreClient {
+	return &LocalStoreClient{nodeID: nodeID, store: resolver}
 }
 
 func (c *LocalStoreClient) ID() types.ID { return c.nodeID }
 
 func (c *LocalStoreClient) shard(shardID types.ID) (store.ShardIface, error) {
-	shard, ok := c.store.Shard(shardID)
+	s, err := c.store()
+	if err != nil {
+		return nil, err
+	}
+	shard, ok := s.Shard(shardID)
 	if !ok {
 		return nil, fmt.Errorf("shard %s not found on store %s", shardID, c.nodeID)
 	}
@@ -277,14 +290,22 @@ func (c *LocalStoreClient) removePeer(ctx context.Context, shardID types.ID, pee
 }
 
 func (c *LocalStoreClient) StopShard(ctx context.Context, shardID types.ID) error {
-	return c.store.StopRaftGroup(shardID)
+	s, err := c.store()
+	if err != nil {
+		return err
+	}
+	return s.StopRaftGroup(shardID)
 }
 
 func (c *LocalStoreClient) StartShard(ctx context.Context, shardID types.ID, req *store.ShardStartRequest) error {
 	if req == nil {
 		return fmt.Errorf("start shard request is required")
 	}
-	return c.store.StartRaftGroup(shardID, req.Peers, req.Join, &store.ShardStartConfig{
+	s, err := c.store()
+	if err != nil {
+		return err
+	}
+	return s.StartRaftGroup(shardID, req.Peers, req.Join, &store.ShardStartConfig{
 		ShardConfig: req.ShardConfig,
 		Timestamp:   req.Timestamp,
 	})
@@ -299,7 +320,11 @@ func (c *LocalStoreClient) DropIndex(ctx context.Context, shardID types.ID, name
 }
 
 func (c *LocalStoreClient) Status(ctx context.Context) (*store.StoreStatus, error) {
-	return c.store.Status(), nil
+	s, err := c.store()
+	if err != nil {
+		return nil, err
+	}
+	return s.Status(), nil
 }
 
 func (c *LocalStoreClient) MedianKeyForShard(ctx context.Context, shardID types.ID) ([]byte, error) {
@@ -325,7 +350,11 @@ func (c *LocalStoreClient) Scan(
 	toKey []byte,
 	opts ScanOptions,
 ) (*db.ScanResult, error) {
-	return c.store.Scan(ctx, shardID, fromKey, toKey, db.ScanOptions{
+	s, err := c.store()
+	if err != nil {
+		return nil, err
+	}
+	return s.Scan(ctx, shardID, fromKey, toKey, db.ScanOptions{
 		InclusiveFrom:    opts.InclusiveFrom,
 		ExclusiveTo:      opts.ExclusiveTo,
 		IncludeDocuments: opts.IncludeDocuments,

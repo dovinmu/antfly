@@ -31,11 +31,11 @@ var _ ShardIndex = (*LocalIndex)(nil)
 // LocalIndex implements ShardIndex by calling a shard directly in-process,
 // bypassing HTTP. Used in swarm mode where metadata and store share a process.
 type LocalIndex struct {
-	shard      types.ID
-	searcher   ShardSearcher
-	idxMapping mapping.IndexMapping
-	schema     *schema.TableSchema
-	q          *FieldFilter
+	shard         types.ID
+	searcher      ShardSearcher
+	idxMapping    mapping.IndexMapping
+	schemaVersion uint32
+	q             *FieldFilter
 }
 
 func (l *LocalIndex) WithFieldFilter(ff *FieldFilter) ShardIndex {
@@ -53,14 +53,20 @@ func MakeLocalIndexesForShards(
 	tableSchema *schema.TableSchema,
 	shardIDs []types.ID,
 ) ShardIndexes {
-	idxMapping := schema.NewIndexMapFromSchema(tableSchema)
-	out := make(ShardIndexes, len(shardIDs))
-	for i, id := range shardIDs {
+	return MakeLocalIndexesFromPlan(searcher, NewBaseShardIndexPlan(tableSchema, shardIDs))
+}
+
+func MakeLocalIndexesFromPlan(
+	searcher ShardSearcher,
+	plan *BaseShardIndexPlan,
+) ShardIndexes {
+	out := make(ShardIndexes, len(plan.ShardIDs))
+	for i, id := range plan.ShardIDs {
 		out[i] = &LocalIndex{
-			shard:      id,
-			searcher:   searcher,
-			idxMapping: idxMapping,
-			schema:     tableSchema,
+			shard:         id,
+			searcher:      searcher,
+			idxMapping:    plan.IndexMapping,
+			schemaVersion: plan.SchemaVersion,
 		}
 	}
 	return out
@@ -70,10 +76,7 @@ func (l *LocalIndex) Name() string                       { return l.shard.String
 func (l *LocalIndex) ShardID() types.ID                  { return l.shard }
 func (l *LocalIndex) IndexMapping() mapping.IndexMapping { return l.idxMapping }
 func (l *LocalIndex) SchemaVersion() uint32 {
-	if l.schema != nil {
-		return l.schema.Version
-	}
-	return 0
+	return l.schemaVersion
 }
 
 func (l *LocalIndex) RemoteSearch(

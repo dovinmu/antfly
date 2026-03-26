@@ -27,7 +27,6 @@ import (
 	"github.com/antflydb/antfly/lib/middleware"
 	"github.com/antflydb/antfly/lib/multirafthttp/transport"
 	"github.com/antflydb/antfly/lib/pebbleutils"
-	"github.com/antflydb/antfly/lib/schema"
 	"github.com/antflydb/antfly/lib/types"
 	"github.com/antflydb/antfly/lib/workerpool"
 	"github.com/antflydb/antfly/src/common"
@@ -37,8 +36,6 @@ import (
 	"github.com/antflydb/antfly/src/metadata/reconciler"
 	"github.com/antflydb/antfly/src/raft"
 	"github.com/antflydb/antfly/src/store"
-	storeclient "github.com/antflydb/antfly/src/store/client"
-	"github.com/antflydb/antfly/src/store/db/indexes"
 	"github.com/antflydb/antfly/src/tablemgr"
 	"github.com/antflydb/antfly/src/usermgr"
 	"github.com/antflydb/termite/pkg/termite/lib/modelregistry"
@@ -71,6 +68,10 @@ type Runtime struct {
 	closeErr  error
 }
 
+type RuntimeOptions struct {
+	ExecutionProvider ExecutionProvider
+}
+
 func NewRuntime(
 	zl *zap.Logger,
 	config *common.Config,
@@ -78,6 +79,7 @@ func NewRuntime(
 	peers common.Peers,
 	join bool,
 	cache *pebbleutils.Cache,
+	opts RuntimeOptions,
 ) (*Runtime, error) {
 	dataDir := config.GetBaseDir()
 	rs, err := raft.NewMultiRaftServer(zl, dataDir, conf.ID, conf.RaftURL)
@@ -95,6 +97,10 @@ func NewRuntime(
 		metadataStore.Close()
 		return nil, fmt.Errorf("creating metadata http client: %w", err)
 	}
+	provider := opts.ExecutionProvider
+	if provider == nil {
+		provider = DefaultExecutionProvider()
+	}
 
 	tm, err := tablemgr.NewTableManager(metadataStore, httpClient, config.MaxShardSizeBytes)
 	if err != nil {
@@ -104,6 +110,7 @@ func NewRuntime(
 		}
 		return nil, fmt.Errorf("creating table manager: %w", err)
 	}
+	tm.SetStoreClientFactory(provider.StoreClientFactory())
 
 	um, err := usermgr.NewUserManager(metadataStore)
 	if err != nil {
@@ -153,6 +160,8 @@ func NewRuntime(
 
 		hlc:   NewHLCWithClock(clock.RealClock{}),
 		clock: clock.RealClock{},
+
+		executionProvider: provider,
 	}
 
 	shardOps := NewMetadataShardOperations(node)
@@ -200,22 +209,6 @@ func NewRuntime(
 	return runtime, nil
 }
 
-// SetLocalStore configures in-process bypass for store communication.
-// When set, queries call shards directly instead of going over HTTP,
-// and the StoreClientFactory returns a LocalStoreClient.
-// Call after both metadata and store runtimes are created in swarm mode.
-func (r *Runtime) SetLocalStore(nodeID types.ID, s store.StoreIface) {
-	searcher := indexes.ShardSearcher(&storeShardSearcher{store: s})
-	factory := indexes.ShardIndexFactory(func(tableSchema *schema.TableSchema, shardIDs []types.ID, peers map[types.ID][]string) (indexes.ShardIndexes, error) {
-		return indexes.MakeLocalIndexesForShards(searcher, tableSchema, shardIDs), nil
-	})
-	r.node.setShardIndexFactory(factory)
-
-	r.tableManager.SetStoreClientFactory(func(_ *http.Client, id types.ID, _ string) storeclient.StoreRPC {
-		return storeclient.NewLocalStoreClient(id, s)
-	})
-}
-
 func (r *Runtime) StartRaft() {
 	go r.raft.Start()
 }
@@ -254,19 +247,6 @@ func (r *Runtime) Close() error {
 		}
 	})
 	return r.closeErr
-}
-
-// storeShardSearcher adapts store.StoreIface to indexes.ShardSearcher.
-type storeShardSearcher struct {
-	store store.StoreIface
-}
-
-func (s *storeShardSearcher) SearchShardTyped(ctx context.Context, shardID types.ID, req *indexes.RemoteIndexSearchRequest) (*indexes.RemoteIndexSearchResult, error) {
-	shard, ok := s.store.Shard(shardID)
-	if !ok {
-		return nil, fmt.Errorf("shard %s not found", shardID)
-	}
-	return shard.SearchTyped(ctx, req)
 }
 
 func newStoreHTTPClient(config *common.Config) (*http.Client, io.Closer, error) {

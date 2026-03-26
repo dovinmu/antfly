@@ -53,7 +53,7 @@ func RunAsMetadataServer(
 		zl.Fatal("Error parsing API URL", zap.Error(err))
 	}
 
-	runtime, err := NewRuntime(zl, config, conf, peers, join, cache)
+	runtime, err := NewRuntime(zl, config, conf, peers, join, cache, RuntimeOptions{})
 	if err != nil {
 		zl.Fatal("Failed to create metadata runtime", zap.Error(err))
 	}

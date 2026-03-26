@@ -132,9 +132,24 @@ func runSwarm(cmd *cobra.Command, args []string) error {
 		ApiURL:  viper.GetString("swarm.metadata-api"),
 	}
 
-	// Create metadata runtime inline so we can wire the local store bypass.
+	storeConf := &store.StoreInfo{
+		ID:      tid,
+		ApiURL:  viper.GetString("swarm.store-api"),
+		RaftURL: viper.GetString("swarm.store-raft"),
+	}
+
+	localProvider := metadata.NewDeferredLocalExecutionProvider()
+
 	metaRuntime, err := metadata.NewRuntime(
-		logger.Named("metadataServer"), config, metaConf, peers, false, cache,
+		logger.Named("metadataServer"),
+		config,
+		metaConf,
+		peers,
+		false,
+		cache,
+		metadata.RuntimeOptions{
+			ExecutionProvider: localProvider,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("creating metadata runtime: %w", err)
@@ -146,7 +161,24 @@ func runSwarm(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// Start metadata HTTP server.
+	if enableTermite {
+		go termite.RunAsTermite(ctx, logger, termiteConfigWithSecurity(config), termiteReadyC)
+		// Wait for termite to finish Pebble initialization before opening store Pebble.
+		<-termiteReadyC
+	}
+
+	storeRuntime, err := store.NewRuntime(logger.Named("store"), config, storeConf, cache)
+	if err != nil {
+		return fmt.Errorf("creating store runtime: %w", err)
+	}
+	defer func() {
+		if err := storeRuntime.Close(); err != nil {
+			logger.Error("failed to close store runtime", zap.Error(err))
+		}
+	}()
+	localProvider.BindStore(storeRuntime.Store())
+
+	// Start metadata HTTP server after local bypass is fully bound.
 	go func() {
 		u, err := url.Parse(metaConf.ApiURL)
 		if err != nil {
@@ -173,36 +205,8 @@ func runSwarm(cmd *cobra.Command, args []string) error {
 			logger.Fatal("Metadata HTTP server error", zap.Error(err))
 		}
 	}()
-
-	// Wait for metadata to finish Pebble initialization before starting other services
 	<-metadataReadyC
-
-	if enableTermite {
-		go termite.RunAsTermite(ctx, logger, termiteConfigWithSecurity(config), termiteReadyC)
-		// Wait for termite to finish Pebble initialization before starting store
-		<-termiteReadyC
-	}
-
-	storeConf := &store.StoreInfo{
-		ID:      tid,
-		ApiURL:  viper.GetString("swarm.store-api"),
-		RaftURL: viper.GetString("swarm.store-raft"),
-	}
-
-	// Create store runtime inline so we can wire the local bypass.
-	storeRuntime, err := store.NewRuntime(logger.Named("store"), config, storeConf, cache)
-	if err != nil {
-		return fmt.Errorf("creating store runtime: %w", err)
-	}
 	storeRuntime.StartRaft()
-	defer func() {
-		if err := storeRuntime.Close(); err != nil {
-			logger.Error("failed to close store runtime", zap.Error(err))
-		}
-	}()
-
-	// Wire local bypass: metadata calls store directly in-process.
-	metaRuntime.SetLocalStore(tid, storeRuntime.Store())
 	logger.Info("Local shard bypass enabled for swarm mode")
 
 	eg, egCtx := errgroup.WithContext(ctx)

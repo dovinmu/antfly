@@ -56,8 +56,8 @@ type RemoteIndex struct {
 	urls   []string
 	shard  types.ID
 
-	mapping mapping.IndexMapping
-	schema  *schema.TableSchema
+	mapping       mapping.IndexMapping
+	schemaVersion uint32
 
 	q *FieldFilter
 }
@@ -488,10 +488,17 @@ func MakeRemoteIndexesForShards(
 	shardIDs []types.ID,
 	peers map[types.ID][]string,
 ) (ShardIndexes, error) {
-	idxMapping := schema.NewIndexMapFromSchema(tableSchema)
-	indexes := make(ShardIndexes, 0, len(shardIDs))
+	return MakeRemoteIndexesFromPlan(client, NewBaseShardIndexPlan(tableSchema, shardIDs), peers)
+}
 
-	for _, shardID := range shardIDs {
+func MakeRemoteIndexesFromPlan(
+	client *http.Client,
+	plan *BaseShardIndexPlan,
+	peers map[types.ID][]string,
+) (ShardIndexes, error) {
+	indexes := make(ShardIndexes, 0, len(plan.ShardIDs))
+
+	for _, shardID := range plan.ShardIDs {
 		peerURLs := peers[shardID]
 		if len(peerURLs) == 0 {
 			return nil, fmt.Errorf("no peer URLs found for shard %s", shardID)
@@ -501,8 +508,8 @@ func MakeRemoteIndexesForShards(
 		if err != nil {
 			return nil, fmt.Errorf("creating remote index: %v", err)
 		}
-		remoteIndex.mapping = idxMapping
-		remoteIndex.schema = tableSchema
+		remoteIndex.mapping = plan.IndexMapping
+		remoteIndex.schemaVersion = plan.SchemaVersion
 		indexes = append(indexes, remoteIndex)
 	}
 
@@ -625,7 +632,7 @@ func (r ShardIndexes) FullTextSearch(
 		return nil, fmt.Errorf("setting index mapping: %w", err)
 	}
 	for _, i := range r {
-		index.Add(i)
+		index.Add(newBleveShardIndexAdapter(i))
 	}
 	origCtx := ctx
 	ctx = r.withGlobalScoringCtx(ctx)
@@ -668,9 +675,7 @@ func (r *RemoteIndex) RemoteSearch(
 	req *RemoteIndexSearchRequest,
 ) (*RemoteIndexSearchResult, error) {
 	version := uint32(0)
-	if r.schema != nil {
-		version = r.schema.Version
-	}
+	version = r.schemaVersion
 	reqBytes, err := json.Marshal(req.withFullTextIndexVersion(version))
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal search request: %w", err)
@@ -719,9 +724,7 @@ func (r *RemoteIndex) BatchRemoteSearch(
 	}
 
 	version := uint32(0)
-	if r.schema != nil {
-		version = r.schema.Version
-	}
+	version = r.schemaVersion
 
 	// Build ndjson body
 	var buf bytes.Buffer
@@ -859,9 +862,7 @@ func (r *RemoteIndex) SearchInContext(
 	req *bleve.SearchRequest,
 ) (*bleve.SearchResult, error) {
 	version := uint32(0)
-	if r.schema != nil {
-		version = r.schema.Version
-	}
+	version = r.schemaVersion
 	riReq := RemoteIndexSearchRequest{BleveSearchRequest: req, FullTextIndexVersion: version}
 	if r.q != nil {
 		if r.q.CountStar {
@@ -978,10 +979,7 @@ func (r *RemoteIndex) Name() string                       { return r.shard.Strin
 func (r *RemoteIndex) ShardID() types.ID                  { return r.shard }
 func (r *RemoteIndex) IndexMapping() mapping.IndexMapping { return r.mapping }
 func (r *RemoteIndex) SchemaVersion() uint32 {
-	if r.schema != nil {
-		return r.schema.Version
-	}
-	return 0
+	return r.schemaVersion
 }
 func (r *RemoteIndex) Type() IndexType     { return IndexTypeFullText }
 func (r *RemoteIndex) SetName(name string) {}
