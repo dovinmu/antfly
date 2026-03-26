@@ -203,12 +203,12 @@ func getFloat(m map[string]any, key string) float64 {
 func buildMemoryDoc(args StoreMemoryArgs, userID, now string) map[string]any {
 	doc := map[string]any{
 		"content":     args.Content,
-		"memory_type": coalesce(args.MemoryType, "semantic"),
+		"memory_type": coalesce(args.MemoryType, MemoryTypeSemantic),
 		"tags":        args.Tags,
 		"project":     args.Project,
 		"source":      args.Source,
 		"created_by":  userID,
-		"visibility":  coalesce(args.Visibility, "team"),
+		"visibility":  coalesce(args.Visibility, VisibilityTeam),
 		"updated_at":  now,
 		"entities":    []any{},
 	}

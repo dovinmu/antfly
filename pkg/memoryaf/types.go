@@ -1,5 +1,16 @@
 package memoryaf
 
+const (
+	MemoryTypeEpisodic   = "episodic"
+	MemoryTypeSemantic   = "semantic"
+	MemoryTypeProcedural = "procedural"
+
+	VisibilityTeam    = "team"
+	VisibilityPrivate = "private"
+
+	entityDocType = "entity"
+)
+
 // Memory represents a stored memory document.
 type Memory struct {
 	ID         string   `json:"id"`

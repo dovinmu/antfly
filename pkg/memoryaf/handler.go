@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+
+
 	"github.com/antflydb/antfly/pkg/client"
 	"github.com/antflydb/antfly/pkg/client/query"
 	"github.com/google/uuid"
@@ -33,7 +35,7 @@ type Handler struct {
 	termite *TermiteClient
 	logger  *zap.Logger
 
-	mu                    sync.Mutex
+	mu                    sync.RWMutex
 	initializedNamespaces map[string]bool
 }
 
@@ -93,12 +95,18 @@ func (h *Handler) ensureNamespace(ctx context.Context, namespace string) error {
 		return err
 	}
 
-	h.mu.Lock()
-	if h.initializedNamespaces[namespace] {
-		h.mu.Unlock()
+	h.mu.RLock()
+	initialized := h.initializedNamespaces[namespace]
+	h.mu.RUnlock()
+	if initialized {
 		return nil
 	}
+
+	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.initializedNamespaces[namespace] {
+		return nil
+	}
 
 	table := tableName(namespace)
 
@@ -186,29 +194,30 @@ func buildFilterQuery(opts filterOpts, ctx *UserContext) *query.Query {
 	var clauses []query.Query
 
 	if opts.Project != "" {
-		clauses = append(clauses, termQuery(opts.Project, "project"))
+		clauses = append(clauses, query.NewTerm(opts.Project, "project"))
 	}
 	if opts.MemoryType != "" {
-		clauses = append(clauses, termQuery(opts.MemoryType, "memory_type"))
+		clauses = append(clauses, query.NewTerm(opts.MemoryType, "memory_type"))
 	}
 	if opts.CreatedBy != "" {
-		clauses = append(clauses, termQuery(opts.CreatedBy, "created_by"))
+		clauses = append(clauses, query.NewTerm(opts.CreatedBy, "created_by"))
 	}
 	if opts.EntityType != "" {
-		clauses = append(clauses, termQuery(opts.EntityType, "entity_type"))
+		clauses = append(clauses, query.NewTerm(opts.EntityType, "entity_type"))
 	}
 	for _, tag := range opts.Tags {
-		clauses = append(clauses, termQuery(tag, "tags"))
+		clauses = append(clauses, query.NewTerm(tag, "tags"))
 	}
 
-	// Visibility filtering: show team memories + user's own private memories
-	if ctx != nil && opts.Visibility != "private" {
-		teamQ := termQuery("team", "visibility")
-		ownerQ := termQuery(ctx.UserID, "created_by")
+	// Visibility filtering: when no explicit visibility is requested and we have
+	// a user context, show team memories + the caller's own private memories.
+	if ctx != nil && opts.Visibility == "" {
+		teamQ := query.NewTerm(VisibilityTeam, "visibility")
+		ownerQ := query.NewTerm(ctx.UserID, "created_by")
 		disj := query.DisjunctionQuery{Disjuncts: []query.Query{teamQ, ownerQ}}.ToQuery()
 		clauses = append(clauses, disj)
 	} else if opts.Visibility != "" {
-		clauses = append(clauses, termQuery(opts.Visibility, "visibility"))
+		clauses = append(clauses, query.NewTerm(opts.Visibility, "visibility"))
 	}
 
 	if len(clauses) == 0 {
@@ -230,13 +239,6 @@ type filterOpts struct {
 	EntityType string
 }
 
-func termQuery(value, field string) query.Query {
-	return query.TermQuery{Term: value, Field: field}.ToQuery()
-}
-
-func matchAllQuery() query.Query {
-	return query.MatchAllQuery{}.ToQuery()
-}
 
 // --- hitToMemory conversion ---
 
@@ -249,12 +251,12 @@ func hitToMemory(id string, source map[string]any) Memory {
 	m := Memory{
 		ID:         memID,
 		Content:    getString(source, "content"),
-		MemoryType: getStringDefault(source, "memory_type", "semantic"),
+		MemoryType: getStringDefault(source, "memory_type", MemoryTypeSemantic),
 		Tags:       getStringSlice(source, "tags"),
 		Project:    getString(source, "project"),
 		Source:     getString(source, "source"),
 		CreatedBy:  getString(source, "created_by"),
-		Visibility: getStringDefault(source, "visibility", "team"),
+		Visibility: getStringDefault(source, "visibility", VisibilityTeam),
 		CreatedAt:  getString(source, "created_at"),
 		UpdatedAt:  getString(source, "updated_at"),
 		Entities:   getEntities(source, "entities"),
@@ -314,7 +316,7 @@ func (h *Handler) GetMemory(ctx context.Context, id string, uctx UserContext) (*
 	table := tableName(uctx.Namespace)
 	key := memoryKey(id)
 
-	ma := matchAllQuery()
+	ma := query.NewMatchAll()
 	resp, err := h.client.QueryWithBody(ctx, mustMarshal(map[string]any{
 		"table":            table,
 		"full_text_search": json.RawMessage(mustMarshal(ma)),
@@ -326,7 +328,10 @@ func (h *Handler) GetMemory(ctx context.Context, id string, uctx UserContext) (*
 	}
 
 	hit, err := firstHitFromResponse(resp)
-	if err != nil || hit == nil || hit.ID != key {
+	if err != nil {
+		return nil, fmt.Errorf("lookup memory %s: %w", id, err)
+	}
+	if hit == nil || hit.ID != key {
 		return nil, fmt.Errorf("memory not found: %s", id)
 	}
 
@@ -412,7 +417,7 @@ func (h *Handler) ListMemories(ctx context.Context, args ListMemoriesArgs, uctx 
 
 	reqMap := map[string]any{
 		"table":            table,
-		"full_text_search": json.RawMessage(mustMarshal(matchAllQuery())),
+		"full_text_search": json.RawMessage(mustMarshal(query.NewMatchAll())),
 		"limit":            limit,
 	}
 	if args.Offset > 0 {
@@ -538,7 +543,7 @@ func (h *Handler) FindRelated(ctx context.Context, args FindRelatedArgs, uctx Us
 
 	reqMap := map[string]any{
 		"table":            table,
-		"full_text_search": json.RawMessage(mustMarshal(matchAllQuery())),
+		"full_text_search": json.RawMessage(mustMarshal(query.NewMatchAll())),
 		"limit":            limit,
 		"graph_searches": map[string]any{
 			"related": map[string]any{
@@ -595,7 +600,7 @@ func (h *Handler) GetEntityMemories(ctx context.Context, args EntityMemoriesArgs
 
 	reqMap := map[string]any{
 		"table":            table,
-		"full_text_search": json.RawMessage(mustMarshal(matchAllQuery())),
+		"full_text_search": json.RawMessage(mustMarshal(query.NewMatchAll())),
 		"limit":            limit,
 		"graph_searches": map[string]any{
 			"mentions": map[string]any{
@@ -650,11 +655,11 @@ func (h *Handler) ListEntities(ctx context.Context, args ListEntitiesArgs, uctx 
 
 	reqMap := map[string]any{
 		"table":            table,
-		"full_text_search": json.RawMessage(mustMarshal(termQuery("entity", "entity_type"))),
+		"full_text_search": json.RawMessage(mustMarshal(query.NewTerm(entityDocType, "entity_type"))),
 		"limit":            limit,
 	}
 	if args.Label != "" {
-		reqMap["filter_query"] = json.RawMessage(mustMarshal(termQuery(args.Label, "label")))
+		reqMap["filter_query"] = json.RawMessage(mustMarshal(query.NewTerm(args.Label, "label")))
 	}
 
 	resp, err := h.client.QueryWithBody(ctx, mustMarshal(reqMap))
@@ -670,7 +675,7 @@ func (h *Handler) ListEntities(ctx context.Context, args ListEntitiesArgs, uctx 
 	var nodes []EntityNode
 	for _, hit := range hits {
 		nodes = append(nodes, EntityNode{
-			EntityType:   "entity",
+			EntityType:   entityDocType,
 			Text:         getString(hit.Source, "text"),
 			Label:        getString(hit.Source, "label"),
 			MentionCount: getInt(hit.Source, "mention_count"),
@@ -691,7 +696,7 @@ func (h *Handler) GetStats(ctx context.Context, args MemoryStatsArgs, uctx UserC
 
 	reqMap := map[string]any{
 		"table":            table,
-		"full_text_search": json.RawMessage(mustMarshal(matchAllQuery())),
+		"full_text_search": json.RawMessage(mustMarshal(query.NewMatchAll())),
 		"limit":            0,
 		"count":            true,
 		"aggregations": map[string]any{
@@ -735,29 +740,38 @@ func (h *Handler) extractAndLinkEntities(ctx context.Context, memoryID, content,
 	mKey := memoryKey(memoryID)
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	inserts := make(map[string]any, len(filtered))
+	// Build entity node inserts and transforms together to reduce round-trips.
+	inserts := make(map[string]any, len(filtered)+1)
+	var transforms []client.Transform
+	edgesByType := make(map[string][]map[string]any, 1)
 	for _, entity := range filtered {
 		eKey := entityKey(entity.Label, entity.Text)
 		inserts[eKey] = map[string]any{
-			"entity_type": "entity",
+			"entity_type": entityDocType,
 			"text":        entity.Text,
 			"label":       entity.Label,
 			"first_seen":  now,
 			"last_seen":   now,
 		}
-	}
-	if _, err := h.client.Batch(ctx, table, client.BatchRequest{Inserts: inserts}); err != nil {
-		h.logger.Warn("entity node insert failed", zap.Error(err))
-	}
-
-	edgesByType := make(map[string][]map[string]any)
-	for _, entity := range filtered {
-		eKey := entityKey(entity.Label, entity.Text)
 		edgesByType["mentions"] = append(edgesByType["mentions"], map[string]any{
 			"target": eKey,
 			"weight": entity.Score,
 		})
+		transforms = append(transforms, client.Transform{
+			Key: eKey,
+			Operations: []client.TransformOp{
+				{Op: client.TransformOpTypeInc, Path: "$.mention_count", Value: 1},
+				{Op: client.TransformOpTypeSet, Path: "$.last_seen", Value: now},
+			},
+		})
 	}
+
+	// Batch 1: entity node upserts + mention count transforms.
+	if _, err := h.client.Batch(ctx, table, client.BatchRequest{Inserts: inserts, Transforms: transforms}); err != nil {
+		h.logger.Warn("entity node batch failed", zap.Error(err))
+	}
+
+	// Batch 2: graph edges from memory to entity nodes (separate key structure).
 	edgeInserts := map[string]any{
 		mKey: map[string]any{
 			"_edges": map[string]any{
@@ -767,20 +781,6 @@ func (h *Handler) extractAndLinkEntities(ctx context.Context, memoryID, content,
 	}
 	if _, err := h.client.Batch(ctx, table, client.BatchRequest{Inserts: edgeInserts}); err != nil {
 		h.logger.Warn("edge creation failed", zap.Error(err))
-	}
-
-	var transforms []client.Transform
-	for _, entity := range filtered {
-		transforms = append(transforms, client.Transform{
-			Key: entityKey(entity.Label, entity.Text),
-			Operations: []client.TransformOp{
-				{Op: client.TransformOpTypeInc, Path: "$.mention_count", Value: 1},
-				{Op: client.TransformOpTypeSet, Path: "$.last_seen", Value: now},
-			},
-		})
-	}
-	if _, err := h.client.Batch(ctx, table, client.BatchRequest{Transforms: transforms}); err != nil {
-		h.logger.Warn("entity transform failed", zap.Error(err))
 	}
 
 	return filtered

@@ -10,8 +10,8 @@ import (
 )
 
 // UserContextFunc extracts a UserContext from the request context.
-// Colony provides one backed by its auth middleware; the desktop app
-// can provide a simpler implementation (e.g. fixed local user).
+// Callers provide an implementation matching their auth model
+// (e.g. JWT middleware, a fixed local user, etc.).
 type UserContextFunc func(ctx context.Context) (UserContext, error)
 
 // MCPHandler wraps a Handler in an MCP streamable HTTP handler.
