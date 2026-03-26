@@ -6,6 +6,8 @@ memoryaf gives your AI agents persistent, searchable long-term memory — across
 
 This Go package (`pkg/memoryaf`) is the core library.
 
+`memoryaf` now supports both persistent memories and ephemeral session memories. Memory records can also carry stable references back to external documents, which is the main bridge for interoperating with markdown-centric memory systems and `docsaf`.
+
 ## Usage
 
 ```go
@@ -61,24 +63,57 @@ handler := memoryaf.NewHandler(client, extractor, logger,
 
 ## MCP Tools
 
-The MCP server exposes 10 tools:
+The MCP server exposes 12 tools:
 
 | Tool | Description |
 |------|-------------|
-| `store_memory` | Store a memory with auto entity extraction |
-| `search_memories` | Hybrid semantic + full-text search with optional graph expansion |
-| `list_memories` | List recent memories with filters |
+| `store_memory` | Store a memory with auto entity extraction, optional ephemeral TTL, and optional external source references |
+| `search_memories` | Hybrid semantic + full-text search with optional graph expansion and session/agent/device scoping |
+| `list_memories` | List recent memories with filters, including ephemeral session memories |
 | `get_memory` | Get a single memory by ID |
 | `update_memory` | Update an existing memory |
 | `delete_memory` | Delete a memory by ID |
-| `find_related` | Find related memories via entity graph traversal |
-| `list_entities` | List extracted entities by mention count |
-| `entity_memories` | Get all memories mentioning a specific entity |
-| `memory_stats` | Aggregated stats by type, project, tag, visibility |
+| `find_related` | Find related memories via entity graph traversal in persistent or ephemeral memory |
+| `list_entities` | List extracted entities by mention count from persistent or ephemeral memory |
+| `entity_memories` | Get all memories mentioning a specific entity from persistent or ephemeral memory |
+| `memory_stats` | Aggregated stats by type, project, tag, visibility, agent, and session |
+| `end_session` | Delete all ephemeral memories owned by the caller for a session, or all session memories for admins |
+| `list_sessions` | List active ephemeral sessions and their memory counts |
 
 ## Team Mode
 
 Each namespace gets its own Antfly table for full data isolation. Memories default to **team** visibility. Use `"visibility": "private"` to keep memories to yourself.
+
+## Session Memory
+
+- Set `ephemeral=true` to store session-scoped memories in a separate TTL-backed table.
+- `scope: "session"`, `scope: "agent"`, and `scope: "device"` narrow `search_memories` using caller identity.
+- `scope: "session"` uses `session_id` from the request or `UserContext`; if neither is available, the call fails instead of widening unexpectedly.
+- `get_memory`, `update_memory`, and `delete_memory` now resolve IDs across both persistent and ephemeral storage.
+
+## External Source References
+
+Use these fields when a memory is derived from documentation, a markdown note, or another external system instead of being authored directly in MCP:
+
+- `source_backend`: where the canonical document lives, such as `filesystem`, `git`, `s3`, `google_drive`, or `web`
+- `source_id`: stable external identifier such as a Drive file ID, `s3://bucket/key`, or `repo@ref:path`
+- `source_path`: backend-relative path or object key
+- `source_url`: canonical human-openable URL for the document or section
+- `source_version`: optional version marker such as a commit SHA, ETag, or modified timestamp
+- `section_path`: heading hierarchy inside the source document
+
+The older `source` field still exists, but it is best treated as free-form origin context, not a canonical external reference.
+
+## docsaf Interop
+
+`docsaf` already produces structured document sections with file path, URL, section hierarchy, and source metadata. The clean integration pattern is:
+
+1. Use `docsaf` to ingest filesystem, GitHub/git, S3, Google Drive, or web content into `DocumentSection`s.
+2. Map each section into a `store_memory` call, typically as a semantic or procedural memory.
+3. Preserve the canonical document identity in `source_backend`, `source_id`, `source_path`, `source_url`, `source_version`, and `section_path`.
+4. Keep the markdown file or external object as the source of truth; use `memoryaf` as the searchable memory/index layer.
+
+See [docsaf-integration.md](./docsaf-integration.md) for the backend mapping conventions.
 
 ## Configuration
 

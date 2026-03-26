@@ -16,10 +16,10 @@ type UserContextFunc func(ctx context.Context) (UserContext, error)
 
 // MCPHandler wraps a Handler in an MCP streamable HTTP handler.
 type MCPHandler struct {
-	handler        *Handler
-	userContextFn  UserContextFunc
-	mcpServer      *mcp.Server
-	httpHandler    http.Handler
+	handler       *Handler
+	userContextFn UserContextFunc
+	mcpServer     *mcp.Server
+	httpHandler   http.Handler
 }
 
 // NewMCPHandler creates a new MCP handler backed by a memory Handler.
@@ -46,17 +46,17 @@ func (m *MCPHandler) buildMCPServer() *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "store_memory",
-		Description: "Store a memory for later retrieval. Supports three types: episodic (events), semantic (facts), and procedural (workflows). Entities are auto-extracted for graph linking.",
+		Description: "Store a memory for later retrieval. Supports episodic, semantic, and procedural memories. Entities are auto-extracted for graph linking. Set ephemeral=true for session-scoped memories, and use source_backend/source_id/source_path/source_url/section_path to point at external docs.",
 	}, m.storeMemory)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_memories",
-		Description: "Search memories using hybrid semantic + full-text search with optional graph expansion. Use at the start of sessions to load relevant context.",
+		Description: "Search memories using hybrid semantic + full-text search with optional graph expansion. Use scope shortcuts ('session', 'agent', 'device') to narrow results. Set ephemeral=true to search session memories.",
 	}, m.searchMemories)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_memories",
-		Description: "List recent memories with optional filters. Returns memories sorted by creation date (newest first).",
+		Description: "List recent memories with optional filters. Supports session_id, agent_id, device_id filters. Set ephemeral=true to list session memories.",
 	}, m.listMemories)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -76,23 +76,33 @@ func (m *MCPHandler) buildMCPServer() *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "find_related",
-		Description: "Find memories related to a given memory via the entity graph. Traverses entity connections to discover related knowledge.",
+		Description: "Find memories related to a given memory via the entity graph. Set ephemeral=true to traverse the ephemeral session graph instead of persistent memory.",
 	}, m.findRelated)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_entities",
-		Description: "List known entities extracted from memories, sorted by mention count.",
+		Description: "List known entities extracted from memories, sorted by mention count. Set ephemeral=true to inspect session-only entities.",
 	}, m.listEntities)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "entity_memories",
-		Description: "Get all memories that mention a specific entity.",
+		Description: "Get all memories that mention a specific entity. Set ephemeral=true to search the ephemeral session graph instead of persistent memory.",
 	}, m.entityMemories)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "memory_stats",
-		Description: "Get aggregated memory statistics for the namespace: counts by type, project, tag, visibility.",
+		Description: "Get aggregated memory statistics for the namespace: counts by type, project, tag, visibility, agent, and session.",
 	}, m.memoryStats)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "end_session",
+		Description: "End a session by deleting all ephemeral memories for the given session_id. Use this when a conversation or task is complete.",
+	}, m.endSession)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_sessions",
+		Description: "List active sessions with their memory counts. Optionally filter by agent_id.",
+	}, m.listSessions)
 
 	return server
 }
@@ -225,6 +235,30 @@ func (m *MCPHandler) memoryStats(ctx context.Context, req *mcp.CallToolRequest, 
 		return errorResult(err), nil, nil
 	}
 	return jsonResult(stats), stats, nil
+}
+
+func (m *MCPHandler) endSession(ctx context.Context, req *mcp.CallToolRequest, args EndSessionArgs) (*mcp.CallToolResult, any, error) {
+	uctx, err := m.userContextFn(ctx)
+	if err != nil {
+		return errorResult(err), nil, nil
+	}
+	if err := m.handler.EndSession(ctx, args, uctx); err != nil {
+		return errorResult(err), nil, nil
+	}
+	result := map[string]any{"session_id": args.SessionID, "status": "ended"}
+	return jsonResult(result), result, nil
+}
+
+func (m *MCPHandler) listSessions(ctx context.Context, req *mcp.CallToolRequest, args ListSessionsArgs) (*mcp.CallToolResult, any, error) {
+	uctx, err := m.userContextFn(ctx)
+	if err != nil {
+		return errorResult(err), nil, nil
+	}
+	sessions, err := m.handler.ListSessions(ctx, args, uctx)
+	if err != nil {
+		return errorResult(err), nil, nil
+	}
+	return jsonResult(sessions), sessions, nil
 }
 
 // --- Result helpers ---

@@ -97,6 +97,8 @@ func statsFromResponse(data []byte) (*MemoryStats, error) {
 			ByProject:    map[string]int{},
 			ByTag:        map[string]int{},
 			ByVisibility: map[string]int{},
+			ByAgent:      map[string]int{},
+			BySession:    map[string]int{},
 		}, nil
 	}
 
@@ -107,6 +109,8 @@ func statsFromResponse(data []byte) (*MemoryStats, error) {
 		ByProject:     bucketsToMap(r.Aggregations["by_project"]),
 		ByTag:         bucketsToMap(r.Aggregations["by_tag"]),
 		ByVisibility:  bucketsToMap(r.Aggregations["by_visibility"]),
+		ByAgent:       bucketsToMap(r.Aggregations["by_agent"]),
+		BySession:     bucketsToMap(r.Aggregations["by_session"]),
 	}, nil
 }
 
@@ -146,6 +150,15 @@ func getInt(m map[string]any, key string) int {
 		}
 	}
 	return 0
+}
+
+func getBool(m map[string]any, key string) bool {
+	if v, ok := m[key]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
 }
 
 func getStringSlice(m map[string]any, key string) []string {
@@ -215,18 +228,53 @@ func buildMemoryDoc(args StoreMemoryArgs, userID, now string) map[string]any {
 	if args.Tags == nil {
 		doc["tags"] = []string{}
 	}
+	// Scoping fields
+	if args.SessionID != "" {
+		doc["session_id"] = args.SessionID
+	}
+	if args.AgentID != "" {
+		doc["agent_id"] = args.AgentID
+	}
+	if args.DeviceID != "" {
+		doc["device_id"] = args.DeviceID
+	}
+	if args.Ephemeral {
+		doc["ephemeral"] = true
+	}
+	// External source reference
+	if args.SourceBackend != "" {
+		doc["source_backend"] = args.SourceBackend
+	}
+	if args.SourceID != "" {
+		doc["source_id"] = args.SourceID
+	}
+	if args.SourcePath != "" {
+		doc["source_path"] = args.SourcePath
+	}
+	if args.SourceURL != "" {
+		doc["source_url"] = args.SourceURL
+	}
+	if args.SourceVersion != "" {
+		doc["source_version"] = args.SourceVersion
+	}
+	if args.SectionPath != nil {
+		doc["section_path"] = args.SectionPath
+	}
+	// Episodic
 	if args.EventTime != "" {
 		doc["event_time"] = args.EventTime
 	}
 	if args.Context != "" {
 		doc["context"] = args.Context
 	}
+	// Semantic
 	if args.Confidence != nil {
 		doc["confidence"] = *args.Confidence
 	}
 	if args.Supersedes != "" {
 		doc["supersedes"] = args.Supersedes
 	}
+	// Procedural
 	if args.Trigger != "" {
 		doc["trigger"] = args.Trigger
 	}
@@ -252,6 +300,38 @@ func mergeMemoryFields(existing *Memory, args UpdateMemoryArgs, now string) map[
 		"created_at":  existing.CreatedAt,
 		"updated_at":  now,
 		"entities":    entitiesToSlice(existing.Entities),
+	}
+
+	// Preserve scoping fields (immutable on update)
+	if existing.SessionID != "" {
+		doc["session_id"] = existing.SessionID
+	}
+	if existing.AgentID != "" {
+		doc["agent_id"] = existing.AgentID
+	}
+	if existing.DeviceID != "" {
+		doc["device_id"] = existing.DeviceID
+	}
+	if existing.Ephemeral {
+		doc["ephemeral"] = true
+	}
+	if existing.SourceBackend != "" {
+		doc["source_backend"] = existing.SourceBackend
+	}
+	if existing.SourceID != "" {
+		doc["source_id"] = existing.SourceID
+	}
+	if existing.SourcePath != "" {
+		doc["source_path"] = existing.SourcePath
+	}
+	if existing.SourceURL != "" {
+		doc["source_url"] = existing.SourceURL
+	}
+	if existing.SourceVersion != "" {
+		doc["source_version"] = existing.SourceVersion
+	}
+	if existing.SectionPath != nil {
+		doc["section_path"] = existing.SectionPath
 	}
 
 	// Merge type-specific fields

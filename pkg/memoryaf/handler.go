@@ -101,6 +101,21 @@ func tableName(namespace string) string {
 	return namespace + "_memories"
 }
 
+// ephemeralTableName returns the Antfly table name for ephemeral memories.
+func ephemeralTableName(namespace string) string {
+	if namespace == "" || namespace == "default" {
+		return "ephemeral_memories"
+	}
+	return namespace + "_ephemeral_memories"
+}
+
+func tableForNamespace(namespace string, ephemeral bool) string {
+	if ephemeral {
+		return ephemeralTableName(namespace)
+	}
+	return tableName(namespace)
+}
+
 // memoryKey returns the Antfly document key for a memory ID.
 func memoryKey(id string) string {
 	return "mem:" + id
@@ -139,35 +154,46 @@ func (h *Handler) ensureNamespace(ctx context.Context, namespace string) error {
 
 	table := tableName(namespace)
 
+	schemaProperties := map[string]any{
+		"content":        map[string]any{"type": "string"},
+		"memory_type":    map[string]any{"type": "string"},
+		"tags":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"project":        map[string]any{"type": "string"},
+		"source":         map[string]any{"type": "string"},
+		"created_by":     map[string]any{"type": "string"},
+		"visibility":     map[string]any{"type": "string"},
+		"created_at":     map[string]any{"type": "string"},
+		"updated_at":     map[string]any{"type": "string"},
+		"entities":       map[string]any{"type": "array"},
+		"trigger":        map[string]any{"type": "string"},
+		"steps":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"outcome":        map[string]any{"type": "string"},
+		"confidence":     map[string]any{"type": "number"},
+		"supersedes":     map[string]any{"type": "string"},
+		"event_time":     map[string]any{"type": "string"},
+		"context":        map[string]any{"type": "string"},
+		"session_id":     map[string]any{"type": "string"},
+		"agent_id":       map[string]any{"type": "string"},
+		"device_id":      map[string]any{"type": "string"},
+		"ephemeral":      map[string]any{"type": "boolean"},
+		"source_backend": map[string]any{"type": "string"},
+		"source_id":      map[string]any{"type": "string"},
+		"source_path":    map[string]any{"type": "string"},
+		"source_url":     map[string]any{"type": "string"},
+		"source_version": map[string]any{"type": "string"},
+		"section_path":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"entity_type":    map[string]any{"type": "string"},
+		"label":          map[string]any{"type": "string"},
+		"text":           map[string]any{"type": "string"},
+		"mention_count":  map[string]any{"type": "number"},
+		"first_seen":     map[string]any{"type": "string"},
+		"last_seen":      map[string]any{"type": "string"},
+	}
+
 	memorySchema := client.DocumentSchema{
 		Schema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"content":       map[string]any{"type": "string"},
-				"memory_type":   map[string]any{"type": "string"},
-				"tags":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"project":       map[string]any{"type": "string"},
-				"source":        map[string]any{"type": "string"},
-				"created_by":    map[string]any{"type": "string"},
-				"visibility":    map[string]any{"type": "string"},
-				"created_at":    map[string]any{"type": "string"},
-				"updated_at":    map[string]any{"type": "string"},
-				"entities":      map[string]any{"type": "array"},
-				"trigger":       map[string]any{"type": "string"},
-				"steps":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"outcome":       map[string]any{"type": "string"},
-				"confidence":    map[string]any{"type": "number"},
-				"supersedes":    map[string]any{"type": "string"},
-				"event_time":    map[string]any{"type": "string"},
-				"context":       map[string]any{"type": "string"},
-				"session_id":    map[string]any{"type": "string"},
-				"entity_type":   map[string]any{"type": "string"},
-				"label":         map[string]any{"type": "string"},
-				"text":          map[string]any{"type": "string"},
-				"mention_count": map[string]any{"type": "number"},
-				"first_seen":    map[string]any{"type": "string"},
-				"last_seen":     map[string]any{"type": "string"},
-			},
+			"type":       "object",
+			"properties": schemaProperties,
 		},
 	}
 
@@ -212,6 +238,28 @@ func (h *Handler) ensureNamespace(ctx context.Context, namespace string) error {
 		}
 	}
 
+	// Create ephemeral table with TTL for auto-expiring session memories.
+	ephTable := ephemeralTableName(namespace)
+	err = h.client.CreateTable(ctx, ephTable, &client.CreateTableRequest{
+		Schema: client.TableSchema{
+			DefaultType: "memory",
+			DocumentSchemas: map[string]client.DocumentSchema{
+				"memory": {Schema: map[string]any{"type": "object", "properties": schemaProperties}},
+			},
+			TtlDuration: DefaultEphemeralTTL,
+			TtlField:    "created_at",
+		},
+		Indexes: map[string]client.IndexConfig{
+			embeddingIndex: *embIdx,
+			graphIndex:     *graphIdx,
+		},
+	})
+	if err != nil {
+		if !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("create ephemeral table %s: %w", ephTable, err)
+		}
+	}
+
 	h.initializedNamespaces[namespace] = true
 	h.logger.Info("initialized memoryaf namespace", zap.String("namespace", namespace), zap.String("table", table))
 	return nil
@@ -236,6 +284,16 @@ func buildFilterQuery(opts filterOpts, ctx *UserContext) *query.Query {
 	}
 	for _, tag := range opts.Tags {
 		clauses = append(clauses, query.NewTerm(tag, "tags"))
+	}
+
+	if opts.SessionID != "" {
+		clauses = append(clauses, query.NewTerm(opts.SessionID, "session_id"))
+	}
+	if opts.AgentID != "" {
+		clauses = append(clauses, query.NewTerm(opts.AgentID, "agent_id"))
+	}
+	if opts.DeviceID != "" {
+		clauses = append(clauses, query.NewTerm(opts.DeviceID, "device_id"))
 	}
 
 	// Visibility filtering: when no explicit visibility is requested and we have
@@ -266,8 +324,40 @@ type filterOpts struct {
 	CreatedBy  string
 	Visibility string
 	EntityType string
+	SessionID  string
+	AgentID    string
+	DeviceID   string
 }
 
+// resolveScope fills in explicit scope filter fields from UserContext when a
+// scope shortcut is used (e.g. scope="agent" fills AgentID from uctx).
+func resolveScope(args *SearchMemoriesArgs, uctx *UserContext) error {
+	switch args.Scope {
+	case ScopeSession:
+		if args.SessionID == "" {
+			args.SessionID = uctx.SessionID
+		}
+		if args.SessionID == "" {
+			return fmt.Errorf("scope=session requires session_id or a user context session_id")
+		}
+		args.Ephemeral = true
+	case ScopeAgent:
+		if args.AgentID == "" {
+			args.AgentID = uctx.AgentID
+		}
+		if args.AgentID == "" {
+			return fmt.Errorf("scope=agent requires agent_id or a user context agent_id")
+		}
+	case ScopeDevice:
+		if args.DeviceID == "" {
+			args.DeviceID = uctx.DeviceID
+		}
+		if args.DeviceID == "" {
+			return fmt.Errorf("scope=device requires device_id or a user context device_id")
+		}
+	}
+	return nil
+}
 
 // --- hitToMemory conversion ---
 
@@ -278,23 +368,33 @@ func hitToMemory(id string, source map[string]any) Memory {
 	}
 
 	m := Memory{
-		ID:         memID,
-		Content:    getString(source, "content"),
-		MemoryType: getStringDefault(source, "memory_type", MemoryTypeSemantic),
-		Tags:       getStringSlice(source, "tags"),
-		Project:    getString(source, "project"),
-		Source:     getString(source, "source"),
-		CreatedBy:  getString(source, "created_by"),
-		Visibility: getStringDefault(source, "visibility", VisibilityTeam),
-		CreatedAt:  getString(source, "created_at"),
-		UpdatedAt:  getString(source, "updated_at"),
-		Entities:   getEntities(source, "entities"),
-		EventTime:  getString(source, "event_time"),
-		Context:    getString(source, "context"),
-		Supersedes: getString(source, "supersedes"),
-		Trigger:    getString(source, "trigger"),
-		Steps:      getStringSlice(source, "steps"),
-		Outcome:    getString(source, "outcome"),
+		ID:            memID,
+		Content:       getString(source, "content"),
+		MemoryType:    getStringDefault(source, "memory_type", MemoryTypeSemantic),
+		Tags:          getStringSlice(source, "tags"),
+		Project:       getString(source, "project"),
+		Source:        getString(source, "source"),
+		CreatedBy:     getString(source, "created_by"),
+		Visibility:    getStringDefault(source, "visibility", VisibilityTeam),
+		CreatedAt:     getString(source, "created_at"),
+		UpdatedAt:     getString(source, "updated_at"),
+		Entities:      getEntities(source, "entities"),
+		SessionID:     getString(source, "session_id"),
+		AgentID:       getString(source, "agent_id"),
+		DeviceID:      getString(source, "device_id"),
+		Ephemeral:     getBool(source, "ephemeral"),
+		SourceBackend: getString(source, "source_backend"),
+		SourceID:      getString(source, "source_id"),
+		SourcePath:    getString(source, "source_path"),
+		SourceURL:     getString(source, "source_url"),
+		SourceVersion: getString(source, "source_version"),
+		SectionPath:   getStringSlice(source, "section_path"),
+		EventTime:     getString(source, "event_time"),
+		Context:       getString(source, "context"),
+		Supersedes:    getString(source, "supersedes"),
+		Trigger:       getString(source, "trigger"),
+		Steps:         getStringSlice(source, "steps"),
+		Outcome:       getString(source, "outcome"),
 	}
 	if v, ok := source["confidence"]; ok {
 		if f, ok := v.(float64); ok {
@@ -302,6 +402,61 @@ func hitToMemory(id string, source map[string]any) Memory {
 		}
 	}
 	return m
+}
+
+func (h *Handler) queryMemoryInTable(ctx context.Context, id, table string) (*Memory, error) {
+	key := memoryKey(id)
+
+	resp, err := h.client.QueryWithBody(ctx, mustMarshal(map[string]any{
+		"table":            table,
+		"full_text_search": json.RawMessage(mustMarshal(query.NewMatchAll())),
+		"filter_prefix":    key,
+		"limit":            1,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("lookup memory: %w", err)
+	}
+
+	hit, err := firstHitFromResponse(resp)
+	if err != nil {
+		return nil, fmt.Errorf("lookup memory %s: %w", id, err)
+	}
+	if hit == nil || hit.ID != key {
+		return nil, nil
+	}
+
+	m := hitToMemory(hit.ID, hit.Source)
+	if table == ephemeralTableName("") || strings.HasSuffix(table, "_ephemeral_memories") {
+		m.Ephemeral = true
+	}
+	return &m, nil
+}
+
+func (h *Handler) getMemoryWithTable(ctx context.Context, id string, uctx UserContext) (*Memory, string, error) {
+	if err := h.ensureNamespace(ctx, uctx.Namespace); err != nil {
+		return nil, "", err
+	}
+
+	persistentTable := tableName(uctx.Namespace)
+	mem, err := h.queryMemoryInTable(ctx, id, persistentTable)
+	if err != nil {
+		return nil, "", err
+	}
+	if mem != nil {
+		return mem, persistentTable, nil
+	}
+
+	ephTable := ephemeralTableName(uctx.Namespace)
+	mem, err = h.queryMemoryInTable(ctx, id, ephTable)
+	if err != nil {
+		return nil, "", err
+	}
+	if mem != nil {
+		mem.Ephemeral = true
+		return mem, ephTable, nil
+	}
+
+	return nil, "", fmt.Errorf("memory not found: %s", id)
 }
 
 // --- Memory CRUD ---
@@ -315,7 +470,18 @@ func (h *Handler) StoreMemory(ctx context.Context, args StoreMemoryArgs, uctx Us
 		return nil, err
 	}
 
-	table := tableName(uctx.Namespace)
+	// Auto-fill scoping fields from UserContext when not explicitly set.
+	if args.SessionID == "" && uctx.SessionID != "" {
+		args.SessionID = uctx.SessionID
+	}
+	if args.AgentID == "" && uctx.AgentID != "" {
+		args.AgentID = uctx.AgentID
+	}
+	if args.DeviceID == "" && uctx.DeviceID != "" {
+		args.DeviceID = uctx.DeviceID
+	}
+
+	table := tableForNamespace(uctx.Namespace, args.Ephemeral)
 	id := uuid.New().String()
 	now := time.Now().UTC().Format(time.RFC3339)
 	key := memoryKey(id)
@@ -335,7 +501,7 @@ func (h *Handler) StoreMemory(ctx context.Context, args StoreMemoryArgs, uctx Us
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
-		h.extractAndLinkEntities(context.WithoutCancel(ctx), id, args.Content, uctx.Namespace)
+		h.extractAndLinkEntities(context.WithoutCancel(ctx), id, args.Content, table)
 	}()
 
 	m := hitToMemory(key, doc)
@@ -343,34 +509,8 @@ func (h *Handler) StoreMemory(ctx context.Context, args StoreMemoryArgs, uctx Us
 }
 
 func (h *Handler) GetMemory(ctx context.Context, id string, uctx UserContext) (*Memory, error) {
-	if err := h.ensureNamespace(ctx, uctx.Namespace); err != nil {
-		return nil, err
-	}
-
-	table := tableName(uctx.Namespace)
-	key := memoryKey(id)
-
-	ma := query.NewMatchAll()
-	resp, err := h.client.QueryWithBody(ctx, mustMarshal(map[string]any{
-		"table":            table,
-		"full_text_search": json.RawMessage(mustMarshal(ma)),
-		"filter_prefix":    key,
-		"limit":            1,
-	}))
-	if err != nil {
-		return nil, fmt.Errorf("lookup memory: %w", err)
-	}
-
-	hit, err := firstHitFromResponse(resp)
-	if err != nil {
-		return nil, fmt.Errorf("lookup memory %s: %w", id, err)
-	}
-	if hit == nil || hit.ID != key {
-		return nil, fmt.Errorf("memory not found: %s", id)
-	}
-
-	m := hitToMemory(hit.ID, hit.Source)
-	return &m, nil
+	mem, _, err := h.getMemoryWithTable(ctx, id, uctx)
+	return mem, err
 }
 
 func (h *Handler) UpdateMemory(ctx context.Context, args UpdateMemoryArgs, uctx UserContext) (*Memory, error) {
@@ -378,7 +518,7 @@ func (h *Handler) UpdateMemory(ctx context.Context, args UpdateMemoryArgs, uctx 
 		return nil, fmt.Errorf("id is required")
 	}
 
-	existing, err := h.GetMemory(ctx, args.ID, uctx)
+	existing, table, err := h.getMemoryWithTable(ctx, args.ID, uctx)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +527,6 @@ func (h *Handler) UpdateMemory(ctx context.Context, args UpdateMemoryArgs, uctx 
 		return nil, fmt.Errorf("forbidden: you can only update your own memories")
 	}
 
-	table := tableName(uctx.Namespace)
 	key := memoryKey(args.ID)
 	now := time.Now().UTC().Format(time.RFC3339)
 
@@ -405,7 +544,7 @@ func (h *Handler) UpdateMemory(ctx context.Context, args UpdateMemoryArgs, uctx 
 		h.wg.Add(1)
 		go func() {
 			defer h.wg.Done()
-			h.extractAndLinkEntities(context.WithoutCancel(ctx), args.ID, args.Content, uctx.Namespace)
+			h.extractAndLinkEntities(context.WithoutCancel(ctx), args.ID, args.Content, table)
 		}()
 	}
 
@@ -418,16 +557,13 @@ func (h *Handler) DeleteMemory(ctx context.Context, id string, uctx UserContext)
 		return fmt.Errorf("id is required")
 	}
 
-	existing, err := h.GetMemory(ctx, id, uctx)
+	existing, table, err := h.getMemoryWithTable(ctx, id, uctx)
 	if err != nil {
 		return err
 	}
-
 	if existing.CreatedBy != uctx.UserID && uctx.Role != "admin" {
 		return fmt.Errorf("forbidden: you can only delete your own memories")
 	}
-
-	table := tableName(uctx.Namespace)
 	_, err = h.client.Batch(ctx, table, client.BatchRequest{
 		Deletes: []string{memoryKey(id)},
 	})
@@ -439,7 +575,7 @@ func (h *Handler) ListMemories(ctx context.Context, args ListMemoriesArgs, uctx 
 		return nil, err
 	}
 
-	table := tableName(uctx.Namespace)
+	table := tableForNamespace(uctx.Namespace, args.Ephemeral)
 	limit := args.Limit
 	if limit <= 0 {
 		limit = 20
@@ -451,6 +587,9 @@ func (h *Handler) ListMemories(ctx context.Context, args ListMemoriesArgs, uctx 
 		MemoryType: args.MemoryType,
 		CreatedBy:  args.CreatedBy,
 		Visibility: args.Visibility,
+		SessionID:  args.SessionID,
+		AgentID:    args.AgentID,
+		DeviceID:   args.DeviceID,
 	}, &uctx)
 
 	reqMap := map[string]any{
@@ -478,7 +617,11 @@ func (h *Handler) ListMemories(ctx context.Context, args ListMemoriesArgs, uctx 
 	var memories []Memory
 	for _, hit := range hits {
 		if isMemoryHit(hit.ID) {
-			memories = append(memories, hitToMemory(hit.ID, hit.Source))
+			mem := hitToMemory(hit.ID, hit.Source)
+			if args.Ephemeral {
+				mem.Ephemeral = true
+			}
+			memories = append(memories, mem)
 		}
 	}
 	return memories, nil
@@ -489,7 +632,12 @@ func (h *Handler) SearchMemories(ctx context.Context, args SearchMemoriesArgs, u
 		return nil, err
 	}
 
-	table := tableName(uctx.Namespace)
+	// Resolve scope shortcuts from UserContext.
+	if err := resolveScope(&args, &uctx); err != nil {
+		return nil, err
+	}
+
+	table := tableForNamespace(uctx.Namespace, args.Ephemeral)
 	limit := args.Limit
 	if limit <= 0 {
 		limit = 10
@@ -500,6 +648,9 @@ func (h *Handler) SearchMemories(ctx context.Context, args SearchMemoriesArgs, u
 		Tags:       args.Tags,
 		MemoryType: args.MemoryType,
 		CreatedBy:  args.CreatedBy,
+		SessionID:  args.SessionID,
+		AgentID:    args.AgentID,
+		DeviceID:   args.DeviceID,
 	}, &uctx)
 
 	ftsQuery := query.MatchQuery{Match: args.Query}.ToQuery()
@@ -554,8 +705,12 @@ func (h *Handler) SearchMemories(ctx context.Context, args SearchMemoriesArgs, u
 	var results []SearchResult
 	for _, hit := range hits {
 		if isMemoryHit(hit.ID) {
+			mem := hitToMemory(hit.ID, hit.Source)
+			if args.Ephemeral {
+				mem.Ephemeral = true
+			}
 			results = append(results, SearchResult{
-				Memory: hitToMemory(hit.ID, hit.Source),
+				Memory: mem,
 				Score:  hit.Score,
 			})
 		}
@@ -568,7 +723,7 @@ func (h *Handler) FindRelated(ctx context.Context, args FindRelatedArgs, uctx Us
 		return nil, err
 	}
 
-	table := tableName(uctx.Namespace)
+	table := tableForNamespace(uctx.Namespace, args.Ephemeral)
 	limit := args.Limit
 	if limit <= 0 {
 		limit = 10
@@ -615,8 +770,12 @@ func (h *Handler) FindRelated(ctx context.Context, args FindRelatedArgs, uctx Us
 	var results []SearchResult
 	for _, hit := range hits {
 		if isMemoryHit(hit.ID) && hit.ID != mKey {
+			mem := hitToMemory(hit.ID, hit.Source)
+			if args.Ephemeral {
+				mem.Ephemeral = true
+			}
 			results = append(results, SearchResult{
-				Memory: hitToMemory(hit.ID, hit.Source),
+				Memory: mem,
 				Score:  hit.Score,
 			})
 		}
@@ -629,7 +788,7 @@ func (h *Handler) GetEntityMemories(ctx context.Context, args EntityMemoriesArgs
 		return nil, err
 	}
 
-	table := tableName(uctx.Namespace)
+	table := tableForNamespace(uctx.Namespace, args.Ephemeral)
 	limit := args.Limit
 	if limit <= 0 {
 		limit = 20
@@ -671,8 +830,12 @@ func (h *Handler) GetEntityMemories(ctx context.Context, args EntityMemoriesArgs
 	var results []SearchResult
 	for _, hit := range hits {
 		if isMemoryHit(hit.ID) {
+			mem := hitToMemory(hit.ID, hit.Source)
+			if args.Ephemeral {
+				mem.Ephemeral = true
+			}
 			results = append(results, SearchResult{
-				Memory: hitToMemory(hit.ID, hit.Source),
+				Memory: mem,
 				Score:  hit.Score,
 			})
 		}
@@ -685,7 +848,7 @@ func (h *Handler) ListEntities(ctx context.Context, args ListEntitiesArgs, uctx 
 		return nil, err
 	}
 
-	table := tableName(uctx.Namespace)
+	table := tableForNamespace(uctx.Namespace, args.Ephemeral)
 	limit := args.Limit
 	if limit <= 0 {
 		limit = 50
@@ -729,8 +892,13 @@ func (h *Handler) GetStats(ctx context.Context, args MemoryStatsArgs, uctx UserC
 		return nil, err
 	}
 
-	table := tableName(uctx.Namespace)
-	filter := buildFilterQuery(filterOpts{Project: args.Project}, &uctx)
+	table := tableForNamespace(uctx.Namespace, args.Ephemeral)
+	filter := buildFilterQuery(filterOpts{
+		Project:   args.Project,
+		SessionID: args.SessionID,
+		AgentID:   args.AgentID,
+		DeviceID:  args.DeviceID,
+	}, &uctx)
 
 	reqMap := map[string]any{
 		"table":            table,
@@ -742,6 +910,8 @@ func (h *Handler) GetStats(ctx context.Context, args MemoryStatsArgs, uctx UserC
 			"by_project":    map[string]any{"type": "terms", "field": "project", "size": 20},
 			"by_tag":        map[string]any{"type": "terms", "field": "tags", "size": 30},
 			"by_visibility": map[string]any{"type": "terms", "field": "visibility", "size": 2},
+			"by_agent":      map[string]any{"type": "terms", "field": "agent_id", "size": 20},
+			"by_session":    map[string]any{"type": "terms", "field": "session_id", "size": 50},
 		},
 	}
 	if filter != nil {
@@ -754,6 +924,130 @@ func (h *Handler) GetStats(ctx context.Context, args MemoryStatsArgs, uctx UserC
 	}
 
 	return statsFromResponse(resp)
+}
+
+// --- Session management ---
+
+func (h *Handler) EndSession(ctx context.Context, args EndSessionArgs, uctx UserContext) error {
+	if args.SessionID == "" {
+		return fmt.Errorf("session_id is required")
+	}
+	if err := h.ensureNamespace(ctx, uctx.Namespace); err != nil {
+		return err
+	}
+
+	ephTable := ephemeralTableName(uctx.Namespace)
+
+	filter := filterOpts{SessionID: args.SessionID}
+	if uctx.Role != "admin" {
+		filter.CreatedBy = uctx.UserID
+	}
+
+	const pageSize = 500
+	var keys []string
+	for offset := 0; ; offset += pageSize {
+		reqMap := map[string]any{
+			"table":            ephTable,
+			"full_text_search": json.RawMessage(mustMarshal(query.NewMatchAll())),
+			"filter_query":     json.RawMessage(mustMarshal(buildFilterQuery(filter, nil))),
+			"limit":            pageSize,
+			"offset":           offset,
+		}
+
+		resp, err := h.client.QueryWithBody(ctx, mustMarshal(reqMap))
+		if err != nil {
+			return fmt.Errorf("query session memories: %w", err)
+		}
+
+		hits, err := hitsFromResponse(resp)
+		if err != nil {
+			return err
+		}
+		if len(hits) == 0 {
+			break
+		}
+
+		for _, hit := range hits {
+			keys = append(keys, hit.ID)
+		}
+		if len(hits) < pageSize {
+			break
+		}
+	}
+
+	if len(keys) == 0 {
+		return nil
+	}
+
+	for start := 0; start < len(keys); start += pageSize {
+		end := start + pageSize
+		if end > len(keys) {
+			end = len(keys)
+		}
+		if _, err := h.client.Batch(ctx, ephTable, client.BatchRequest{
+			Deletes: keys[start:end],
+		}); err != nil {
+			return fmt.Errorf("delete session memories: %w", err)
+		}
+	}
+
+	h.logger.Info("ended session", zap.String("session_id", args.SessionID), zap.Int("deleted", len(keys)), zap.String("actor", uctx.UserID))
+	return nil
+}
+
+func (h *Handler) ListSessions(ctx context.Context, args ListSessionsArgs, uctx UserContext) ([]SessionInfo, error) {
+	if err := h.ensureNamespace(ctx, uctx.Namespace); err != nil {
+		return nil, err
+	}
+
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+
+	// Query the ephemeral table for session aggregations.
+	ephTable := ephemeralTableName(uctx.Namespace)
+	fopts := filterOpts{}
+	if args.AgentID != "" {
+		fopts.AgentID = args.AgentID
+	}
+	filter := buildFilterQuery(fopts, &uctx)
+
+	reqMap := map[string]any{
+		"table":            ephTable,
+		"full_text_search": json.RawMessage(mustMarshal(query.NewMatchAll())),
+		"limit":            0,
+		"count":            true,
+		"aggregations": map[string]any{
+			"by_session": map[string]any{"type": "terms", "field": "session_id", "size": limit},
+		},
+	}
+	if filter != nil {
+		reqMap["filter_query"] = json.RawMessage(mustMarshal(filter))
+	}
+
+	resp, err := h.client.QueryWithBody(ctx, mustMarshal(reqMap))
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+
+	qResp, err := parseResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	if len(qResp.Responses) == 0 {
+		return nil, nil
+	}
+
+	agg := qResp.Responses[0].Aggregations["by_session"]
+	sessions := make([]SessionInfo, 0, len(agg.Buckets))
+	for _, b := range agg.Buckets {
+		sessions = append(sessions, SessionInfo{
+			SessionID:   b.Key,
+			MemoryCount: b.DocCount,
+		})
+	}
+	return sessions, nil
 }
 
 // --- Entity extraction and graph linking ---
@@ -786,7 +1080,7 @@ func (h *Handler) extractEntities(ctx context.Context, text string) []Entity {
 	return entities
 }
 
-func (h *Handler) extractAndLinkEntities(ctx context.Context, memoryID, content, namespace string) []Entity {
+func (h *Handler) extractAndLinkEntities(ctx context.Context, memoryID, content, table string) []Entity {
 	if h.extractor == nil {
 		return nil
 	}
@@ -816,7 +1110,6 @@ func (h *Handler) extractAndLinkEntities(ctx context.Context, memoryID, content,
 		return nil
 	}
 
-	table := tableName(namespace)
 	mKey := memoryKey(memoryID)
 	now := time.Now().UTC().Format(time.RFC3339)
 

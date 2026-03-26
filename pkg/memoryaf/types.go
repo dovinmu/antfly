@@ -11,6 +11,14 @@ const (
 	VisibilityPrivate = "private"
 
 	entityDocType = "entity"
+
+	// Scope shortcuts for SearchMemoriesArgs.Scope.
+	ScopeSession = "session"
+	ScopeAgent   = "agent"
+	ScopeDevice  = "device"
+
+	// DefaultEphemeralTTL is the default TTL for the ephemeral memories table.
+	DefaultEphemeralTTL = "24h"
 )
 
 // Memory represents a stored memory document.
@@ -26,6 +34,20 @@ type Memory struct {
 	CreatedAt  string   `json:"created_at"`
 	UpdatedAt  string   `json:"updated_at"`
 	Entities   []Entity `json:"entities"`
+
+	// Scoping
+	SessionID string `json:"session_id,omitempty"`
+	AgentID   string `json:"agent_id,omitempty"`
+	DeviceID  string `json:"device_id,omitempty"`
+	Ephemeral bool   `json:"ephemeral,omitempty"`
+
+	// External source reference
+	SourceBackend string   `json:"source_backend,omitempty"`
+	SourceID      string   `json:"source_id,omitempty"`
+	SourcePath    string   `json:"source_path,omitempty"`
+	SourceURL     string   `json:"source_url,omitempty"`
+	SourceVersion string   `json:"source_version,omitempty"`
+	SectionPath   []string `json:"section_path,omitempty"`
 
 	// Episodic
 	EventTime string `json:"event_time,omitempty"`
@@ -94,13 +116,24 @@ type MemoryStats struct {
 	ByProject     map[string]int `json:"by_project"`
 	ByTag         map[string]int `json:"by_tag"`
 	ByVisibility  map[string]int `json:"by_visibility"`
+	ByAgent       map[string]int `json:"by_agent"`
+	BySession     map[string]int `json:"by_session"`
+}
+
+// SessionInfo summarizes a session.
+type SessionInfo struct {
+	SessionID   string `json:"session_id"`
+	MemoryCount int    `json:"memory_count"`
 }
 
 // UserContext carries identity and authorization context.
 type UserContext struct {
 	UserID    string `json:"user_id"`
 	Namespace string `json:"namespace"`
-	Role      string `json:"role"` // "admin" or "member"
+	Role      string `json:"role"`     // "admin" or "member"
+	AgentID   string `json:"agent_id"` // e.g. "claude-code", "cursor"
+	DeviceID  string `json:"device_id"`
+	SessionID string `json:"session_id"`
 }
 
 // --- Tool argument types ---
@@ -112,6 +145,18 @@ type StoreMemoryArgs struct {
 	Project    string   `json:"project,omitempty"     mcp:"Project or codebase name"`
 	Source     string   `json:"source,omitempty"      mcp:"Origin context"`
 	Visibility string   `json:"visibility,omitempty"  mcp:"Visibility: team or private (default: team)"`
+	// Scoping
+	SessionID string `json:"session_id,omitempty" mcp:"Session ID for grouping conversation memories"`
+	AgentID   string `json:"agent_id,omitempty"   mcp:"Agent identifier (auto-filled from client identity if empty)"`
+	DeviceID  string `json:"device_id,omitempty"  mcp:"Device/machine identifier (auto-filled from client identity if empty)"`
+	Ephemeral bool   `json:"ephemeral,omitempty"  mcp:"Store in ephemeral table with TTL (auto-expires, default: false)"`
+	// External source reference
+	SourceBackend string   `json:"source_backend,omitempty" mcp:"External content backend: filesystem, git, s3, google_drive, web, etc."`
+	SourceID      string   `json:"source_id,omitempty"      mcp:"Stable external document identifier (e.g. Drive file ID, s3://bucket/key, repo@ref:path)"`
+	SourcePath    string   `json:"source_path,omitempty"    mcp:"Path or key within the external source"`
+	SourceURL     string   `json:"source_url,omitempty"     mcp:"Canonical URL for the external source document or section"`
+	SourceVersion string   `json:"source_version,omitempty" mcp:"Optional version marker such as commit SHA, etag, or modified timestamp"`
+	SectionPath   []string `json:"section_path,omitempty"   mcp:"Heading hierarchy inside the source document"`
 	// Episodic
 	EventTime string `json:"event_time,omitempty" mcp:"When the event happened (ISO 8601)"`
 	Context   string `json:"context,omitempty"    mcp:"Situational context for episodic memories"`
@@ -125,13 +170,19 @@ type StoreMemoryArgs struct {
 }
 
 type SearchMemoriesArgs struct {
-	Query       string   `json:"query"                mcp:"Natural language search query"`
-	Project     string   `json:"project,omitempty"    mcp:"Filter to a specific project"`
-	Tags        []string `json:"tags,omitempty"        mcp:"Filter by tags"`
-	MemoryType  string   `json:"memory_type,omitempty" mcp:"Filter by type: episodic, semantic, procedural"`
-	CreatedBy   string   `json:"created_by,omitempty"  mcp:"Filter by creator"`
-	ExpandGraph bool     `json:"expand_graph,omitempty" mcp:"Expand results via entity graph (default: false)"`
-	Limit       int      `json:"limit,omitempty"       mcp:"Max results (default: 10)"`
+	Query       string   `json:"query"                  mcp:"Natural language search query"`
+	Project     string   `json:"project,omitempty"      mcp:"Filter to a specific project"`
+	Tags        []string `json:"tags,omitempty"          mcp:"Filter by tags"`
+	MemoryType  string   `json:"memory_type,omitempty"   mcp:"Filter by type: episodic, semantic, procedural"`
+	CreatedBy   string   `json:"created_by,omitempty"    mcp:"Filter by creator"`
+	ExpandGraph bool     `json:"expand_graph,omitempty"  mcp:"Expand results via entity graph (default: false)"`
+	Limit       int      `json:"limit,omitempty"         mcp:"Max results (default: 10)"`
+	// Scoping
+	SessionID string `json:"session_id,omitempty" mcp:"Filter to a specific session"`
+	AgentID   string `json:"agent_id,omitempty"   mcp:"Filter to a specific agent"`
+	DeviceID  string `json:"device_id,omitempty"  mcp:"Filter to a specific device"`
+	Scope     string `json:"scope,omitempty"      mcp:"Shortcut: 'session' (current session), 'agent' (current agent), 'device' (current device), or empty for global"`
+	Ephemeral bool   `json:"ephemeral,omitempty"  mcp:"Search ephemeral memories instead of persistent (default: false)"`
 }
 
 type ListMemoriesArgs struct {
@@ -142,6 +193,11 @@ type ListMemoriesArgs struct {
 	Visibility string   `json:"visibility,omitempty"   mcp:"Filter by visibility"`
 	Limit      int      `json:"limit,omitempty"        mcp:"Max results (default: 20)"`
 	Offset     int      `json:"offset,omitempty"       mcp:"Pagination offset"`
+	// Scoping
+	SessionID string `json:"session_id,omitempty" mcp:"Filter to a specific session"`
+	AgentID   string `json:"agent_id,omitempty"   mcp:"Filter to a specific agent"`
+	DeviceID  string `json:"device_id,omitempty"  mcp:"Filter to a specific device"`
+	Ephemeral bool   `json:"ephemeral,omitempty"  mcp:"List ephemeral memories instead of persistent (default: false)"`
 }
 
 type UpdateMemoryArgs struct {
@@ -165,22 +221,38 @@ type UpdateMemoryArgs struct {
 }
 
 type FindRelatedArgs struct {
-	ID    string `json:"id"              mcp:"The memory ID to find related memories for"`
-	Depth int    `json:"depth,omitempty" mcp:"Graph traversal depth (default: 2)"`
-	Limit int    `json:"limit,omitempty" mcp:"Max results (default: 10)"`
+	ID        string `json:"id"                mcp:"The memory ID to find related memories for"`
+	Depth     int    `json:"depth,omitempty"   mcp:"Graph traversal depth (default: 2)"`
+	Limit     int    `json:"limit,omitempty"   mcp:"Max results (default: 10)"`
+	Ephemeral bool   `json:"ephemeral,omitempty" mcp:"Search the ephemeral memory graph instead of persistent (default: false)"`
 }
 
 type EntityMemoriesArgs struct {
-	EntityText  string `json:"entity_text"  mcp:"Entity text (e.g., TypeScript)"`
-	EntityLabel string `json:"entity_label" mcp:"Entity type (e.g., technology)"`
-	Limit       int    `json:"limit,omitempty" mcp:"Max results (default: 20)"`
+	EntityText  string `json:"entity_text"         mcp:"Entity text (e.g., TypeScript)"`
+	EntityLabel string `json:"entity_label"        mcp:"Entity type (e.g., technology)"`
+	Limit       int    `json:"limit,omitempty"     mcp:"Max results (default: 20)"`
+	Ephemeral   bool   `json:"ephemeral,omitempty" mcp:"Search the ephemeral memory graph instead of persistent (default: false)"`
 }
 
 type ListEntitiesArgs struct {
-	Label string `json:"label,omitempty" mcp:"Filter by entity type"`
-	Limit int    `json:"limit,omitempty" mcp:"Max results (default: 50)"`
+	Label     string `json:"label,omitempty"     mcp:"Filter by entity type"`
+	Limit     int    `json:"limit,omitempty"     mcp:"Max results (default: 50)"`
+	Ephemeral bool   `json:"ephemeral,omitempty" mcp:"List entities from the ephemeral table instead of persistent (default: false)"`
 }
 
 type MemoryStatsArgs struct {
-	Project string `json:"project,omitempty" mcp:"Filter stats to a specific project"`
+	Project   string `json:"project,omitempty"    mcp:"Filter stats to a specific project"`
+	SessionID string `json:"session_id,omitempty" mcp:"Filter stats to a specific session"`
+	AgentID   string `json:"agent_id,omitempty"   mcp:"Filter stats to a specific agent"`
+	DeviceID  string `json:"device_id,omitempty"  mcp:"Filter stats to a specific device"`
+	Ephemeral bool   `json:"ephemeral,omitempty"  mcp:"Read stats from the ephemeral table instead of persistent (default: false)"`
+}
+
+type ListSessionsArgs struct {
+	AgentID string `json:"agent_id,omitempty" mcp:"Filter to a specific agent"`
+	Limit   int    `json:"limit,omitempty"    mcp:"Max results (default: 20)"`
+}
+
+type EndSessionArgs struct {
+	SessionID string `json:"session_id" mcp:"The session ID to end (deletes all ephemeral memories for this session)"`
 }
