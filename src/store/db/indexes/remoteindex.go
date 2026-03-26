@@ -471,15 +471,17 @@ func (ss *RemoteIndexSearchStatus) Merge(other *RemoteIndexSearchStatus) {
 	}
 }
 
-func MakeIndexesForShards(
+// MakeBaseIndexesForShards creates RemoteIndex objects for each shard without
+// a per-query FieldFilter. The returned indexes can be reused across queries
+// by calling WithFieldFilter to set query-specific field projections.
+func MakeBaseIndexesForShards(
 	client *http.Client,
 	tableSchema *schema.TableSchema,
 	peers map[types.ID][]string,
-	ff *FieldFilter,
 	localSearcher ShardSearcher,
 ) (ShardIndexes, error) {
-	indexes := make(ShardIndexes, 0, len(peers))
 	idxMapping := schema.NewIndexMapFromSchema(tableSchema)
+	indexes := make(ShardIndexes, 0, len(peers))
 
 	for shardID, peerURLs := range peers {
 		if localSearcher != nil {
@@ -488,8 +490,7 @@ func MakeIndexesForShards(
 				searcher:   localSearcher,
 				idxMapping: idxMapping,
 				schema:     tableSchema,
-				q:          ff,
-			})
+				})
 			continue
 		}
 
@@ -501,7 +502,6 @@ func MakeIndexesForShards(
 		if err != nil {
 			return nil, fmt.Errorf("creating remote index: %v", err)
 		}
-		remoteIndex.q = ff
 		remoteIndex.mapping = idxMapping
 		remoteIndex.schema = tableSchema
 		indexes = append(indexes, remoteIndex)
@@ -512,6 +512,27 @@ func MakeIndexesForShards(
 
 // RemoteIndexes is kept as an alias for backward compatibility.
 type RemoteIndexes = ShardIndexes
+
+// WithFieldFilter returns a copy of each ShardIndex with the given FieldFilter
+// applied. The underlying client, mapping, and schema are shared (not copied).
+func (r RemoteIndexes) WithFieldFilter(ff *FieldFilter) RemoteIndexes {
+	out := make(RemoteIndexes, len(r))
+	for i, si := range r {
+		switch v := si.(type) {
+		case *RemoteIndex:
+			clone := *v
+			clone.q = ff
+			out[i] = &clone
+		case *LocalIndex:
+			clone := *v
+			clone.q = ff
+			out[i] = &clone
+		default:
+			out[i] = si
+		}
+	}
+	return out
+}
 
 type FullTextPagingOptions struct {
 	OrderBy      []SortField
@@ -1003,6 +1024,31 @@ func MultiSearch(
 	indexes ...ShardIndex,
 ) (*RemoteIndexSearchResult, error) {
 	searchStart := time.Now()
+
+	// Fast path: single shard avoids goroutine/channel overhead.
+	if len(indexes) == 1 {
+		idx := indexes[0]
+		sr, err := idx.RemoteSearch(ctx, req)
+		if err != nil {
+			return &RemoteIndexSearchResult{
+				Took: time.Since(searchStart),
+				Status: &RemoteIndexSearchStatus{
+					Total:  1,
+					Failed: 1,
+					Errors: map[string]error{idx.Name(): err},
+				},
+			}, nil
+		}
+		if sr == nil {
+			sr = &RemoteIndexSearchResult{}
+		}
+		if sr.Status == nil {
+			sr.Status = &RemoteIndexSearchStatus{Total: 1, Successful: 1}
+		}
+		sr.Took = time.Since(searchStart)
+		return sr, nil
+	}
+
 	asyncResults := make(chan *asyncSearchResult, len(indexes))
 
 	// run search on each index in separate go routine
@@ -1675,14 +1721,7 @@ func (r ShardIndexes) FusedSearch(ctx context.Context, jsonQuery *Query) (*Fusio
 		return nil, fmt.Errorf("creating remote index search request: %w", err)
 	}
 
-	var remoteRes *RemoteIndexSearchResult
-	var remoteErr error
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		remoteRes, remoteErr = MultiSearch(ctx, risr, r...)
-	})
-
-	wg.Wait()
+	remoteRes, remoteErr := MultiSearch(ctx, risr, r...)
 
 	var fusedResults *FusionResult
 
