@@ -16,6 +16,7 @@ package metadata
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -23,13 +24,15 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
-	json "github.com/antflydb/antfly/pkg/libaf/json"
+	"github.com/antflydb/antfly/pkg/libaf/json"
 
 	"github.com/antflydb/antfly/lib/embeddings"
 	"github.com/antflydb/antfly/lib/schema"
+	"github.com/antflydb/antfly/lib/types"
 	"github.com/antflydb/antfly/lib/vector"
 	"github.com/antflydb/antfly/lib/vector/stats"
 	"github.com/antflydb/antfly/lib/workerpool"
@@ -341,6 +344,70 @@ func (q *QueryRequest) mergeConfigToInternal() *indexes.MergeConfig {
 	}
 }
 
+func fieldFilterForQuery(q *indexes.Query, queryReq *QueryRequest) *indexes.FieldFilter {
+	return &indexes.FieldFilter{
+		Fields:    q.Fields,
+		Star:      len(q.Fields) == 0,
+		CountStar: q.Count && len(q.Fields) == 0 && queryReq.FullTextSearch != nil,
+	}
+}
+
+// getOrCreateBaseIndexes returns cached base RemoteIndexes for the given schema
+// and shard topology, creating them if the cache misses or topology changed.
+// The cache avoids rebuilding bleve index mappings on every query.
+func (t *TableApi) getOrCreateBaseIndexes(
+	tableSchema *schema.TableSchema,
+	peers map[types.ID][]string,
+) (indexes.RemoteIndexes, error) {
+	// Build a deterministic cache key from schema version + sorted shard peers.
+	h := xxhash.New()
+	var buf [8]byte
+	if tableSchema != nil {
+		binary.LittleEndian.PutUint64(buf[:], uint64(tableSchema.Version))
+		h.Write(buf[:])
+	}
+	shardIDs := make([]types.ID, 0, len(peers))
+	for id := range peers {
+		shardIDs = append(shardIDs, id)
+	}
+	slices.SortFunc(shardIDs, func(a, b types.ID) int { return cmp.Compare(a, b) })
+	for _, id := range shardIDs {
+		binary.LittleEndian.PutUint64(buf[:], uint64(id))
+		h.Write(buf[:])
+		urls := slices.Clone(peers[id])
+		slices.Sort(urls)
+		for _, u := range urls {
+			h.WriteString(u)
+		}
+	}
+	key := h.Sum64()
+
+	if cached, ok := t.baseIndexCache.Load(key); ok {
+		return cached.(indexes.RemoteIndexes), nil
+	}
+
+	// Evict before construction so concurrent goroutines don't all race
+	// on clear+store after the expensive MakeBaseIndexesForShards call.
+	cacheSize := 0
+	t.baseIndexCache.Range(func(_, _ any) bool {
+		cacheSize++
+		return cacheSize < 64
+	})
+	if cacheSize >= 64 {
+		t.baseIndexCache.Clear()
+	}
+
+	base, err := indexes.MakeBaseIndexesForShards(t.tm.HttpClient(), tableSchema, peers)
+	if err != nil {
+		return nil, err
+	}
+
+	// LoadOrStore ensures only one goroutine's result is cached when
+	// concurrent queries compute the same key simultaneously.
+	actual, _ := t.baseIndexCache.LoadOrStore(key, base)
+	return actual.(indexes.RemoteIndexes), nil
+}
+
 func (t *TableApi) runQuery(ctx context.Context, queryReq *QueryRequest) QueryResult {
 	// Validate request configuration first
 	if err := queryReq.Validate(); err != nil {
@@ -397,22 +464,14 @@ func (t *TableApi) runQuery(ctx context.Context, queryReq *QueryRequest) QueryRe
 	if table.ReadSchema != nil {
 		querySchema = table.ReadSchema
 	}
-	shardIndexes, err := indexes.MakeIndexesForShards(
-		t.tm.HttpClient(),
-		querySchema,
-		shardPeers,
-		&indexes.FieldFilter{
-			Fields:    q.Fields,
-			Star:      len(q.Fields) == 0,
-			CountStar: q.Count && len(q.Fields) == 0 && queryReq.FullTextSearch != nil,
-		},
-	)
+	baseIndexes, err := t.getOrCreateBaseIndexes(querySchema, shardPeers)
 	if err != nil {
 		return QueryResult{
 			Status: http.StatusInternalServerError,
 			Error:  fmt.Sprintf("creating search indexes: %v", err),
 		}
 	}
+	shardIndexes := baseIndexes.WithFieldFilter(fieldFilterForQuery(q, queryReq))
 	t.logger.Debug("Received JSON query",
 		zap.Any("remoteindex.Query", q),
 		zap.Any("QueryRequest", queryReq))
@@ -859,6 +918,18 @@ func (t *TableApi) runBatchQueriesForTable(ctx context.Context, queryReqs []Quer
 		querySchema = table.ReadSchema
 	}
 
+	// Build base indexes once for the table (shared across all queries in the batch).
+	baseIndexes, err := t.getOrCreateBaseIndexes(querySchema, shardPeers)
+	if err != nil {
+		for i := range results {
+			results[i] = QueryResult{
+				Status: http.StatusInternalServerError,
+				Error:  fmt.Sprintf("creating search indexes: %v", err),
+			}
+		}
+		return results
+	}
+
 	// Build batched shard requests
 	// For each valid query, we need to send to ALL shards
 	// Structure: [query0_shard0, query0_shard1, ..., query1_shard0, query1_shard1, ...]
@@ -873,24 +944,7 @@ func (t *TableApi) runBatchQueriesForTable(ctx context.Context, queryReqs []Quer
 			continue
 		}
 
-		// Create shard indexes for this query
-		shardIndexes, err := indexes.MakeIndexesForShards(
-			t.tm.HttpClient(),
-			querySchema,
-			shardPeers,
-			&indexes.FieldFilter{
-				Fields:    pq.query.Fields,
-				Star:      len(pq.query.Fields) == 0,
-				CountStar: pq.query.Count && len(pq.query.Fields) == 0 && pq.queryReq.FullTextSearch != nil,
-			},
-		)
-		if err != nil {
-			results[i] = QueryResult{
-				Status: http.StatusInternalServerError,
-				Error:  fmt.Sprintf("creating search indexes: %v", err),
-			}
-			continue
-		}
+		shardIndexes := baseIndexes.WithFieldFilter(fieldFilterForQuery(pq.query, pq.queryReq))
 
 		// Convert query to search request
 		searchReq, err := pq.query.RemoteIndexSearchRequest()
