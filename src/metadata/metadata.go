@@ -35,6 +35,7 @@ import (
 	"github.com/antflydb/antfly/src/metadata/reconciler"
 	"github.com/antflydb/antfly/src/store"
 	"github.com/antflydb/antfly/src/store/db"
+	"github.com/antflydb/antfly/src/store/db/indexes"
 	"github.com/antflydb/antfly/src/tablemgr"
 	"github.com/antflydb/antfly/src/usermgr"
 	"github.com/cockroachdb/pebble/v2"
@@ -69,6 +70,21 @@ type MetadataStore struct {
 	clock clock.Clock
 
 	txnIDGenerator func() uuid.UUID
+
+	// executionProvider chooses local vs remote implementations for query-plane
+	// shard indexes and control-plane StoreRPCs. It is fixed at runtime
+	// construction, which avoids mixed-mode bootstrap states.
+	executionProvider ExecutionProvider
+}
+
+// materializeIndexes builds fresh ShardIndexes from an immutable base plan
+// using the execution provider configured at runtime startup.
+func (ms *MetadataStore) materializeIndexes(plan *indexes.BaseShardIndexPlan, peers map[types.ID][]string) (indexes.ShardIndexes, error) {
+	provider := ms.executionProvider
+	if provider == nil {
+		provider = DefaultExecutionProvider()
+	}
+	return provider.MaterializeIndexes(ms.tm.HttpClient(), plan, peers)
 }
 
 func (ms *MetadataStore) clockOrReal() clock.Clock {

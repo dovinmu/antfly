@@ -49,7 +49,7 @@ import (
 
 func (t *TableApi) executeHybridFullTextFallback(
 	ctx context.Context,
-	shardIndexes indexes.RemoteIndexes,
+	shardIndexes indexes.ShardIndexes,
 	queryReq *QueryRequest,
 	q *indexes.Query,
 	graphSearches map[string]*indexes.GraphQuery,
@@ -353,14 +353,14 @@ func fieldFilterForQuery(q *indexes.Query, queryReq *QueryRequest) *indexes.Fiel
 	}
 }
 
-// getOrCreateBaseIndexes returns cached base RemoteIndexes for the given schema
-// and shard topology, creating them if the cache misses or topology changed.
+// getOrCreateBaseIndexPlan returns a cached immutable base query plan for the
+// given schema and shard topology, creating it if the cache misses.
 // The cache avoids rebuilding bleve index mappings on every query.
-func (t *TableApi) getOrCreateBaseIndexes(
+func (t *TableApi) getOrCreateBaseIndexPlan(
 	tableSchema *schema.TableSchema,
 	peers map[types.ID][]string,
-) (indexes.RemoteIndexes, error) {
-	// Build a deterministic cache key from schema version + sorted shard peers.
+) (*indexes.BaseShardIndexPlan, error) {
+	// Build a deterministic cache key from schema version + sorted shard IDs.
 	h := xxhash.New()
 	var buf [8]byte
 	if tableSchema != nil {
@@ -375,20 +375,15 @@ func (t *TableApi) getOrCreateBaseIndexes(
 	for _, id := range shardIDs {
 		binary.LittleEndian.PutUint64(buf[:], uint64(id))
 		h.Write(buf[:])
-		urls := slices.Clone(peers[id])
-		slices.Sort(urls)
-		for _, u := range urls {
-			h.WriteString(u)
-		}
 	}
 	key := h.Sum64()
 
 	if cached, ok := t.baseIndexCache.Load(key); ok {
-		return cached.(indexes.RemoteIndexes), nil
+		return cached.(*indexes.BaseShardIndexPlan), nil
 	}
 
 	// Evict before construction so concurrent goroutines don't all race
-	// on clear+store after the expensive MakeBaseIndexesForShards call.
+	// on clear+store after the expensive plan construction call.
 	cacheSize := 0
 	t.baseIndexCache.Range(func(_, _ any) bool {
 		cacheSize++
@@ -398,15 +393,12 @@ func (t *TableApi) getOrCreateBaseIndexes(
 		t.baseIndexCache.Clear()
 	}
 
-	base, err := indexes.MakeBaseIndexesForShards(t.tm.HttpClient(), tableSchema, peers)
-	if err != nil {
-		return nil, err
-	}
+	base := indexes.NewBaseShardIndexPlan(tableSchema, shardIDs)
 
 	// LoadOrStore ensures only one goroutine's result is cached when
 	// concurrent queries compute the same key simultaneously.
 	actual, _ := t.baseIndexCache.LoadOrStore(key, base)
-	return actual.(indexes.RemoteIndexes), nil
+	return actual.(*indexes.BaseShardIndexPlan), nil
 }
 
 func (t *TableApi) runQuery(ctx context.Context, queryReq *QueryRequest) QueryResult {
@@ -465,7 +457,14 @@ func (t *TableApi) runQuery(ctx context.Context, queryReq *QueryRequest) QueryRe
 	if table.ReadSchema != nil {
 		querySchema = table.ReadSchema
 	}
-	baseIndexes, err := t.getOrCreateBaseIndexes(querySchema, shardPeers)
+	basePlan, err := t.getOrCreateBaseIndexPlan(querySchema, shardPeers)
+	if err != nil {
+		return QueryResult{
+			Status: http.StatusInternalServerError,
+			Error:  fmt.Sprintf("creating search index plan: %v", err),
+		}
+	}
+	baseIndexes, err := t.ln.materializeIndexes(basePlan, shardPeers)
 	if err != nil {
 		return QueryResult{
 			Status: http.StatusInternalServerError,
@@ -920,7 +919,17 @@ func (t *TableApi) runBatchQueriesForTable(ctx context.Context, queryReqs []Quer
 	}
 
 	// Build base indexes once for the table (shared across all queries in the batch).
-	baseIndexes, err := t.getOrCreateBaseIndexes(querySchema, shardPeers)
+	basePlan, err := t.getOrCreateBaseIndexPlan(querySchema, shardPeers)
+	if err != nil {
+		for i := range results {
+			results[i] = QueryResult{
+				Status: http.StatusInternalServerError,
+				Error:  fmt.Sprintf("creating search index plan: %v", err),
+			}
+		}
+		return results
+	}
+	baseIndexes, err := t.ln.materializeIndexes(basePlan, shardPeers)
 	if err != nil {
 		for i := range results {
 			results[i] = QueryResult{
@@ -935,9 +944,9 @@ func (t *TableApi) runBatchQueriesForTable(ctx context.Context, queryReqs []Quer
 	// For each valid query, we need to send to ALL shards
 	// Structure: [query0_shard0, query0_shard1, ..., query1_shard0, query1_shard1, ...]
 	var shardReqs []*indexes.RemoteIndexSearchRequest
-	var shardIdxs []*indexes.RemoteIndex
+	var shardIdxs []indexes.ShardIndex
 	validQueryIndices := []int{}
-	queryShardIndexes := make(map[int]indexes.RemoteIndexes)
+	queryShardIndexes := make(map[int]indexes.ShardIndexes)
 
 	for i, pq := range prepared {
 		if pq.err != "" {

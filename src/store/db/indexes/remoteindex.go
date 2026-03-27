@@ -48,15 +48,24 @@ type FieldFilter struct {
 	CountStar bool     `json:"count_star,omitempty"`
 	Star      bool     `json:"star,omitempty"`
 }
+
+var _ ShardIndex = (*RemoteIndex)(nil)
+
 type RemoteIndex struct {
 	client *http.Client
 	urls   []string
 	shard  types.ID
 
-	mapping mapping.IndexMapping
-	schema  *schema.TableSchema
+	mapping       mapping.IndexMapping
+	schemaVersion uint32
 
 	q *FieldFilter
+}
+
+func (r *RemoteIndex) WithFieldFilter(ff *FieldFilter) ShardIndex {
+	clone := *r
+	clone.q = ff
+	return &clone
 }
 
 // NewRemoteIndex creates a new client connecting to a remote bleve index
@@ -114,6 +123,24 @@ type RemoteIndexSearchRequest struct {
 	// ExpandStrategy defines how to incorporate graph search results with other search results
 	// Options: "union" (merge all results), "intersection" (only common results), "" (keep separate)
 	ExpandStrategy string `json:"expand_strategy,omitempty"`
+}
+
+// Clone returns a shallow copy of the request struct so shard-specific metadata
+// can be applied without mutating the caller-owned request object.
+func (r *RemoteIndexSearchRequest) Clone() *RemoteIndexSearchRequest {
+	if r == nil {
+		return nil
+	}
+	clone := *r
+	return &clone
+}
+
+func (r *RemoteIndexSearchRequest) withFullTextIndexVersion(version uint32) *RemoteIndexSearchRequest {
+	clone := r.Clone()
+	if clone != nil {
+		clone.FullTextIndexVersion = version
+	}
+	return clone
 }
 
 // FusionKeyFullText is the named weight key for the full-text search index.
@@ -447,18 +474,32 @@ func (ss *RemoteIndexSearchStatus) Merge(other *RemoteIndexSearchStatus) {
 	}
 }
 
-// MakeBaseIndexesForShards creates RemoteIndex objects for each shard without
+// MakeLocalIndexesForShards creates LocalIndex objects for each shard, using
+// the given ShardSearcher for direct in-process search (swarm mode).
+// The returned indexes have no FieldFilter; call WithFieldFilter on the
+// collection to set per-query field projections.
+// MakeRemoteIndexesForShards creates RemoteIndex objects for each shard without
 // a per-query FieldFilter. The returned indexes can be reused across queries
 // by calling WithFieldFilter to set query-specific field projections.
-func MakeBaseIndexesForShards(
+// shardIDs controls iteration order; peers provides the URLs for each shard.
+func MakeRemoteIndexesForShards(
 	client *http.Client,
 	tableSchema *schema.TableSchema,
+	shardIDs []types.ID,
 	peers map[types.ID][]string,
-) (RemoteIndexes, error) {
-	idxMapping := schema.NewIndexMapFromSchema(tableSchema)
-	indexes := make([]*RemoteIndex, 0, len(peers))
+) (ShardIndexes, error) {
+	return MakeRemoteIndexesFromPlan(client, NewBaseShardIndexPlan(tableSchema, shardIDs), peers)
+}
 
-	for shardID, peerURLs := range peers {
+func MakeRemoteIndexesFromPlan(
+	client *http.Client,
+	plan *BaseShardIndexPlan,
+	peers map[types.ID][]string,
+) (ShardIndexes, error) {
+	indexes := make(ShardIndexes, 0, len(plan.ShardIDs))
+
+	for _, shardID := range plan.ShardIDs {
+		peerURLs := peers[shardID]
 		if len(peerURLs) == 0 {
 			return nil, fmt.Errorf("no peer URLs found for shard %s", shardID)
 		}
@@ -467,26 +508,12 @@ func MakeBaseIndexesForShards(
 		if err != nil {
 			return nil, fmt.Errorf("creating remote index: %v", err)
 		}
-		remoteIndex.mapping = idxMapping
-		remoteIndex.schema = tableSchema
+		remoteIndex.mapping = plan.IndexMapping
+		remoteIndex.schemaVersion = plan.SchemaVersion
 		indexes = append(indexes, remoteIndex)
 	}
 
 	return indexes, nil
-}
-
-type RemoteIndexes []*RemoteIndex
-
-// WithFieldFilter returns a copy of each RemoteIndex with the given FieldFilter
-// applied. The underlying client, mapping, and schema are shared (not copied).
-func (r RemoteIndexes) WithFieldFilter(ff *FieldFilter) RemoteIndexes {
-	out := make(RemoteIndexes, len(r))
-	for i, ri := range r {
-		clone := *ri
-		clone.q = ff
-		out[i] = &clone
-	}
-	return out
 }
 
 type FullTextPagingOptions struct {
@@ -573,7 +600,7 @@ type AggregationRequest struct {
 	Aggregations          AggregationRequests `json:"aggregations,omitempty"`
 }
 
-func (r RemoteIndexes) FullTextSearch(
+func (r ShardIndexes) FullTextSearch(
 	ctx context.Context,
 	q query.Query,
 	facetOptions AggregationRequests,
@@ -601,11 +628,11 @@ func (r RemoteIndexes) FullTextSearch(
 	}
 	applyFullTextPaging(searchReq, pagingOpts)
 	index := bleve.NewIndexAlias()
-	if err := index.SetIndexMapping(r[0].mapping); err != nil {
+	if err := index.SetIndexMapping(r[0].IndexMapping()); err != nil {
 		return nil, fmt.Errorf("setting index mapping: %w", err)
 	}
 	for _, i := range r {
-		index.Add(i)
+		index.Add(newBleveShardIndexAdapter(i))
 	}
 	origCtx := ctx
 	ctx = r.withGlobalScoringCtx(ctx)
@@ -624,9 +651,9 @@ func (r RemoteIndexes) FullTextSearch(
 // GlobalScoring requires the _all field to have content; without it, bleve
 // cannot compute cross-shard BM25 stats and every search fails with
 // "field stat for bm25 not present _all".
-func (r RemoteIndexes) withGlobalScoringCtx(ctx context.Context) context.Context {
+func (r ShardIndexes) withGlobalScoringCtx(ctx context.Context) context.Context {
 	if len(r) > 1 {
-		if m, ok := r[0].mapping.(*mapping.IndexMappingImpl); ok && m.ScoringModel == bleveindex.BM25Scoring {
+		if m, ok := r[0].IndexMapping().(*mapping.IndexMappingImpl); ok && m.ScoringModel == bleveindex.BM25Scoring {
 			// Only enable GlobalScoring when the _all document mapping is
 			// enabled (i.e., at least one field has IncludeInAll=true).
 			if allMapping, ok := m.TypeMapping["_all"]; ok && allMapping.Enabled {
@@ -648,11 +675,8 @@ func (r *RemoteIndex) RemoteSearch(
 	req *RemoteIndexSearchRequest,
 ) (*RemoteIndexSearchResult, error) {
 	version := uint32(0)
-	if r.schema != nil {
-		version = r.schema.Version
-	}
-	req.FullTextIndexVersion = version
-	reqBytes, err := json.Marshal(req)
+	version = r.schemaVersion
+	reqBytes, err := json.Marshal(req.withFullTextIndexVersion(version))
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal search request: %w", err)
 	}
@@ -700,15 +724,12 @@ func (r *RemoteIndex) BatchRemoteSearch(
 	}
 
 	version := uint32(0)
-	if r.schema != nil {
-		version = r.schema.Version
-	}
+	version = r.schemaVersion
 
 	// Build ndjson body
 	var buf bytes.Buffer
 	for i, req := range reqs {
-		req.FullTextIndexVersion = version
-		encoded, err := json.Marshal(req)
+		encoded, err := json.Marshal(req.withFullTextIndexVersion(version))
 		if err != nil {
 			errors := make([]error, len(reqs))
 			errors[i] = fmt.Errorf("failed to marshal search request: %w", err)
@@ -768,7 +789,7 @@ func (r *RemoteIndex) BatchRemoteSearch(
 func BatchMultiSearch(
 	ctx context.Context,
 	reqs []*RemoteIndexSearchRequest,
-	indexes []*RemoteIndex,
+	indexes []ShardIndex,
 ) ([]*RemoteIndexSearchResult, error) {
 	if len(reqs) != len(indexes) {
 		return nil, fmt.Errorf("mismatched requests and indexes: %d vs %d", len(reqs), len(indexes))
@@ -783,7 +804,7 @@ func BatchMultiSearch(
 		req         *RemoteIndexSearchRequest
 	}
 	shardRequests := make(map[string][]indexedReq)
-	shardIndex := make(map[string]*RemoteIndex)
+	shardIndex := make(map[string]ShardIndex)
 
 	for i, idx := range indexes {
 		shardName := idx.Name()
@@ -807,7 +828,7 @@ func BatchMultiSearch(
 			idx := shardIndex[shardName]
 			batchReqs := make([]*RemoteIndexSearchRequest, len(indexedReqs))
 			for i, ir := range indexedReqs {
-				batchReqs[i] = ir.req
+				batchReqs[i] = ir.req.Clone()
 			}
 
 			batchResults, batchErrors := idx.BatchRemoteSearch(ctx, batchReqs)
@@ -841,9 +862,7 @@ func (r *RemoteIndex) SearchInContext(
 	req *bleve.SearchRequest,
 ) (*bleve.SearchResult, error) {
 	version := uint32(0)
-	if r.schema != nil {
-		version = r.schema.Version
-	}
+	version = r.schemaVersion
 	riReq := RemoteIndexSearchRequest{BleveSearchRequest: req, FullTextIndexVersion: version}
 	if r.q != nil {
 		if r.q.CountStar {
@@ -956,7 +975,12 @@ func (r *RemoteIndex) SetInternal(key, val []byte) error {
 func (r *RemoteIndex) DeleteInternal(key []byte) error {
 	return errors.New("operation not implemented remotely")
 }
-func (r *RemoteIndex) Name() string        { return r.shard.String() }
+func (r *RemoteIndex) Name() string                       { return r.shard.String() }
+func (r *RemoteIndex) ShardID() types.ID                  { return r.shard }
+func (r *RemoteIndex) IndexMapping() mapping.IndexMapping { return r.mapping }
+func (r *RemoteIndex) SchemaVersion() uint32 {
+	return r.schemaVersion
+}
 func (r *RemoteIndex) Type() IndexType     { return IndexTypeFullText }
 func (r *RemoteIndex) SetName(name string) {}
 func (r *RemoteIndex) Advanced() (bleveindex.Index, error) {
@@ -968,7 +992,7 @@ func (r *RemoteIndex) Advanced() (bleveindex.Index, error) {
 func MultiSearch(
 	ctx context.Context,
 	req *RemoteIndexSearchRequest,
-	indexes ...*RemoteIndex,
+	indexes ...ShardIndex,
 ) (*RemoteIndexSearchResult, error) {
 	searchStart := time.Now()
 
@@ -1001,7 +1025,7 @@ func MultiSearch(
 	// run search on each index in separate go routine
 	var waitGroup sync.WaitGroup
 
-	searchChildIndex := func(in *RemoteIndex, childReq *RemoteIndexSearchRequest) {
+	searchChildIndex := func(in ShardIndex, childReq *RemoteIndexSearchRequest) {
 		rv := asyncSearchResult{Name: in.Name()}
 		rv.Result, rv.Err = in.RemoteSearch(ctx, childReq)
 		asyncResults <- &rv
@@ -1010,7 +1034,7 @@ func MultiSearch(
 
 	waitGroup.Add(len(indexes))
 	for _, in := range indexes {
-		go searchChildIndex(in, req)
+		go searchChildIndex(in, req.Clone())
 	}
 
 	// on another go routine, close after finished
@@ -1661,7 +1685,7 @@ func (q *Query) VectorPagingOptions() VectorPagingOptions {
 // FusedSearch combines results from Bleve and Vector searches using fusion strategies.
 // Supports both RRF (Reciprocal Rank Fusion) and RSF (Relative Score Fusion).
 // The fusion strategy and parameters are determined by the MergeConfig in the query.
-func (r RemoteIndexes) FusedSearch(ctx context.Context, jsonQuery *Query) (*FusionResult, error) {
+func (r ShardIndexes) FusedSearch(ctx context.Context, jsonQuery *Query) (*FusionResult, error) {
 	searchStart := time.Now()
 	risr, err := jsonQuery.RemoteIndexSearchRequest()
 	if err != nil {

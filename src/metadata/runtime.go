@@ -68,6 +68,10 @@ type Runtime struct {
 	closeErr  error
 }
 
+type RuntimeOptions struct {
+	ExecutionProvider ExecutionProvider
+}
+
 func NewRuntime(
 	zl *zap.Logger,
 	config *common.Config,
@@ -75,6 +79,7 @@ func NewRuntime(
 	peers common.Peers,
 	join bool,
 	cache *pebbleutils.Cache,
+	opts RuntimeOptions,
 ) (*Runtime, error) {
 	dataDir := config.GetBaseDir()
 	rs, err := raft.NewMultiRaftServer(zl, dataDir, conf.ID, conf.RaftURL)
@@ -92,6 +97,10 @@ func NewRuntime(
 		metadataStore.Close()
 		return nil, fmt.Errorf("creating metadata http client: %w", err)
 	}
+	provider := opts.ExecutionProvider
+	if provider == nil {
+		provider = DefaultExecutionProvider()
+	}
 
 	tm, err := tablemgr.NewTableManager(metadataStore, httpClient, config.MaxShardSizeBytes)
 	if err != nil {
@@ -101,6 +110,7 @@ func NewRuntime(
 		}
 		return nil, fmt.Errorf("creating table manager: %w", err)
 	}
+	tm.SetStoreClientFactory(provider.StoreClientFactory())
 
 	um, err := usermgr.NewUserManager(metadataStore)
 	if err != nil {
@@ -150,6 +160,8 @@ func NewRuntime(
 
 		hlc:   NewHLCWithClock(clock.RealClock{}),
 		clock: clock.RealClock{},
+
+		executionProvider: provider,
 	}
 
 	shardOps := NewMetadataShardOperations(node)

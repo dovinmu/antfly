@@ -48,6 +48,7 @@ type ShardIface interface {
 	UpdateSchema(ctx context.Context, schema *schema.TableSchema) error
 	FindMedianKey() ([]byte, error)
 	Search(ctx context.Context, query []byte) ([]byte, error)
+	SearchTyped(ctx context.Context, req *indexes.RemoteIndexSearchRequest) (*indexes.RemoteIndexSearchResult, error)
 	Lookup(ctx context.Context, key string) (map[string]any, error)
 	GetTimestamp(key string) (uint64, error)
 	Batch(ctx context.Context, batchOp *BatchOp, proposeOnly bool) error
@@ -206,7 +207,7 @@ func (s *Shard) ErrorC() <-chan error {
 // It closes channels, cancels contexts, waits for the raft node to stop, and closes the database.
 // Close is safe to call multiple times; only the first call performs the shutdown.
 func (s *Shard) Close() error {
-	if s.IsInitializing() {
+	if s.storeDB == nil {
 		return ErrShardNotReady
 	}
 
@@ -481,6 +482,13 @@ func (s *Shard) Search(ctx context.Context, req []byte) ([]byte, error) {
 		return nil, err
 	}
 	return s.storeDB.Search(ctx, req)
+}
+
+func (s *Shard) SearchTyped(ctx context.Context, req *indexes.RemoteIndexSearchRequest) (*indexes.RemoteIndexSearchResult, error) {
+	if err := s.checkReady(); err != nil {
+		return nil, err
+	}
+	return s.storeDB.SearchTyped(ctx, req)
 }
 
 func (s *Shard) Scan(ctx context.Context, fromKey []byte, toKey []byte, opts ScanOptions) (*ScanResult, error) {
