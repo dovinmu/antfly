@@ -127,3 +127,41 @@ func TestHTTPHandler_ListSessions(t *testing.T) {
 		t.Fatalf("expected session payload, got %s", rec.Body.String())
 	}
 }
+
+func TestHTTPHandler_HealthTreatsMissingNamespaceTableAsAvailable(t *testing.T) {
+	mc := newMockClient()
+	mc.queryFn = func(body []byte) ([]byte, error) {
+		return json.Marshal(queryResponse{
+			Responses: []struct {
+				Hits struct {
+					Hits  []rawHit `json:"hits"`
+					Total uint64   `json:"total"`
+				} `json:"hits"`
+				Aggregations map[string]aggregationResult `json:"aggregations"`
+				Error        string                       `json:"error"`
+			}{
+				{Error: "table team-alpha_memories not found"},
+			},
+		})
+	}
+	handler := NewHTTPHandler(newTestHandler(mc, nil), nil)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("X-Namespace", "team-alpha")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var status HealthStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if status.Status != "ok" {
+		t.Fatalf("status = %q, want ok", status.Status)
+	}
+	if !status.Antfly {
+		t.Fatal("expected antfly to be reported available")
+	}
+}

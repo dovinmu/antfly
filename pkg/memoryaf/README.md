@@ -159,7 +159,7 @@ Unlike the older standalone TS dashboard, this UI understands:
 - `source_backend`, `source_id`, `source_path`, `source_url`, `source_version`
 - `section_path` for docsaf-derived content
 
-`find_related` and `entity_memories` now use graph merge strategy `intersection`, matching Drew's tighter graph behavior for graph-only traversals.
+`find_related` and `entity_memories` use graph merge strategy `union`, matching the broader recall behavior used elsewhere in memory search.
 
 Source-reference fields are treated as immutable after creation. If an external document identity changes, the recommended flow is to create a replacement memory rather than mutate those identifiers in place.
 

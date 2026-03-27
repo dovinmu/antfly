@@ -407,6 +407,26 @@ func TestSearchMemories(t *testing.T) {
 	}
 }
 
+func TestSearchMemories_IncludesVisibilityFilter(t *testing.T) {
+	mc := newMockClient()
+	h := newTestHandler(mc, nil)
+
+	_, err := h.SearchMemories(context.Background(), SearchMemoriesArgs{
+		Query:      "concurrency",
+		Visibility: VisibilityPrivate,
+	}, defaultUctx())
+	if err != nil {
+		t.Fatalf("SearchMemories: %v", err)
+	}
+	if len(mc.queryBodies) == 0 {
+		t.Fatal("expected query body")
+	}
+	body := string(mc.queryBodies[len(mc.queryBodies)-1])
+	if !strings.Contains(body, VisibilityPrivate) {
+		t.Fatalf("expected visibility filter in query body, got %s", body)
+	}
+}
+
 func TestValidateNamespace(t *testing.T) {
 	tests := []struct {
 		ns      string

@@ -190,6 +190,7 @@ type SearchMemoriesArgs struct {
 	Tags          []string `json:"tags,omitempty"          mcp:"Filter by tags"`
 	MemoryType    string   `json:"memory_type,omitempty"   mcp:"Filter by type: episodic, semantic, procedural"`
 	CreatedBy     string   `json:"created_by,omitempty"    mcp:"Filter by creator"`
+	Visibility    string   `json:"visibility,omitempty"    mcp:"Filter by visibility"`
 	SourceBackend string   `json:"source_backend,omitempty" mcp:"Filter by external source backend, such as filesystem, git, s3, google_drive, or web"`
 	SourceID      string   `json:"source_id,omitempty"      mcp:"Filter to a specific external source document"`
 	ExpandGraph   bool     `json:"expand_graph,omitempty"  mcp:"Expand results via entity graph (default: false)"`

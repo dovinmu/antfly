@@ -581,10 +581,27 @@ func (h *HTTPHandler) checkAntfly(ctx context.Context, namespace string) bool {
 		"count":            true,
 	}))
 	if err != nil {
+		if isMissingTableError(err) {
+			return true
+		}
 		return false
 	}
 	_, err = parseResponse(resp)
-	return err == nil
+	return err == nil || isMissingTableError(err)
+}
+
+func isMissingTableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "table") {
+		return false
+	}
+	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "missing") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "unknown table")
 }
 
 func (h *HTTPHandler) checkExtractor(ctx context.Context) bool {

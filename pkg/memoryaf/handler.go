@@ -663,6 +663,7 @@ func (h *Handler) SearchMemories(ctx context.Context, args SearchMemoriesArgs, u
 		Tags:          args.Tags,
 		MemoryType:    args.MemoryType,
 		CreatedBy:     args.CreatedBy,
+		Visibility:    args.Visibility,
 		SourceBackend: args.SourceBackend,
 		SourceID:      args.SourceID,
 		SessionID:     args.SessionID,
@@ -771,7 +772,7 @@ func (h *Handler) FindRelated(ctx context.Context, args FindRelatedArgs, uctx Us
 				"include_documents": true,
 			},
 		},
-		"graph_merge_strategy": "intersection",
+		"graph_merge_strategy": "union",
 	}
 
 	resp, err := h.client.QueryWithBody(ctx, mustMarshal(reqMap))
@@ -831,7 +832,7 @@ func (h *Handler) GetEntityMemories(ctx context.Context, args EntityMemoriesArgs
 				"include_documents": true,
 			},
 		},
-		"graph_merge_strategy": "intersection",
+		"graph_merge_strategy": "union",
 	}
 
 	resp, err := h.client.QueryWithBody(ctx, mustMarshal(reqMap))
