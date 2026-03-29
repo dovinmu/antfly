@@ -454,6 +454,9 @@ func (rc *raftNode) publishEntries(
 
 var ErrStopped = errors.New("raft node stopped")
 
+const initialSnapshotFetchRetryInterval = 100 * time.Millisecond
+const initialSnapshotFetchRetryTimeout = 5 * time.Second
+
 // maybeSignalConfChangeCallback signals the callback for a conf change if one is registered.
 // It parses the UUID from the conf change context and closes the corresponding callback channel.
 func (rc *raftNode) maybeSignalConfChangeCallback(ccc *ConfChangeContext) {
@@ -492,7 +495,7 @@ func (rc *raftNode) loadSnapshot(ctx context.Context) (string, error) {
 				"Initializing with provided DB archive",
 				zap.String("archiveID", rc.initWithStorageSnapshot),
 			)
-			if err := rc.maybeFetchStorageSnapshot(ctx, rc.initWithStorageSnapshot); err != nil {
+			if err := rc.fetchInitialStorageSnapshot(ctx, rc.initWithStorageSnapshot); err != nil {
 				rc.logger.Fatal(
 					"Failed to fetch initial snapshot",
 					zap.String("snapshotID", rc.initWithStorageSnapshot),
@@ -520,6 +523,36 @@ func (rc *raftNode) loadSnapshot(ctx context.Context) (string, error) {
 		)
 	}
 	return snapshotMeta.GetID(), nil
+}
+
+func (rc *raftNode) fetchInitialStorageSnapshot(ctx context.Context, id string) error {
+	deadline := rc.clock.Now().Add(initialSnapshotFetchRetryTimeout)
+	var lastErr error
+	for {
+		err := rc.maybeFetchStorageSnapshot(ctx, id)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if rc.clock.Now().After(deadline) {
+			return fmt.Errorf(
+				"fetching initial snapshot %s timed out after %s: %w",
+				id,
+				initialSnapshotFetchRetryTimeout,
+				lastErr,
+			)
+		}
+		rc.logger.Debug(
+			"Initial snapshot not available yet; retrying",
+			zap.String("snapshotID", id),
+			zap.Error(err),
+		)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("fetching initial snapshot %s canceled: %w", id, ctx.Err())
+		case <-rc.clock.After(initialSnapshotFetchRetryInterval):
+		}
+	}
 }
 
 func (rc *raftNode) setInitErr(err error) {
