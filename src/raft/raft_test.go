@@ -20,9 +20,11 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/antflydb/antfly/lib/clock"
 	"github.com/antflydb/antfly/lib/types"
 	"github.com/antflydb/antfly/src/common"
 	"github.com/antflydb/antfly/src/snapstore"
@@ -48,6 +50,27 @@ func TestGetSnapshotIDReturnsInitError(t *testing.T) {
 	snapshotID, err := rc.GetSnapshotID(context.Background())
 	require.Empty(t, snapshotID)
 	require.ErrorIs(t, err, expectedErr)
+}
+
+func TestLoadSnapshotRetriesInitialSnapshotFetch(t *testing.T) {
+	ps, cleanup := newTestPebbleStorage(t)
+	defer cleanup()
+
+	transport := &retrySnapshotTransport{failuresBeforeSuccess: 2}
+	rc := &raftNode{
+		shardID:                 10,
+		id:                      1,
+		raftLogStorage:          ps,
+		snapStore:               &mockSnapStore{},
+		initWithStorageSnapshot: "split-archive",
+		transport:               transport,
+		clock:                   clock.RealClock{},
+		logger:                  zaptest.NewLogger(t),
+	}
+
+	_, err := rc.loadSnapshot(context.Background())
+	require.NoError(t, err)
+	require.EqualValues(t, 3, transport.attempts.Load())
 }
 
 func TestProcessMessages(t *testing.T) {
@@ -282,6 +305,27 @@ type mockTransport struct {
 		urls    []string
 	}
 }
+
+type retrySnapshotTransport struct {
+	failuresBeforeSuccess int32
+	attempts              atomic.Int32
+}
+
+func (m *retrySnapshotTransport) ErrorC() <-chan error                { return nil }
+func (m *retrySnapshotTransport) Send(_ types.ID, _ []raftpb.Message) {}
+func (m *retrySnapshotTransport) GetSnapshot(_ context.Context, _ types.ID, _ snapstore.SnapStore, _ string) error {
+	attempt := m.attempts.Add(1)
+	if attempt <= m.failuresBeforeSuccess {
+		return errors.New("snapshot not found")
+	}
+	return nil
+}
+func (m *retrySnapshotTransport) AddPeer(_, _ types.ID, _ []string)         {}
+func (m *retrySnapshotTransport) RemovePeer(_, _ types.ID)                  {}
+func (m *retrySnapshotTransport) ServeRaft(_ types.ID, _ Raft, _ []raft.Peer) error {
+	return nil
+}
+func (m *retrySnapshotTransport) StopServeRaft(_ types.ID) {}
 
 func (m *mockTransport) ErrorC() <-chan error                { return nil }
 func (m *mockTransport) Send(_ types.ID, _ []raftpb.Message) {}
