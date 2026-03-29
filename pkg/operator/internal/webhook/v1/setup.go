@@ -26,5 +26,11 @@ func SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
+	if err := builder.WebhookManagedBy(mgr, &antflyv1.AntflyServerlessProject{}).
+		WithValidator(&AntflyServerlessProjectValidator{}).
+		Complete(); err != nil {
+		return err
+	}
+
 	return nil
 }

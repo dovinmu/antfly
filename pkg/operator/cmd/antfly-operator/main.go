@@ -122,6 +122,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = (&controllers.AntflyServerlessProjectReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("antfly-serverless-project"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AntflyServerlessProject")
+		os.Exit(1)
+	}
+
 	// Setup webhooks
 	if webhooksEnabled() {
 		if err := webhookv1.SetupWithManager(mgr); err != nil {

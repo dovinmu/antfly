@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shared-serverless-proxy-routes
+  namespace: default
+  labels:
+    antfly.io/serverless-proxy-route-source: "true"
+data:
+  routes.json: |
+    [
+      {
+        "tenant": "tenant-a",
+        "table": "docs",
+        "serving_namespace": "docs-serving",
+        "preferred_backend": "serverless",
+        "allow_stateful": true,
+        "allow_serverless": true,
+        "stateful_url": "http://docs-cluster-public-api.default.svc:80",
+        "serverless_url": "http://docs-serverless-query.default.svc:8080"
+      },
+      {
+        "tenant": "tenant-b",
+        "table": "analytics",
+        "serving_namespace": "analytics-serving",
+        "preferred_backend": "serverless",
+        "allow_serverless": true,
+        "serverless_url": "http://analytics-serverless-query.default.svc:9090"
+      }
+    ]

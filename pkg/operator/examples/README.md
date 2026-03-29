@@ -1,6 +1,6 @@
 # Antfly Operator Examples
 
-This directory contains example configurations for deploying Antfly database clusters using the Antfly Operator.
+This directory contains example configurations for deploying Antfly database clusters and serverless projects using the Antfly Operator.
 
 ## Quick Start
 
@@ -14,6 +14,11 @@ This directory contains example configurations for deploying Antfly database clu
    kubectl apply -f examples/small-dev-cluster.yaml
    ```
 
+   Or for the serverless path:
+   ```bash
+   kubectl apply -f examples/serverless-project-with-proxy.yaml
+   ```
+
 3. **Check the cluster status**:
    ```bash
    kubectl get antflyclusters
@@ -21,6 +26,78 @@ This directory contains example configurations for deploying Antfly database clu
    ```
 
 ## Available Examples
+
+### Serverless Project With Proxy (`serverless-project-with-proxy.yaml`)
+A serverless retrieval deployment with:
+
+- query and maintenance `Deployment`s
+- optional Antfly-aware proxy `Deployment`
+- object-store-backed state
+- proxy auth via bearer-token `Secret`
+- route aggregation across serverless projects in one namespace
+
+**Use Case:** Retrieval-heavy namespaces, graph reads, hybrid search, and mixed stateful/serverless API routing.
+
+**Prerequisites:**
+- object store credentials/config available to the serverless runtime
+- `antfly-embedding-indexes` `Secret` if model-backed enrichments are enabled
+- `antfly-proxy-bearer-tokens` `Secret` containing `bearer_tokens.json` when proxy auth is enabled
+- optional shared route `ConfigMap` such as `serverless-proxy-route-configmap.yaml`
+
+**Deploy:**
+```bash
+kubectl apply -f examples/serverless-proxy-route-configmap.yaml
+kubectl apply -f examples/serverless-project-with-proxy.yaml
+```
+
+### Serverless Multi-Project Routing (`serverless-multi-project-routing.yaml`)
+Two `AntflyServerlessProject` objects in one namespace with aggregated proxy routes.
+
+**Use Case:** One namespace-scoped proxy serving multiple tenant/table mappings across multiple serverless projects.
+
+**Deploy:**
+```bash
+kubectl apply -f examples/serverless-multi-project-routing.yaml
+```
+
+### Shared Proxy Route ConfigMap (`serverless-proxy-route-configmap.yaml`)
+An external proxy route source that can be referenced from `spec.proxy.routeConfigMapRef`.
+
+**Use Case:** Shared namespace route definitions without duplicating large route lists into every `AntflyServerlessProject`.
+
+**Deploy:**
+```bash
+kubectl apply -f examples/serverless-proxy-route-configmap.yaml
+```
+
+**Proxy config conventions:**
+- routes are mounted from `/etc/antfly-proxy/routes.json`
+- bearer tokens are mounted from `/etc/antfly-proxy-secret/bearer_tokens.json`
+- the operator also publishes JSON copies in the proxy `ConfigMap` for inspection/debugging
+- the public proxy accepts paths like `/v1/tenants/<tenant>/tables/<table>/search`
+- freshness controls can be passed with `view`, `required_version`, and `max_lag_records`
+- ConfigMaps labeled `antfly.io/serverless-proxy-route-source=true` are aggregated as shared route sources
+- route entries map public `table` names to internal serverless `serving_namespace` values
+
+**Bearer token secret shape:**
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: antfly-proxy-bearer-tokens
+type: Opaque
+stringData:
+  bearer_tokens.json: |
+    {
+      "token-1": {
+        "subject": "user-1",
+        "tenant": "tenant-a",
+        "admin": false,
+        "tables": ["docs"],
+        "operations": ["read"]
+      }
+    }
+```
 
 ### Simple Cluster (`small-dev-cluster.yaml`)
 A basic Antfly cluster suitable for testing and small workloads.

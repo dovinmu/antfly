@@ -1,0 +1,61 @@
+# Example: Multi-project serverless proxy routing
+#
+# Apply both objects in the same namespace. The operator will aggregate the
+# proxy routes from both projects into each enabled proxy ConfigMap.
+
+---
+apiVersion: antfly.io/v1
+kind: AntflyServerlessProject
+metadata:
+  name: docs
+  namespace: default
+spec:
+  objectStore:
+    artifactsURI: s3://antfly-docs/artifacts
+    manifestsURI: s3://antfly-docs/manifests
+    walURI: s3://antfly-docs/wal
+    catalogURI: s3://antfly-docs/catalog
+    progressURI: s3://antfly-docs/progress
+  images:
+    queryImage: ghcr.io/antflydb/antfly-serverless-query:latest
+    maintenanceImage: ghcr.io/antflydb/antfly-serverless-maintenance:latest
+    proxyImage: ghcr.io/antflydb/antfly-proxy:latest
+  proxy:
+    enabled: true
+    auth:
+      bearerTokenSecretRef: antfly-proxy-bearer-tokens
+    routes:
+      - tenant: tenant-a
+        table: docs
+        servingNamespace: docs-serving
+        preferredBackend: serverless
+        allowStateful: true
+        allowServerless: true
+        statefulURL: http://docs-cluster-public-api.default.svc:80
+        serverlessURL: http://docs-serverless-query.default.svc:8080
+
+---
+apiVersion: antfly.io/v1
+kind: AntflyServerlessProject
+metadata:
+  name: analytics
+  namespace: default
+spec:
+  objectStore:
+    artifactsURI: s3://antfly-analytics/artifacts
+    manifestsURI: s3://antfly-analytics/manifests
+    walURI: s3://antfly-analytics/wal
+    catalogURI: s3://antfly-analytics/catalog
+    progressURI: s3://antfly-analytics/progress
+  images:
+    queryImage: ghcr.io/antflydb/antfly-serverless-query:latest
+    maintenanceImage: ghcr.io/antflydb/antfly-serverless-maintenance:latest
+  query:
+    port: 9090
+  proxy:
+    routes:
+      - tenant: tenant-b
+        table: analytics
+        servingNamespace: analytics-serving
+        preferredBackend: serverless
+        allowServerless: true
