@@ -1435,7 +1435,7 @@ func (i *EmbeddingIndex) LeaderFactory(
 			}
 
 			i.logger.Info("Creating pipeline for index v2", zap.String("name", i.name), zap.Bool("storeChunks", storeChunks))
-			if i.enricher, err = NewPipelineEnricher(ctx, PipelineEnricherConfig{
+			pe, peErr := NewPipelineEnricher(ctx, PipelineEnricherConfig{
 				Logger:            i.logger,
 				AntflyConfig:      i.antflyConfig,
 				DB:                i.db,
@@ -1454,16 +1454,20 @@ func (i *EmbeddingIndex) LeaderFactory(
 				PersistChunks:     persistChunks,
 				ExtractPrompt:     i.ExtractPrompt,
 				PersistFunc:       persistFunc,
-			}); err != nil {
+			})
+			if peErr != nil {
 				i.enricherMu.Unlock()
-				return fmt.Errorf("creating enricher: %w", err)
+				return fmt.Errorf("creating enricher: %w", peErr)
 			}
+			i.enricher = pe
 		} else {
 			// Simple embedding enricher (no chunking, no summarization)
-			if i.enricher, err = NewEmbeddingEnricher(ctx, i.logger, i.antflyConfig, i.db, i.indexPath, i.name, storeutils.DBRangeStart, i.embedderSuffix, i.byteRange, *i.embedderConf, i.GeneratePrompts, persistEmbeddings, nil); err != nil {
+			ee, eeErr := NewEmbeddingEnricher(ctx, i.logger, i.antflyConfig, i.db, i.indexPath, i.name, storeutils.DBRangeStart, i.embedderSuffix, i.byteRange, *i.embedderConf, i.GeneratePrompts, persistEmbeddings, nil)
+			if eeErr != nil {
 				i.enricherMu.Unlock()
-				return fmt.Errorf("creating enricher: %w", err)
+				return fmt.Errorf("creating enricher: %w", eeErr)
 			}
+			i.enricher = ee
 		}
 		i.enricherMu.Unlock()
 
