@@ -85,6 +85,13 @@ type StoreDB struct {
 	clock   clock.Clock
 }
 
+func (s *StoreDB) clockOrReal() clock.Clock {
+	if s != nil && s.clock != nil {
+		return s.clock
+	}
+	return clock.RealClock{}
+}
+
 func NewStoreDB(
 	lg *zap.Logger,
 	antflyConfig *common.Config,
@@ -597,8 +604,9 @@ func (s *StoreDB) runSplitReplayLoop(ctx context.Context, parentShardID types.ID
 		zap.Stringer("splitReplayParentShardID", parentShardID),
 		zap.Uint64("startSeq", startSeq),
 	)
+	clk := s.clockOrReal()
 	currentSeq := startSeq
-	ticker := s.clock.NewTicker(100 * time.Millisecond)
+	ticker := clk.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	waitOrCancel := func() bool {
@@ -1480,8 +1488,9 @@ func (s *StoreDB) waitForLocalSplitChildReplay(newShardID types.ID, targetSeq ui
 		return nil
 	}
 
-	deadline := s.clock.Now().Add(15 * time.Second)
-	ticker := s.clock.NewTicker(100 * time.Millisecond)
+	clk := s.clockOrReal()
+	deadline := clk.Now().Add(15 * time.Second)
+	ticker := clk.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		child := s.localSplitSourceLookup(newShardID)
@@ -1491,7 +1500,7 @@ func (s *StoreDB) waitForLocalSplitChildReplay(newShardID types.ID, targetSeq ui
 				return nil
 			}
 		}
-		if s.clock.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for local split child %s to replay through seq %d", newShardID, targetSeq)
 		}
 		<-ticker.C()
@@ -2242,7 +2251,7 @@ func (s *StoreDB) Stats() *DBStats {
 
 	return &DBStats{
 		Created: s.created,
-		Updated: s.clock.Now().UTC(),
+		Updated: s.clockOrReal().Now().UTC(),
 		Storage: &DBStorageStats{
 			Empty:    isEmpty,
 			DiskSize: diskSize,
