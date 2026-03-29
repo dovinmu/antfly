@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/antflydb/antfly/pkg/operator/bootstrap"
 	"github.com/antflydb/antfly/pkg/operator/controllers"
 	webhookv1 "github.com/antflydb/antfly/pkg/operator/internal/webhook/v1"
+	"github.com/antflydb/antfly/pkg/operator/manifests"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
@@ -47,6 +49,9 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var skipCRDInstall bool
+	var printInstallManifests bool
+	var installOperatorImage string
+	var installIncludeCRDs bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -54,12 +59,31 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&skipCRDInstall, "skip-crd-install", false,
 		"Skip automatic CRD installation (use if CRDs managed externally)")
+	flag.BoolVar(&printInstallManifests, "print-install-manifests", false,
+		"Print a self-contained operator install manifest bundle and exit")
+	flag.StringVar(&installOperatorImage, "install-operator-image", "",
+		"Operator image to use when printing install manifests")
+	flag.BoolVar(&installIncludeCRDs, "install-include-crds", true,
+		"Include CRDs when printing install manifests")
 	opts := zap.Options{
 		Development: false,
 		TimeEncoder: zapcore.RFC3339TimeEncoder,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if printInstallManifests {
+		installYAML, err := manifests.OperatorInstallYAML(manifests.InstallOptions{
+			OperatorImage: installOperatorImage,
+			IncludeCRDs:   installIncludeCRDs,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "print install manifests: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(installYAML)
+		return
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 

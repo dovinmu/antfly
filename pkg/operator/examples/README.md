@@ -6,7 +6,8 @@ This directory contains example configurations for deploying Antfly database clu
 
 1. **Deploy the operator** (if not already deployed):
    ```bash
-   kubectl apply -f deploy/install.yaml
+   cd pkg/operator
+   go run ./cmd/antfly-operator --print-install-manifests | kubectl apply -f -
    ```
 
 2. **Choose an example** and deploy it:
@@ -333,4 +334,5 @@ kubectl delete antflycluster simple-antfly-cluster
 
 To remove the operator:
 ```bash
-kubectl delete -f deploy/install.yaml
+cd pkg/operator
+go run ./cmd/antfly-operator --print-install-manifests | kubectl delete -f - --ignore-not-found=true

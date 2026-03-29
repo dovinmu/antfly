@@ -10,9 +10,9 @@ A cloud-native Kubernetes operator for deploying and managing [Antfly](https://g
 Deploy the operator and create your first database cluster in under 60 seconds:
 
 ```bash
-# 1. Copy and deploy the operator
-cp deploy/example_install.yaml deploy/install.yaml
-kubectl apply -f ./deploy/install.yaml
+# 1. Deploy the operator
+cd pkg/operator
+go run ./cmd/antfly-operator --print-install-manifests | kubectl apply -f -
 
 # 2. Create a database cluster
 kubectl create namespace antfly-dev-ns
@@ -73,6 +73,7 @@ That's it! You now have a highly available Antfly database cluster running in Ku
 
 - **metrics-server** (required for autoscaling features)
 - **Istio or Linkerd** (for service mesh integration)
+- **cert-manager** (required for the bundled validating webhook install path)
 
 #### Validation Commands
 
@@ -88,29 +89,37 @@ kubectl get storageclass
 
 ### Installation
 
-The operator requires a custom installation manifest tailored to your environment. Use the example as a starting point:
+The operator now exposes a self-contained install bundle directly from the manager binary:
 
 ```bash
-# 1. Copy the example installation manifest
-cp deploy/example_install.yaml deploy/install.yaml
+# 1. Generate and apply the default install bundle
+go run ./cmd/antfly-operator --print-install-manifests | kubectl apply -f -
 
-# 2. Customize the manifest (optional - review and adjust as needed):
-#    - Container image version/registry
-#    - Resource limits for operator pod
-#    - Namespace names
-#    - RBAC permissions
-
-# 3. Deploy the operator
-kubectl apply -f ./deploy/install.yaml
+# 2. Or write it out first so you can review or patch it
+go run ./cmd/antfly-operator --print-install-manifests > install.yaml
+kubectl apply -f ./install.yaml
 ```
 
 This installs:
 - **Namespace**: `antfly-operator-namespace`
-- **Custom Resource Definitions** (CRDs): `AntflyCluster`
+- **Custom Resource Definitions** (CRDs): `AntflyCluster`, `AntflyBackup`, `AntflyRestore`, `AntflyServerlessProject`
 - **RBAC** roles and bindings
 - **Operator Deployment**: Uses container image `ghcr.io/antflydb/antfly-operator:latest`
+- **Validating webhooks** and cert-manager resources for admission
 
-See `deploy/example_install.yaml` for the complete installation manifest structure.
+Useful flags:
+
+```bash
+# Use a different operator image
+go run ./cmd/antfly-operator --print-install-manifests \
+  --install-operator-image ghcr.io/antflydb/antfly-operator:vNEXT
+
+# Omit CRDs if they are managed separately
+go run ./cmd/antfly-operator --print-install-manifests \
+  --install-include-crds=false
+```
+
+The generated manifest is the supported install surface; it stays aligned with the embedded CRDs, RBAC, Deployment, and webhook resources.
 
 ### RBAC Requirements
 
@@ -210,6 +219,7 @@ kubectl get pods -n antfly-operator-namespace
 
 # Check CRDs are installed
 kubectl get crd antflyclusters.antfly.io
+kubectl get crd antflyserverlessprojects.antfly.io
 ```
 
 ## 🔐 Container Image Verification

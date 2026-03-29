@@ -7,6 +7,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+// +kubebuilder:webhook:path=/validate-antfly-io-v1-antflyserverlessproject,mutating=false,failurePolicy=fail,sideEffects=None,groups=antfly.io,resources=antflyserverlessprojects,verbs=create;update,versions=v1,name=vantflyserverlessproject.kb.io,admissionReviewVersions=v1
+
 // AntflyServerlessProjectValidator implements admission.Validator for AntflyServerlessProject.
 type AntflyServerlessProjectValidator struct{}
 
