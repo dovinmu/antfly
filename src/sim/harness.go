@@ -26,6 +26,7 @@ import (
 	"github.com/antflydb/antfly/src/tablemgr"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 type HarnessConfig struct {
@@ -176,9 +177,9 @@ func NewHarness(cfg HarnessConfig) (*Harness, error) {
 	}
 	if h.logger == nil {
 		if os.Getenv("ANTFLY_SIM_DEBUG_LOG") == "1" {
-			h.logger = zap.Must(zap.NewDevelopment())
+			h.logger = zap.Must(zap.NewDevelopment(zap.WithFatalHook(zapcore.WriteThenPanic)))
 		} else {
-			h.logger = zap.NewNop()
+			h.logger = zap.New(zapcore.NewNopCore(), zap.WithFatalHook(zapcore.WriteThenPanic))
 		}
 	}
 	metadataProxy := &metadataDBProxy{

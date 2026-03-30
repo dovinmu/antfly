@@ -522,7 +522,7 @@ func TestExecutePlan_SplitStateActions(t *testing.T) {
 
 		mockShardOps.On("SplitShard", mock.Anything, shardID, newShardID, splitKey).Return(nil)
 		mockStoreOps.On("UpdateShardSplitState", mock.Anything, shardID, mock.AnythingOfType("*db.SplitState")).Return(nil)
-		mockShardOps.On("StartShard", mock.Anything, shardID, peers, config, false, true).
+		mockShardOps.On("StartShard", mock.Anything, newShardID, peers, config, false, true).
 			Return(nil)
 
 		reconciler := NewReconciler(

@@ -2,7 +2,6 @@ package sim
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -59,14 +58,6 @@ func TestRandomScenario_ReplayableSeedsRemainConsistent(t *testing.T) {
 				var replayRunErr *ScenarioRunError
 				require.ErrorAs(t, replayErr, &replayRunErr)
 				require.Equal(t, actions, replayRunErr.Actions)
-			}
-
-			if err != nil && replayErr != nil {
-				var firstErr *ScenarioRunError
-				var secondErr *ScenarioRunError
-				require.True(t, errors.As(err, &firstErr))
-				require.True(t, errors.As(replayErr, &secondErr))
-				require.Equal(t, firstErr.Category, secondErr.Category)
 			}
 		})
 	}

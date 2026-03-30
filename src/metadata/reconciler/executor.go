@@ -413,10 +413,10 @@ func (r *Reconciler) executeSplitStateActions(
 			}
 
 			// Start the new shard config on the peers
-			if err := r.shardOps.StartShard(ctx, action.ShardID, action.PeersToStart, action.ShardConfig, false, true); err != nil {
+			if err := r.shardOps.StartShard(ctx, action.NewShardID, action.PeersToStart, action.ShardConfig, false, true); err != nil {
 				r.logger.Warn(
 					"Failed to start shard after split",
-					zap.Stringer("shardID", action.ShardID),
+					zap.Stringer("newShardID", action.NewShardID),
 					zap.Error(err),
 				)
 			}
