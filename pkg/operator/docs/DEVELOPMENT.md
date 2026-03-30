@@ -37,6 +37,22 @@ make run
 
 ## 🔄 Development Workflow
 
+The operator now manages both:
+
+- stateful `AntflyCluster` workloads
+- table-first serverless `AntflyServerlessProject` workloads
+
+For serverless, the operator expects:
+
+- proxy image: `ghcr.io/antflydb/antfly-proxy:<tag>`
+- shared Zig runtime image: `ghcr.io/antflydb/antfly:zig`
+
+And it runs the Zig image with role-specific args:
+
+- `antfly serverless api`
+- `antfly serverless query`
+- `antfly serverless maintenance`
+
 ### Quick Development Cycle
 
 ```bash
