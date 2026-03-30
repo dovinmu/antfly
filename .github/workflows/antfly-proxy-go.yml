@@ -1,0 +1,80 @@
+# Antfly Proxy CI workflow
+# Runs focused proxy checks and smoke-builds Dockerfile.proxy on PRs/pushes.
+
+name: Antfly Proxy Tests
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "Dockerfile.proxy"
+      - "cmd/antfly/**"
+      - "pkg/proxy/**"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - ".github/workflows/antfly-proxy-*.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "Dockerfile.proxy"
+      - "cmd/antfly/**"
+      - "pkg/proxy/**"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - ".github/workflows/antfly-proxy-*.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proxy:
+    runs-on: codebuild-GitHubActionsRunnerAntflyAntflyDB-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - name: Set Go experiment
+        run: echo "GOEXPERIMENT=simd" >> $GITHUB_ENV
+
+      - name: Verify Go version
+        run: go version
+
+      - name: Verify Go modules
+        run: go mod download
+
+      - name: Run proxy unit tests
+        run: go test ./pkg/proxy ./cmd/antfly/cmd
+
+      - name: Build antfly CLI
+        run: go build -v -o antfly ./cmd/antfly
+
+      - name: Smoke test proxy CLI
+        run: ./antfly proxy --help >/dev/null
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Smoke build proxy image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.proxy
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: antfly-proxy:ci
+          cache-from: type=gha,scope=antfly-proxy-ci
+          cache-to: type=gha,mode=max,scope=antfly-proxy-ci
