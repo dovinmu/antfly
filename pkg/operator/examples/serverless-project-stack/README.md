@@ -39,6 +39,13 @@ kubectl port-forward deployment/docs-serverless-proxy 8080:8080
 ## Verify Public Table API
 
 ```bash
+# Ingest
+curl -X PUT \
+  -H 'Authorization: Bearer token-2' \
+  -H 'Content-Type: application/json' \
+  'http://127.0.0.1:8080/v1/tenants/tenant-a/tables/docs/ingest-batch' \
+  -d '{"records":[{"id":"doc-1","body":{"title":"Antfly"}}]}'
+
 # Search
 curl -H 'Authorization: Bearer token-1' \
   'http://127.0.0.1:8080/v1/tenants/tenant-a/tables/docs/query/search?q=antfly'

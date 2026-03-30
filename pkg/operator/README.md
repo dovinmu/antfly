@@ -160,6 +160,12 @@ Typical images:
 - proxy: `ghcr.io/antflydb/antfly-proxy:<tag>`
 - zig runtime: `ghcr.io/antflydb/antfly:zig`
 
+The operator runs the same Zig image for three serverless roles:
+
+- `antfly serverless api`
+- `antfly serverless query`
+- `antfly serverless maintenance`
+
 Local build helpers:
 
 ```bash

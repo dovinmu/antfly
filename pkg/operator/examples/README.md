@@ -52,6 +52,13 @@ kubectl apply -k examples/serverless-project-stack
 
 **Public API examples:**
 ```bash
+# Ingest
+curl -X PUT \
+  -H 'Authorization: Bearer token-2' \
+  -H 'Content-Type: application/json' \
+  'http://<proxy-host>/v1/tenants/tenant-a/tables/docs/ingest-batch' \
+  -d '{"records":[{"id":"doc-1","body":{"title":"Antfly"}}]}'
+
 # Search
 curl -H 'Authorization: Bearer token-1' \
   'http://<proxy-host>/v1/tenants/tenant-a/tables/docs/query/search?q=antfly'

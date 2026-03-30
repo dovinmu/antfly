@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -314,5 +315,57 @@ func TestGatewayServeHTTPProxyForwardNormalizesGraphResponse(t *testing.T) {
 	}
 	if payload["total"].(float64) != 1 {
 		t.Fatalf("unexpected total: %#v", payload)
+	}
+}
+
+func TestGatewayServeHTTPProxyForwardRoutesServerlessWritesToAPI(t *testing.T) {
+	apiBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("unexpected method %q", r.Method)
+		}
+		if r.URL.Path != "/tables/docs/ingest-batch" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Fatalf("authorization header not forwarded")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"accepted":1}`))
+	}))
+	defer apiBackend.Close()
+
+	gateway := NewGateway(NewRouter([]NamespaceRoute{
+		{
+			Tenant:             "t1",
+			Table:              "docs",
+			Namespace:          "docs",
+			AllowStateful:      false,
+			AllowServerless:    true,
+			ServerlessQueryURL: "http://serverless-query.invalid",
+			ServerlessAPIURL:   apiBackend.URL,
+		},
+	}))
+	gateway.authenticator = StaticBearerAuthenticator{
+		Required: true,
+		Tokens: map[string]Principal{
+			"test-token": {Subject: "user-1", Tenant: "t1", AllowedTables: []string{"docs"}, AllowedOperations: []OperationKind{OperationWrite}},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/v1/tenants/t1/tables/docs/ingest-batch", strings.NewReader(`{"records":[{"id":"doc-1"}]}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	gateway.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-Antfly-Backend") != string(BackendServerless) {
+		t.Fatalf("missing normalized backend header")
+	}
+	if rec.Body.String() != `{"accepted":1}` {
+		t.Fatalf("unexpected body %q", rec.Body.String())
 	}
 }
