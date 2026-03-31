@@ -16,6 +16,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/antflydb/antfly/lib/types"
 	"github.com/antflydb/antfly/src/common"
+	"github.com/antflydb/antfly/src/snapstore"
 	"github.com/antflydb/antfly/src/store/db"
 	"github.com/cockroachdb/pebble/v2"
 	"github.com/puzpuzpuz/xsync/v4"
@@ -139,6 +141,35 @@ func TestStopRaftGroup_ConcurrentStops(t *testing.T) {
 	for i, err := range errs {
 		assert.ErrorIs(t, err, ErrShardInitializing, "goroutine %d", i)
 	}
+}
+
+func TestStartRaftGroup_FailedSplitStartPreservesInitArchive(t *testing.T) {
+	s := newTestStore(t)
+	s.antflyConfig.SwarmMode = true
+
+	shardID := types.ID(42)
+	snapID := common.SplitArchive(shardID)
+
+	snapStore, err := snapstore.NewLocalSnapStore(s.antflyConfig.GetBaseDir(), shardID, s.ID())
+	require.NoError(t, err)
+
+	archivePath, err := snapStore.Path(snapID)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(archivePath, []byte("not a valid archive"), 0o644))
+
+	err = s.StartRaftGroup(shardID, nil, false, &ShardStartConfig{
+		ShardConfig: ShardConfig{
+			ByteRange: types.Range{[]byte("a"), []byte("z")},
+		},
+		InitWithDBArchive: snapID,
+	})
+	require.Error(t, err)
+
+	_, statErr := os.Stat(archivePath)
+	require.NoError(t, statErr, "failed split start should preserve the init archive for retry")
+
+	_, ok := s.shardsMap.Load(shardID)
+	require.False(t, ok, "failed shard start should remove the initializing shard placeholder")
 }
 
 // TestStoreClose_ErrorCGoroutineStopped verifies that Store.Close cancels

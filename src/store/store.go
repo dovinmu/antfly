@@ -685,7 +685,9 @@ func (m *Store) StartRaftGroup(
 		// FIXME (ajr) Only remove the directories if we failed to start the raft group from scratch (on restart we might lose everything)
 		// Now safe to remove directories since Raft has stopped
 		_ = os.RemoveAll(common.StorageDBDir(dataDir, shardID, m.config.ID)) //nolint:gosec // G703: path from internal config
-		_ = snapStore.RemoveAll(context.Background())
+		if conf.InitWithDBArchive == "" {
+			_ = snapStore.RemoveAll(context.Background())
+		}
 		_ = os.RemoveAll(common.RaftLogDir(dataDir, shardID, m.config.ID)) //nolint:gosec // G703: path from internal config
 		lg.Warn("Error starting raft group", zap.Error(err2))
 		return fmt.Errorf("creating dbwrapper: %w", err2)
