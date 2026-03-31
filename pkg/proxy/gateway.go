@@ -1,8 +1,24 @@
+// Copyright 2025 Antfly, Inc.
+//
+// Licensed under the Elastic License 2.0 (ELv2); you may not use this file
+// except in compliance with the Elastic License 2.0. You may obtain a copy of
+// the Elastic License 2.0 at
+//
+//     https://www.antfly.io/licensing/ELv2-license
+//
+// Unless required by applicable law or agreed to in writing, software distributed
+// under the Elastic License 2.0 is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+// Elastic License 2.0 for the specific language governing permissions and
+// limitations.
+
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -25,13 +41,34 @@ type ResolvedTarget struct {
 	RequireGraph     bool        `json:"require_graph"`
 }
 
+type GatewayConfig struct {
+	Router        *Router
+	Authenticator Authenticator
+	Authorizer    Authorizer
+	Forwarder     BackendForwarder
+}
+
 func NewGateway(router *Router) *Gateway {
-	return &Gateway{
-		router:        router,
-		authenticator: StaticBearerAuthenticator{},
-		authorizer:    TenantAuthorizer{},
-		forwarder:     HTTPBackendForwarder{},
+	return NewGatewayFromConfig(GatewayConfig{Router: router})
+}
+
+func NewGatewayFromConfig(cfg GatewayConfig) *Gateway {
+	g := &Gateway{
+		router:        cfg.Router,
+		authenticator: cfg.Authenticator,
+		authorizer:    cfg.Authorizer,
+		forwarder:     cfg.Forwarder,
 	}
+	if g.authenticator == nil {
+		g.authenticator = StaticBearerAuthenticator{}
+	}
+	if g.authorizer == nil {
+		g.authorizer = TenantAuthorizer{}
+	}
+	if g.forwarder == nil {
+		g.forwarder = HTTPBackendForwarder{}
+	}
+	return g
 }
 
 func (g *Gateway) Resolve(req RequestContext) (*ResolvedTarget, error) {
@@ -114,6 +151,34 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if err := g.authorizer.Authorize(principal, req, route); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
+	}
+
+	if req.Operation == OperationRead && len(principal.RowFilter) > 0 {
+		table := firstNonEmpty(req.Table, route.TableName())
+		if secFilter := resolveRowFilter(principal.RowFilter, table); secFilter != nil {
+			var injectErr error
+			if isAgentPath(req.BackendPath) {
+				body, readErr := io.ReadAll(r.Body)
+				if readErr != nil {
+					http.Error(w, "failed to read request body", http.StatusInternalServerError)
+					return
+				}
+				r.Body.Close()
+				modified, modErr := injectFilterIntoAgentBody(body, secFilter)
+				if modErr != nil {
+					injectErr = modErr
+				} else {
+					r.Body = io.NopCloser(bytes.NewReader(modified))
+					r.ContentLength = int64(len(modified))
+				}
+			} else {
+				injectErr = injectRowFilterIntoRequest(r, secFilter)
+			}
+			if injectErr != nil {
+				http.Error(w, "failed to inject row filter", http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	targetBaseURL, err := adapter.BaseURL(req, route)

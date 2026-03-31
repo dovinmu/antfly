@@ -1,3 +1,17 @@
+// Copyright 2025 Antfly, Inc.
+//
+// Licensed under the Elastic License 2.0 (ELv2); you may not use this file
+// except in compliance with the Elastic License 2.0. You may obtain a copy of
+// the Elastic License 2.0 at
+//
+//     https://www.antfly.io/licensing/ELv2-license
+//
+// Unless required by applicable law or agreed to in writing, software distributed
+// under the Elastic License 2.0 is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+// Elastic License 2.0 for the specific language governing permissions and
+// limitations.
+
 package proxy
 
 import (
@@ -85,29 +99,33 @@ func NewGatewayFromEnv(getenv func(string) string) (*Gateway, error) {
 		catalog = NewStaticCatalog(cfg.Routes)
 	}
 	router := NewRouterWithCatalog(catalog)
-	gateway := NewGateway(router)
+	var authenticator Authenticator
 	if cfg.TokensFile != "" || len(cfg.Tokens) > 0 {
-		gateway.authenticator = &ReloadingBearerAuthenticator{
+		authenticator = &ReloadingBearerAuthenticator{
 			Required:     cfg.RequireAuth,
 			Path:         cfg.TokensFile,
 			StaticTokens: cfg.Tokens,
 		}
 	} else {
-		gateway.authenticator = StaticBearerAuthenticator{
+		authenticator = StaticBearerAuthenticator{
 			Required: cfg.RequireAuth,
 			Tokens:   cfg.Tokens,
 		}
 	}
-	return gateway, nil
+	return NewGatewayFromConfig(GatewayConfig{
+		Router:        router,
+		Authenticator: authenticator,
+	}), nil
 }
 
 type bearerTokenPrincipal struct {
-	Subject    string   `json:"subject"`
-	Tenant     string   `json:"tenant"`
-	Admin      bool     `json:"admin"`
-	Tables     []string `json:"tables"`
-	Namespaces []string `json:"namespaces"`
-	Operations []string `json:"operations"`
+	Subject    string                        `json:"subject"`
+	Tenant     string                        `json:"tenant"`
+	Admin      bool                          `json:"admin"`
+	Tables     []string                      `json:"tables"`
+	Namespaces []string                      `json:"namespaces"`
+	Operations []string                      `json:"operations"`
+	RowFilter  map[string]json.RawMessage    `json:"row_filter,omitempty"`
 }
 
 func parseBearerTokensJSON(raw string) (map[string]Principal, error) {
@@ -127,6 +145,7 @@ func parseBearerTokensJSON(raw string) (map[string]Principal, error) {
 			AllowedTables:     append([]string(nil), principal.Tables...),
 			AllowedNamespaces: append([]string(nil), principal.Namespaces...),
 			AllowedOperations: parseOperationKinds(principal.Operations),
+			RowFilter:         principal.RowFilter,
 		}
 	}
 	return tokens, nil
