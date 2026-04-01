@@ -297,7 +297,7 @@ func (r *AntflyServerlessProjectReconciler) reconcileProxyConfigMap(ctx context.
 			return err
 		}
 		configMap.Labels = serverlessPodLabels(project.Name, serverlessComponentProxy)
-		configMap.Data = map[string]string{
+		configMap.Data = map[string]string{ //nolint:gosec // env var names, not credentials
 			"routes.json":                           routesJSON,
 			"ANTFLY_PROXY_ROUTES_JSON":              routesJSON,
 			"ANTFLY_PROXY_ROUTES_FILE":              "/etc/antfly-proxy/routes.json",

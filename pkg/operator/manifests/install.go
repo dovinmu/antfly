@@ -18,7 +18,7 @@ const (
 	webhookServiceName   = "antfly-operator-webhook-service"
 	webhookCertName      = "antfly-operator-serving-cert"
 	webhookIssuerName    = "selfsigned-issuer"
-	webhookSecretName    = "webhook-server-cert"
+	webhookSecretName    = "webhook-server-cert" //nolint:gosec // resource name, not a credential
 )
 
 // InstallOptions controls the generated install manifest bundle.
