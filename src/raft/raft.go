@@ -497,11 +497,12 @@ func (rc *raftNode) loadSnapshot(ctx context.Context) (string, error) {
 				zap.String("archiveID", rc.initWithStorageSnapshot),
 			)
 			if err := rc.fetchInitialStorageSnapshot(ctx, rc.initWithStorageSnapshot); err != nil {
-				rc.logger.Fatal(
+				rc.logger.Error(
 					"Failed to fetch initial snapshot",
 					zap.String("snapshotID", rc.initWithStorageSnapshot),
 					zap.Error(err),
 				)
+				return "", fmt.Errorf("fetching initial snapshot %s: %w", rc.initWithStorageSnapshot, err)
 			}
 			return rc.initWithStorageSnapshot, nil
 		}
