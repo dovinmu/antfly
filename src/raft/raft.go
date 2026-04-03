@@ -128,6 +128,7 @@ type raftNode struct {
 	transport Transport
 	stopc     chan struct{} // signals proposal channel closed
 	stopOnce  sync.Once
+	stopped   chan struct{}
 
 	serveCtxMu     sync.Mutex
 	serveCtxCancel context.CancelFunc
@@ -167,6 +168,11 @@ func (r *raftNode) SetLeaderFactory(f func(ctx context.Context) error) {
 
 func (r *raftNode) Shutdown() {
 	r.requestStop()
+	if r.stopped == nil {
+		r.stop()
+		return
+	}
+	<-r.stopped
 }
 
 // GetConfChangeCallback returns the channel for a registered conf change callback.
@@ -298,6 +304,7 @@ func NewRaftNode(logger *zap.Logger, shardID types.ID, id types.ID,
 		createStorageSnapshot:     createStorageSnapshot,
 		snapCount:                 DefaultSnapshotCount,
 		stopc:                     make(chan struct{}),
+		stopped:                   make(chan struct{}),
 		confChangeCallbacks:       xsync.NewMap[uuid.UUID, chan struct{}](),
 
 		logger: logger.Named("raft"),
@@ -761,7 +768,8 @@ func (rc *raftNode) startRaft() {
 	go rc.serveChannels(context.TODO())
 }
 
-// stop closes http, closes all channels, and stops raft.
+// stop closes http, closes all channels, and stops raft. It must only run
+// after serveChannels has exited.
 func (rc *raftNode) stop() {
 	// Stop leader work first, before tearing down node/storage it may depend on.
 	if rc.leaderEg != nil {
@@ -775,13 +783,6 @@ func (rc *raftNode) stop() {
 	rc.logger.Info("Raft node stopping")
 	rc.transport.StopServeRaft(rc.shardID)
 
-	rc.errorMu.Lock()
-	if rc.errorC != nil {
-		close(rc.errorC)
-		rc.errorC = nil
-	}
-	rc.errorMu.Unlock()
-
 	rc.nodeMu.RLock()
 	node := rc.node
 	rc.nodeMu.RUnlock()
@@ -794,7 +795,16 @@ func (rc *raftNode) stop() {
 			rc.logger.Error("Error closing Pebble storage", zap.Error(err))
 		}
 	}
+	rc.errorMu.Lock()
+	if rc.errorC != nil {
+		close(rc.errorC)
+		rc.errorC = nil
+	}
+	rc.errorMu.Unlock()
 	rc.logger.Info("Closed raft log storage")
+	if rc.stopped != nil {
+		close(rc.stopped)
+	}
 }
 
 func (rc *raftNode) requestStop() {
@@ -807,7 +817,6 @@ func (rc *raftNode) requestStop() {
 			cancel()
 		}
 		close(rc.stopc)
-		rc.stop()
 	})
 }
 
@@ -1050,7 +1059,7 @@ func (rc *raftNode) serveChannels(ctx context.Context) {
 	rc.logger.Info("Initialized from snapshot", zap.Uint64("index", rc.snapshotIndex.Load()))
 	ticker := rc.clock.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	defer rc.requestStop()
+	defer rc.stop()
 	// send proposals over raft
 	go func() {
 		confChangeCount := uint64(0)
