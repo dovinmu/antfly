@@ -84,11 +84,12 @@ func (ms *MetadataStore) leaderClientForShard(
 		// store status no longer contains the shard (or never finished starting it).
 		// In that case, fall back to another healthy replica that does report it.
 		if len(status.ReportedBy) > 0 && !status.ReportedBy.Contains(nodeID) {
+			candidateIDs := make([]types.ID, 0, len(status.ReportedBy))
 			for reportedNode := range status.ReportedBy {
-				reportingClient, ok := ms.storeClientIfServingShard(ctx, reportedNode, shardID)
-				if ok {
-					return reportingClient, nil
-				}
+				candidateIDs = append(candidateIDs, reportedNode)
+			}
+			if reportingClient, ok := ms.bestServingShardClient(ctx, shardID, candidateIDs...); ok {
+				return reportingClient, nil
 			}
 			return nil, fmt.Errorf(
 				"leader %s has not reported shard %s and no other healthy node found: %w",
@@ -106,11 +107,12 @@ func (ms *MetadataStore) leaderClientForShard(
 		if len(peersToCheck) == 0 {
 			peersToCheck = status.Peers
 		}
+		candidateIDs := make([]types.ID, 0, len(peersToCheck))
 		for peerID := range peersToCheck {
-			reportingClient, ok := ms.storeClientIfServingShard(ctx, peerID, shardID)
-			if ok {
-				return reportingClient, nil
-			}
+			candidateIDs = append(candidateIDs, peerID)
+		}
+		if reportingClient, ok := ms.bestServingShardClient(ctx, shardID, candidateIDs...); ok {
+			return reportingClient, nil
 		}
 		// If no peers are known yet (e.g., table just created and store hasn't
 		// reported the shard), fall back to any healthy registered store.
@@ -131,21 +133,19 @@ func (ms *MetadataStore) leaderClientForShard(
 		}
 		return nil, fmt.Errorf("no healthy peer found for shard %s: %w", shardID, client.ErrNoHealthyPeer)
 	}
-	reportingClient, ok := ms.storeClientIfServingShard(ctx, nodeID, shardID)
-	if ok {
+	reportingClient, ok, leaderEmpty := ms.storeClientIfServingShard(ctx, nodeID, shardID)
+	if ok && !leaderEmpty {
 		return reportingClient, nil
 	}
 
 	// Leader is not available (removed or unreachable). Fall back to any other
 	// node that has reported having the shard.
+	candidateIDs := make([]types.ID, 0, len(status.ReportedBy)+len(status.Peers))
 	for reportedNode := range status.ReportedBy {
 		if reportedNode == nodeID {
 			continue // Already tried the leader
 		}
-		reportingClient, ok := ms.storeClientIfServingShard(ctx, reportedNode, shardID)
-		if ok {
-			return reportingClient, nil
-		}
+		candidateIDs = append(candidateIDs, reportedNode)
 	}
 
 	// Also try Peers if ReportedBy didn't work
@@ -153,10 +153,13 @@ func (ms *MetadataStore) leaderClientForShard(
 		if peerID == nodeID || status.ReportedBy.Contains(peerID) {
 			continue // Already tried
 		}
-		reportingClient, ok := ms.storeClientIfServingShard(ctx, peerID, shardID)
-		if ok {
-			return reportingClient, nil
-		}
+		candidateIDs = append(candidateIDs, peerID)
+	}
+	if reportingClient, ok := ms.bestServingShardClient(ctx, shardID, candidateIDs...); ok {
+		return reportingClient, nil
+	}
+	if ok {
+		return reportingClient, nil
 	}
 
 	return nil, fmt.Errorf(
@@ -171,23 +174,60 @@ func (ms *MetadataStore) storeClientIfServingShard(
 	ctx context.Context,
 	nodeID types.ID,
 	shardID types.ID,
-) (client.StoreRPC, bool) {
+) (client.StoreRPC, bool, bool) {
 	storeStatus, err := ms.tm.GetStoreStatus(ctx, nodeID)
 	if err != nil || !storeStatus.IsReachable() {
-		return nil, false
+		return nil, false, false
 	}
 	// Treat an explicit shard map as authoritative. If the node currently
 	// reports some shards and this shard is absent, don't route to it.
 	if len(storeStatus.Shards) > 0 {
 		shardInfo, ok := storeStatus.Shards[shardID]
 		if !ok {
-			return nil, false
+			return nil, false, false
 		}
 		if !shardInfoCanServeRead(shardInfo) {
-			return nil, false
+			return nil, false, false
+		}
+		return storeStatus.StoreClient, true, shardInfoAppearsEmpty(shardInfo)
+	}
+	return storeStatus.StoreClient, true, false
+}
+
+func shardInfoAppearsEmpty(shardInfo *store.ShardInfo) bool {
+	if shardInfo == nil || shardInfo.ShardStats == nil || shardInfo.ShardStats.Storage == nil {
+		return false
+	}
+	return shardInfo.ShardStats.Storage.Empty
+}
+
+func (ms *MetadataStore) bestServingShardClient(
+	ctx context.Context,
+	shardID types.ID,
+	candidateIDs ...types.ID,
+) (client.StoreRPC, bool) {
+	var emptyFallback client.StoreRPC
+	seen := make(map[types.ID]struct{}, len(candidateIDs))
+	for _, nodeID := range candidateIDs {
+		if _, ok := seen[nodeID]; ok {
+			continue
+		}
+		seen[nodeID] = struct{}{}
+		c, ok, empty := ms.storeClientIfServingShard(ctx, nodeID, shardID)
+		if !ok {
+			continue
+		}
+		if !empty {
+			return c, true
+		}
+		if emptyFallback == nil {
+			emptyFallback = c
 		}
 	}
-	return storeStatus.StoreClient, true
+	if emptyFallback != nil {
+		return emptyFallback, true
+	}
+	return nil, false
 }
 
 func shardInfoCanServeRead(shardInfo *store.ShardInfo) bool {
@@ -308,19 +348,19 @@ func (ms *MetadataStore) leaderClientForShardWithEffectiveID(
 		// fetch, but this is safe — unhealthy nodes fail the reachable check.
 		if errors.Is(err, ErrNoLeaderElected) {
 			// Try ReportedBy nodes first (confirmed to have the shard data)
+			candidateIDs := make([]types.ID, 0, len(status.ReportedBy)+len(status.Peers))
 			for reportedNode := range status.ReportedBy {
-				if c, ok := ms.storeClientIfServingShard(ctx, reportedNode, shardID); ok {
-					return shardID, c, nil
-				}
+				candidateIDs = append(candidateIDs, reportedNode)
 			}
 			// Fall back to Raft voter peers if no ReportedBy node is available
 			for peerID := range status.Peers {
 				if status.ReportedBy.Contains(peerID) {
 					continue // Already tried above
 				}
-				if c, ok := ms.storeClientIfServingShard(ctx, peerID, shardID); ok {
-					return shardID, c, nil
-				}
+				candidateIDs = append(candidateIDs, peerID)
+			}
+			if c, ok := ms.bestServingShardClient(ctx, shardID, candidateIDs...); ok {
+				return shardID, c, nil
 			}
 		}
 		return 0, nil, err
@@ -447,12 +487,21 @@ func (ms *MetadataStore) leaderClientForShardNoFallback(
 		return 0, nil, ErrNoLeaderElected
 	}
 
-	// Get client using regular logic
-	c, err = ms.leaderClientForShard(ctx, shardID)
-	if err != nil {
-		return 0, nil, err
+	if leaderClient, leaderErr := ms.selfReportedLeaderClientForShard(ctx, shardID, nil); leaderErr == nil {
+		return shardID, leaderClient, nil
 	}
-	return shardID, c, nil
+	if status.RaftStatus == nil {
+		return 0, nil, fmt.Errorf("no raft status available for shard: %w", client.ErrNoRaftStatus)
+	}
+	if status.RaftStatus.Lead == 0 {
+		return 0, nil, ErrNoLeaderElected
+	}
+	var reachable bool
+	c, reachable, err = ms.tm.GetStoreClient(ctx, status.RaftStatus.Lead)
+	if err == nil && reachable {
+		return shardID, c, nil
+	}
+	return 0, nil, ErrNoLeaderElected
 }
 
 // directLeaderClientForShardBypassesSplitFallback returns the shard's own leader

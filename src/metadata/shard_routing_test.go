@@ -1774,6 +1774,72 @@ func TestLeaderClientForShard_InitializingLeaderFallsBackToReadyReporter(t *test
 	assert.Equal(t, follower, gotClient.ID())
 }
 
+func TestLeaderClientForShardNoFallback_NonSplitUsesSelfReportedLeader(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	shardID := types.ID(100)
+	staleLeader := types.ID(1)
+	actualLeader := types.ID(2)
+
+	status := newShardStatus(shardID, staleLeader, []types.ID{staleLeader, actualLeader}, []types.ID{staleLeader, actualLeader})
+	writeShardStatus(t, db, status)
+	writeStoreStatusWithShards(t, db, staleLeader, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			Initializing: false,
+			RaftStatus: &common.RaftStatus{
+				Lead:   actualLeader,
+				Voters: common.NewPeerSet(staleLeader, actualLeader),
+			},
+		},
+	})
+	writeStoreStatusWithShards(t, db, actualLeader, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			Initializing: false,
+			RaftStatus: &common.RaftStatus{
+				Lead:   actualLeader,
+				Voters: common.NewPeerSet(staleLeader, actualLeader),
+			},
+		},
+	})
+
+	_, gotClient, err := ms.leaderClientForShardNoFallback(context.Background(), shardID)
+	require.NoError(t, err)
+	assert.NotNil(t, gotClient)
+	assert.Equal(t, actualLeader, gotClient.ID())
+}
+
+func TestLeaderClientForShard_EmptyLeaderFallsBackToNonEmptyReporter(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	shardID := types.ID(100)
+	leaderNode := types.ID(1)
+	follower := types.ID(2)
+
+	status := newShardStatus(shardID, leaderNode, []types.ID{leaderNode, follower}, []types.ID{leaderNode, follower})
+	writeShardStatus(t, db, status)
+	writeStoreStatusWithShards(t, db, leaderNode, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			Initializing: false,
+			ShardStats: &storedb.DBStats{
+				Storage: &storedb.DBStorageStats{Empty: true},
+			},
+		},
+	})
+	writeStoreStatusWithShards(t, db, follower, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			Initializing: false,
+			ShardStats: &storedb.DBStats{
+				Storage: &storedb.DBStorageStats{Empty: false},
+			},
+		},
+	})
+
+	gotClient, err := ms.leaderClientForShard(context.Background(), shardID)
+	require.NoError(t, err)
+	assert.NotNil(t, gotClient)
+	assert.Equal(t, follower, gotClient.ID())
+}
+
 func TestLeaderClientForShard_NoLeader_ReturnsErrNoLeaderElected(t *testing.T) {
 	ms, db := setupTestMetadataStore(t)
 
