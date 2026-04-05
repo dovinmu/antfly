@@ -709,3 +709,31 @@ func TestCreateShardTransitionPlan_NodeInVotersButNotReported(t *testing.T) {
 	assert.Empty(plan.Starts, "Expected 0 starts")
 	require.Empty(plan.Transitions, "Expected 0 transitions - node 103 is already a voter")
 }
+
+// TestCreateShardTransitionPlan_DefersRemovalUntilPendingVoterReports ensures we
+// don't remove a healthy serving peer while the replacement peer is only present
+// in the Raft voter set and hasn't reported yet.
+func TestCreateShardTransitionPlan_DefersRemovalUntilPendingVoterReports(t *testing.T) {
+	assert := assert.New(t)
+
+	currentShards := map[types.ID]*store.ShardInfo{
+		types.ID(1): {
+			ShardConfig: store.ShardConfig{
+				ByteRange: [2][]byte{{0}, {1}},
+			},
+			Peers:      makeNodeIDs(101, 102, 103),
+			ReportedBy: makeNodeIDs(101, 102),
+			RaftStatus: &common.RaftStatus{
+				Voters: makeNodeIDs(101, 102, 103),
+			},
+		},
+	}
+	idealShards := makeShardInfos(map[uint64][]uint64{
+		1: {101, 103},
+	})
+
+	plan := CreateShardTransitionPlan(currentShards, idealShards)
+
+	assert.Empty(plan.Starts, "Expected 0 starts")
+	assert.Empty(plan.Transitions, "Expected removals to wait for pending voter 103 to report")
+}

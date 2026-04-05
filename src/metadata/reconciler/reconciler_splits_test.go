@@ -134,6 +134,47 @@ func TestComputeSplitTransitions(t *testing.T) {
 		assert.Empty(t, merges)
 	})
 
+	t.Run("shard with stale voters but missing healthy reporters is skipped", func(t *testing.T) {
+		shards := map[types.ID]*store.ShardStatus{
+			1: {
+				ShardInfo: store.ShardInfo{
+					RaftStatus: &common.RaftStatus{
+						Lead:   2,
+						Voters: common.NewPeerSet(1, 2, 3),
+					},
+					ReportedBy: common.NewPeerSet(2, 3),
+					ShardStats: &store.ShardStats{
+						Updated: time.Now(),
+						Storage: &store.StorageStats{
+							DiskSize: 1024 * 1024 * 200,
+						},
+					},
+				},
+				Table: "test",
+			},
+		}
+
+		splits, merges := computeSplitTransitions(
+			t.Context(),
+			3,
+			shards,
+			1024*1024*100,
+			0,
+			1,
+			100,
+			map[types.ID]time.Time{},
+			func(ctx context.Context, id types.ID) ([]byte, error) {
+				return []byte("median-key"), nil
+			},
+			RealTimeProvider{},
+			1,
+			1,
+		)
+
+		assert.Empty(t, splits, "Shard missing a healthy reporter should not split")
+		assert.Empty(t, merges)
+	})
+
 	t.Run("transitioning shard is skipped", func(t *testing.T) {
 		shards := map[types.ID]*store.ShardStatus{
 			1: {

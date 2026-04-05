@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -65,6 +66,17 @@ func writeShardStatus(t *testing.T, db kv.DB, status *store.ShardStatus) {
 	require.NoError(t, err)
 	err = db.Batch(context.Background(),
 		[][2][]byte{{[]byte("tm:shs:" + status.ID.String()), data}},
+		nil,
+	)
+	require.NoError(t, err)
+}
+
+func writeTable(t *testing.T, db kv.DB, table *store.Table) {
+	t.Helper()
+	data, err := json.Marshal(table)
+	require.NoError(t, err)
+	err = db.Batch(context.Background(),
+		[][2][]byte{{[]byte("tm:t:" + table.Name), data}},
 		nil,
 	)
 	require.NoError(t, err)
@@ -259,6 +271,208 @@ func TestFindWriteShardForKey_FallsBackToParentUntilSplitOffReady(t *testing.T) 
 	shardID, err := findWriteShardForKey(ms.tm, table, "mango")
 	require.NoError(t, err)
 	assert.Equal(t, parentID, shardID)
+}
+
+func TestFindWriteShardForKey_UsesChildWhenParentSplitIsActiveButTableStillPointsAtParent(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	parentID := types.ID(10)
+	childID := types.ID(11)
+	splitKey := []byte("m:\x00")
+
+	table := &store.Table{
+		Name: "test_table",
+		Shards: map[types.ID]*store.ShardConfig{
+			parentID: {ByteRange: [2][]byte{{0x00}, {0xff}}},
+		},
+	}
+
+	parentState := &storedb.SplitState{}
+	parentState.SetPhase(storedb.SplitState_PHASE_SPLITTING)
+	parentState.SetSplitKey(splitKey)
+	parentState.SetNewShardId(uint64(childID))
+	writeShardStatus(t, db, &store.ShardStatus{
+		ID:    parentID,
+		Table: "test_table",
+		State: store.ShardState_Splitting,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+			SplitState: parentState,
+		},
+	})
+	writeShardStatus(t, db, &store.ShardStatus{
+		ID:    childID,
+		Table: "test_table",
+		State: store.ShardState_SplitOffPreSnap,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			HasSnapshot:         true,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			RaftStatus:          &common.RaftStatus{Lead: 2, Voters: common.NewPeerSet(1, 2, 3)},
+		},
+	})
+
+	shardID, err := findWriteShardForKey(ms.tm, table, "mango")
+	require.NoError(t, err)
+	assert.Equal(t, childID, shardID)
+}
+
+func TestFindWriteShardForKey_KeepsParentWhenSplitIsRollingBack(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	parentID := types.ID(10)
+	childID := types.ID(11)
+	splitKey := []byte("m:\x00")
+
+	table := &store.Table{
+		Name: "test_table",
+		Shards: map[types.ID]*store.ShardConfig{
+			parentID: {ByteRange: [2][]byte{{0x00}, {0xff}}},
+		},
+	}
+
+	parentState := &storedb.SplitState{}
+	parentState.SetPhase(storedb.SplitState_PHASE_ROLLING_BACK)
+	parentState.SetSplitKey(splitKey)
+	parentState.SetNewShardId(uint64(childID))
+	writeShardStatus(t, db, &store.ShardStatus{
+		ID:    parentID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, {0xff}},
+			},
+			SplitState: parentState,
+		},
+	})
+	writeShardStatus(t, db, &store.ShardStatus{
+		ID:    childID,
+		Table: "test_table",
+		State: store.ShardState_SplitOffPreSnap,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			HasSnapshot:         true,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   true,
+			RaftStatus:          &common.RaftStatus{Lead: 2, Voters: common.NewPeerSet(1, 2, 3)},
+		},
+	})
+
+	shardID, err := findWriteShardForKey(ms.tm, table, "mango")
+	require.NoError(t, err)
+	assert.Equal(t, parentID, shardID)
+}
+
+func TestFindReadShardForKey_KeepsParentUntilChildIsReadReady(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	parentID := types.ID(10)
+	childID := types.ID(11)
+	splitKey := []byte("m:\x00")
+
+	table := &store.Table{
+		Name: "test_table",
+		Shards: map[types.ID]*store.ShardConfig{
+			parentID: {ByteRange: [2][]byte{{0x00}, {0xff}}},
+		},
+	}
+
+	parentState := &storedb.SplitState{}
+	parentState.SetPhase(storedb.SplitState_PHASE_SPLITTING)
+	parentState.SetSplitKey(splitKey)
+	parentState.SetNewShardId(uint64(childID))
+	writeShardStatus(t, db, &store.ShardStatus{
+		ID:    parentID,
+		Table: "test_table",
+		State: store.ShardState_Splitting,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+			SplitState: parentState,
+		},
+	})
+	writeShardStatus(t, db, &store.ShardStatus{
+		ID:    childID,
+		Table: "test_table",
+		State: store.ShardState_SplitOffPreSnap,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			HasSnapshot:         true,
+			Initializing:        false,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   false,
+			RaftStatus:          &common.RaftStatus{Lead: 2, Voters: common.NewPeerSet(1, 2, 3)},
+		},
+	})
+
+	shardID, err := findReadShardForKey(ms.tm, table, "mango")
+	require.NoError(t, err)
+	assert.Equal(t, parentID, shardID)
+}
+
+func TestFindReadShardForKey_UsesChildWhenParentSplitIsActiveAndChildReadReady(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	parentID := types.ID(10)
+	childID := types.ID(11)
+	splitKey := []byte("m:\x00")
+
+	table := &store.Table{
+		Name: "test_table",
+		Shards: map[types.ID]*store.ShardConfig{
+			parentID: {ByteRange: [2][]byte{{0x00}, {0xff}}},
+		},
+	}
+
+	parentState := &storedb.SplitState{}
+	parentState.SetPhase(storedb.SplitState_PHASE_FINALIZING)
+	parentState.SetSplitKey(splitKey)
+	parentState.SetNewShardId(uint64(childID))
+	writeShardStatus(t, db, &store.ShardStatus{
+		ID:    parentID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+			SplitState: parentState,
+		},
+	})
+	writeShardStatus(t, db, &store.ShardStatus{
+		ID:    childID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			HasSnapshot:         true,
+			Initializing:        false,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   true,
+			SplitParentShardID:  parentID,
+			RaftStatus:          &common.RaftStatus{Lead: 2, Voters: common.NewPeerSet(1, 2, 3)},
+		},
+	})
+
+	shardID, err := findReadShardForKey(ms.tm, table, "mango")
+	require.NoError(t, err)
+	assert.Equal(t, childID, shardID)
 }
 
 func TestPartitionWriteKeysByShard_KeepsParentAsWriteOwnerUntilChildCatchesUp(t *testing.T) {
@@ -707,6 +921,327 @@ func TestForwardInsertToShard_DoesNotBypassToChildBeforeCutover(t *testing.T) {
 	assert.Equal(t, 0, childRPC.batchHit)
 }
 
+func TestForwardBatchToShard_ReroutesToChildAfterParentOutOfRange(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	tableName := "test_table"
+	table, err := ms.tm.CreateTable(tableName, tablemgr.TableConfig{
+		NumShards: 1,
+		StartID:   100,
+	})
+	require.NoError(t, err)
+	require.Len(t, table.Shards, 1)
+
+	var parentShardID types.ID
+	for shardID := range table.Shards {
+		parentShardID = shardID
+	}
+	childShardID := types.ID(101)
+	parentNodeID := types.ID(1)
+	childNodeID := types.ID(2)
+	splitKey := []byte("m:\x00")
+
+	parentRPC := &stubStoreRPC{
+		id: parentNodeID,
+		batchFn: func(shardID types.ID, writes [][2][]byte) error {
+			assert.Equal(t, parentShardID, shardID)
+			require.Len(t, writes, 1)
+			assert.Equal(t, []byte("mango"), writes[0][0])
+			return &client.ResponseError{
+				StatusCode: http.StatusBadRequest,
+				Body:       "key 6d616e676f out of range [,6d3a00)",
+			}
+		},
+	}
+	childRPC := &stubStoreRPC{
+		id: childNodeID,
+		batchFn: func(shardID types.ID, writes [][2][]byte) error {
+			assert.Equal(t, childShardID, shardID)
+			require.Len(t, writes, 1)
+			assert.Equal(t, []byte("mango"), writes[0][0])
+			return nil
+		},
+	}
+	ms.tm.SetStoreClientFactory(func(_ *http.Client, id types.ID, _ string) client.StoreRPC {
+		switch id {
+		case parentNodeID:
+			return parentRPC
+		case childNodeID:
+			return childRPC
+		default:
+			return &stubStoreRPC{id: id}
+		}
+	})
+
+	parentStatus, err := ms.tm.GetShardStatus(parentShardID)
+	require.NoError(t, err)
+	parentStatus.Peers = common.NewPeerSet(parentNodeID)
+	parentStatus.ReportedBy = common.NewPeerSet(parentNodeID)
+	parentStatus.RaftStatus = &common.RaftStatus{
+		Lead:   parentNodeID,
+		Voters: common.NewPeerSet(parentNodeID),
+	}
+	writeShardStatus(t, db, parentStatus)
+
+	_, _, err = ms.tm.ReassignShardsForSplit(tablemgr.SplitTransition{
+		ShardID:      parentShardID,
+		SplitShardID: childShardID,
+		SplitKey:     splitKey,
+		TableName:    tableName,
+	})
+	require.NoError(t, err)
+
+	parentStatus, err = ms.tm.GetShardStatus(parentShardID)
+	require.NoError(t, err)
+	parentStatus.State = store.ShardState_Splitting
+	parentStatus.SplitState = &storedb.SplitState{}
+	parentStatus.SplitState.SetPhase(storedb.SplitState_PHASE_SPLITTING)
+	parentStatus.SplitState.SetSplitKey(splitKey)
+	parentStatus.SplitState.SetNewShardId(uint64(childShardID))
+	parentStatus.SplitState.SetOriginalRangeEnd([]byte{0xff})
+	parentStatus.Peers = common.NewPeerSet(parentNodeID)
+	parentStatus.ReportedBy = common.NewPeerSet(parentNodeID)
+	parentStatus.RaftStatus = &common.RaftStatus{
+		Lead:   parentNodeID,
+		Voters: common.NewPeerSet(parentNodeID),
+	}
+	writeShardStatus(t, db, parentStatus)
+
+	childStatus, err := ms.tm.GetShardStatus(childShardID)
+	require.NoError(t, err)
+	childStatus.State = store.ShardState_SplitOffPreSnap
+	childStatus.HasSnapshot = true
+	childStatus.Initializing = false
+	childStatus.SplitReplayRequired = true
+	childStatus.SplitReplayCaughtUp = true
+	childStatus.SplitCutoverReady = true
+	childStatus.Peers = common.NewPeerSet(childNodeID)
+	childStatus.ReportedBy = common.NewPeerSet(childNodeID)
+	childStatus.RaftStatus = &common.RaftStatus{
+		Lead:   childNodeID,
+		Voters: common.NewPeerSet(childNodeID),
+	}
+	writeShardStatus(t, db, childStatus)
+
+	writeStoreStatus(t, db, parentNodeID, true)
+	writeStoreStatus(t, db, childNodeID, true)
+
+	err = ms.forwardBatchToShard(
+		context.Background(),
+		parentShardID,
+		[][2][]byte{{[]byte("mango"), []byte(`{"content":"value"}`)}},
+		nil,
+		nil,
+		storedb.Op_SyncLevelWrite,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, parentRPC.batchHit)
+	assert.Equal(t, 1, childRPC.batchHit)
+}
+
+func TestForwardBatchToShard_ReroutesToParentDuringRollback(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	tableName := "test_table"
+	table, err := ms.tm.CreateTable(tableName, tablemgr.TableConfig{
+		NumShards: 1,
+		StartID:   100,
+	})
+	require.NoError(t, err)
+	require.Len(t, table.Shards, 1)
+
+	var parentShardID types.ID
+	for shardID := range table.Shards {
+		parentShardID = shardID
+	}
+	childShardID := types.ID(101)
+	parentNodeID := types.ID(1)
+	childNodeID := types.ID(2)
+	splitKey := []byte("m:\x00")
+
+	parentRPC := &stubStoreRPC{
+		id: parentNodeID,
+		batchFn: func(shardID types.ID, writes [][2][]byte) error {
+			assert.Equal(t, parentShardID, shardID)
+			require.Len(t, writes, 1)
+			assert.Equal(t, []byte("mango"), writes[0][0])
+			return nil
+		},
+	}
+	childRPC := &stubStoreRPC{
+		id: childNodeID,
+		batchFn: func(shardID types.ID, writes [][2][]byte) error {
+			assert.Equal(t, childShardID, shardID)
+			require.Len(t, writes, 1)
+			assert.Equal(t, []byte("mango"), writes[0][0])
+			return &client.ResponseError{
+				StatusCode: http.StatusBadRequest,
+				Body:       "key 6d616e676f out of range [6d3a00,ff)",
+			}
+		},
+	}
+	ms.tm.SetStoreClientFactory(func(_ *http.Client, id types.ID, _ string) client.StoreRPC {
+		switch id {
+		case parentNodeID:
+			return parentRPC
+		case childNodeID:
+			return childRPC
+		default:
+			return &stubStoreRPC{id: id}
+		}
+	})
+
+	parentStatus, err := ms.tm.GetShardStatus(parentShardID)
+	require.NoError(t, err)
+	parentStatus.Peers = common.NewPeerSet(parentNodeID)
+	parentStatus.ReportedBy = common.NewPeerSet(parentNodeID)
+	parentStatus.RaftStatus = &common.RaftStatus{
+		Lead:   parentNodeID,
+		Voters: common.NewPeerSet(parentNodeID),
+	}
+	writeShardStatus(t, db, parentStatus)
+
+	_, _, err = ms.tm.ReassignShardsForSplit(tablemgr.SplitTransition{
+		ShardID:      parentShardID,
+		SplitShardID: childShardID,
+		SplitKey:     splitKey,
+		TableName:    tableName,
+	})
+	require.NoError(t, err)
+
+	parentStatus, err = ms.tm.GetShardStatus(parentShardID)
+	require.NoError(t, err)
+	parentStatus.State = store.ShardState_Splitting
+	parentStatus.SplitState = &storedb.SplitState{}
+	parentStatus.SplitState.SetPhase(storedb.SplitState_PHASE_ROLLING_BACK)
+	parentStatus.SplitState.SetSplitKey(splitKey)
+	parentStatus.SplitState.SetNewShardId(uint64(childShardID))
+	parentStatus.SplitState.SetOriginalRangeEnd([]byte{0xff})
+	parentStatus.Peers = common.NewPeerSet(parentNodeID)
+	parentStatus.ReportedBy = common.NewPeerSet(parentNodeID)
+	parentStatus.RaftStatus = &common.RaftStatus{
+		Lead:   parentNodeID,
+		Voters: common.NewPeerSet(parentNodeID),
+	}
+	writeShardStatus(t, db, parentStatus)
+
+	childStatus, err := ms.tm.GetShardStatus(childShardID)
+	require.NoError(t, err)
+	childStatus.State = store.ShardState_SplitOffPreSnap
+	childStatus.HasSnapshot = true
+	childStatus.Initializing = false
+	childStatus.SplitReplayRequired = true
+	childStatus.SplitReplayCaughtUp = true
+	childStatus.SplitCutoverReady = true
+	childStatus.Peers = common.NewPeerSet(childNodeID)
+	childStatus.ReportedBy = common.NewPeerSet(childNodeID)
+	childStatus.RaftStatus = &common.RaftStatus{
+		Lead:   childNodeID,
+		Voters: common.NewPeerSet(childNodeID),
+	}
+	writeShardStatus(t, db, childStatus)
+
+	writeStoreStatus(t, db, parentNodeID, true)
+	writeStoreStatus(t, db, childNodeID, true)
+
+	err = ms.forwardBatchToShard(
+		context.Background(),
+		childShardID,
+		[][2][]byte{{[]byte("mango"), []byte(`{"content":"value"}`)}},
+		nil,
+		nil,
+		storedb.Op_SyncLevelWrite,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, childRPC.batchHit)
+	assert.Equal(t, 1, parentRPC.batchHit)
+}
+
+func TestForwardBatchToShard_DoesNotRetryWhenRerouteStaysMultiShard(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	tableName := "test_table"
+	table, err := ms.tm.CreateTable(tableName, tablemgr.TableConfig{
+		NumShards: 2,
+		StartID:   100,
+	})
+	require.NoError(t, err)
+	require.Len(t, table.Shards, 2)
+
+	var shardIDs []types.ID
+	for shardID := range table.Shards {
+		shardIDs = append(shardIDs, shardID)
+	}
+	require.Len(t, shardIDs, 2)
+	slices.Sort(shardIDs)
+
+	leftShardID := shardIDs[0]
+	rightShardID := shardIDs[1]
+	leftNodeID := types.ID(1)
+	rightNodeID := types.ID(2)
+
+	leftRPC := &stubStoreRPC{
+		id: leftNodeID,
+		batchFn: func(shardID types.ID, writes [][2][]byte) error {
+			assert.Equal(t, leftShardID, shardID)
+			return &client.ResponseError{
+				StatusCode: http.StatusBadRequest,
+				Body:       "key out of range",
+			}
+		},
+	}
+	rightRPC := &stubStoreRPC{id: rightNodeID}
+
+	ms.tm.SetStoreClientFactory(func(_ *http.Client, id types.ID, _ string) client.StoreRPC {
+		switch id {
+		case leftNodeID:
+			return leftRPC
+		case rightNodeID:
+			return rightRPC
+		default:
+			return &stubStoreRPC{id: id}
+		}
+	})
+
+	leftStatus, err := ms.tm.GetShardStatus(leftShardID)
+	require.NoError(t, err)
+	leftStatus.Peers = common.NewPeerSet(leftNodeID)
+	leftStatus.ReportedBy = common.NewPeerSet(leftNodeID)
+	leftStatus.RaftStatus = &common.RaftStatus{
+		Lead:   leftNodeID,
+		Voters: common.NewPeerSet(leftNodeID),
+	}
+	writeShardStatus(t, db, leftStatus)
+
+	rightStatus, err := ms.tm.GetShardStatus(rightShardID)
+	require.NoError(t, err)
+	rightStatus.Peers = common.NewPeerSet(rightNodeID)
+	rightStatus.ReportedBy = common.NewPeerSet(rightNodeID)
+	rightStatus.RaftStatus = &common.RaftStatus{
+		Lead:   rightNodeID,
+		Voters: common.NewPeerSet(rightNodeID),
+	}
+	writeShardStatus(t, db, rightStatus)
+
+	writeStoreStatus(t, db, leftNodeID, true)
+	writeStoreStatus(t, db, rightNodeID, true)
+
+	err = ms.forwardBatchToShard(
+		context.Background(),
+		leftShardID,
+		[][2][]byte{
+			{[]byte("apple"), []byte(`{"content":"left"}`)},
+			{[]byte("zebra"), []byte(`{"content":"right"}`)},
+		},
+		nil,
+		nil,
+		storedb.Op_SyncLevelWrite,
+	)
+	require.Error(t, err)
+	assert.Equal(t, 1, leftRPC.batchHit)
+	assert.Equal(t, 0, rightRPC.batchHit)
+}
+
 func TestDirectLeaderClientForShardBypassesSplitFallback_PrefersSelfReportedLeader(t *testing.T) {
 	ms, db := setupTestMetadataStore(t)
 
@@ -981,6 +1516,128 @@ func TestFindParentShardForSplitOffStatus_NoParent(t *testing.T) {
 	assert.Contains(t, err.Error(), "parent shard not found")
 }
 
+func TestFindParentShardForSplitOffStatus_FindsFinalizingParent(t *testing.T) {
+	parentShardID := types.ID(100)
+	childShardID := types.ID(101)
+	splitKey := []byte("m:\x00")
+
+	finalizingState := &storedb.SplitState{}
+	finalizingState.SetPhase(storedb.SplitState_PHASE_FINALIZING)
+	finalizingState.SetSplitKey(splitKey)
+	finalizingState.SetNewShardId(uint64(childShardID))
+
+	parentStatus := &store.ShardStatus{
+		ID:    parentShardID,
+		Table: "test_table",
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+			SplitState: finalizingState,
+		},
+	}
+	childStatus := &store.ShardStatus{
+		ID:    childShardID,
+		Table: "test_table",
+		State: store.ShardState_SplitOffPreSnap,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   false,
+		},
+	}
+
+	parentID, err := findParentShardForSplitOffStatus(map[types.ID]*store.ShardStatus{
+		parentShardID: parentStatus,
+		childShardID:  childStatus,
+	}, childStatus)
+	require.NoError(t, err)
+	assert.Equal(t, parentShardID, parentID)
+}
+
+func TestFindParentShardForSplitOffStatus_FindsRollingBackParent(t *testing.T) {
+	parentShardID := types.ID(100)
+	childShardID := types.ID(101)
+	splitKey := []byte("m:\x00")
+
+	rollingBackState := &storedb.SplitState{}
+	rollingBackState.SetPhase(storedb.SplitState_PHASE_ROLLING_BACK)
+	rollingBackState.SetSplitKey(splitKey)
+	rollingBackState.SetNewShardId(uint64(childShardID))
+
+	parentStatus := &store.ShardStatus{
+		ID:    parentShardID,
+		Table: "test_table",
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+			SplitState: rollingBackState,
+		},
+	}
+	childStatus := &store.ShardStatus{
+		ID:    childShardID,
+		Table: "test_table",
+		State: store.ShardState_SplitOffPreSnap,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   true,
+		},
+	}
+
+	parentID, err := findParentShardForSplitOffStatus(map[types.ID]*store.ShardStatus{
+		parentShardID: parentStatus,
+		childShardID:  childStatus,
+	}, childStatus)
+	require.NoError(t, err)
+	assert.Equal(t, parentShardID, parentID)
+}
+
+func TestFindParentShardForSplitOffStatus_UsesExplicitSplitParentID(t *testing.T) {
+	parentShardID := types.ID(100)
+	childShardID := types.ID(101)
+	splitKey := []byte("m:\x00")
+
+	parentStatus := &store.ShardStatus{
+		ID:    parentShardID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, {0xff}},
+			},
+		},
+	}
+	childStatus := &store.ShardStatus{
+		ID:    childShardID,
+		Table: "test_table",
+		State: store.ShardState_SplitOffPreSnap,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   false,
+			SplitParentShardID:  parentShardID,
+		},
+	}
+
+	parentID, err := findParentShardForSplitOffStatus(map[types.ID]*store.ShardStatus{
+		parentShardID: parentStatus,
+		childShardID:  childStatus,
+	}, childStatus)
+	require.NoError(t, err)
+	assert.Equal(t, parentShardID, parentID)
+}
+
 func TestLeaderClientForShardWithEffectiveID_NoLeader_FallsBackToReportedBy(t *testing.T) {
 	ms, db := setupTestMetadataStore(t)
 
@@ -1069,6 +1726,158 @@ func TestLeaderClientForShardWithEffectiveID_LeaderElected_ReturnsLeader(t *test
 	assert.Equal(t, shardID, effectiveID)
 }
 
+func TestLeaderClientForShard_LeaderExplicitlyMissingShard_FallsBackToReporter(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	shardID := types.ID(100)
+	leaderNode := types.ID(1)
+	follower := types.ID(2)
+
+	status := newShardStatus(shardID, leaderNode, []types.ID{follower}, []types.ID{leaderNode, follower})
+	writeShardStatus(t, db, status)
+	writeStoreStatusWithShards(t, db, leaderNode, true, map[types.ID]*store.ShardInfo{
+		types.ID(999): {},
+	})
+	writeStoreStatusWithShards(t, db, follower, true, map[types.ID]*store.ShardInfo{
+		shardID: {},
+	})
+
+	gotClient, err := ms.leaderClientForShard(context.Background(), shardID)
+	require.NoError(t, err)
+	assert.NotNil(t, gotClient)
+	assert.Equal(t, follower, gotClient.ID())
+}
+
+func TestLeaderClientForShard_InitializingLeaderFallsBackToReadyReporter(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	shardID := types.ID(100)
+	leaderNode := types.ID(1)
+	follower := types.ID(2)
+
+	status := newShardStatus(shardID, leaderNode, []types.ID{leaderNode, follower}, []types.ID{leaderNode, follower})
+	writeShardStatus(t, db, status)
+	writeStoreStatusWithShards(t, db, leaderNode, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			Initializing: true,
+		},
+	})
+	writeStoreStatusWithShards(t, db, follower, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			Initializing: false,
+		},
+	})
+
+	gotClient, err := ms.leaderClientForShard(context.Background(), shardID)
+	require.NoError(t, err)
+	assert.NotNil(t, gotClient)
+	assert.Equal(t, follower, gotClient.ID())
+}
+
+func TestLeaderClientForShardNoFallback_NonSplitUsesSelfReportedLeader(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	shardID := types.ID(100)
+	staleLeader := types.ID(1)
+	actualLeader := types.ID(2)
+
+	status := newShardStatus(shardID, staleLeader, []types.ID{staleLeader, actualLeader}, []types.ID{staleLeader, actualLeader})
+	writeShardStatus(t, db, status)
+	writeStoreStatusWithShards(t, db, staleLeader, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			Initializing: false,
+			RaftStatus: &common.RaftStatus{
+				Lead:   actualLeader,
+				Voters: common.NewPeerSet(staleLeader, actualLeader),
+			},
+		},
+	})
+	writeStoreStatusWithShards(t, db, actualLeader, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			Initializing: false,
+			RaftStatus: &common.RaftStatus{
+				Lead:   actualLeader,
+				Voters: common.NewPeerSet(staleLeader, actualLeader),
+			},
+		},
+	})
+
+	_, gotClient, err := ms.leaderClientForShardNoFallback(context.Background(), shardID)
+	require.NoError(t, err)
+	assert.NotNil(t, gotClient)
+	assert.Equal(t, actualLeader, gotClient.ID())
+}
+
+func TestLeaderClientForShardNoFallback_NonSplitFallsBackWhenRaftStatusMissing(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	shardID := types.ID(100)
+	reportingNode := types.ID(1)
+
+	status := &store.ShardStatus{
+		ID:    shardID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, {0xff}},
+			},
+			Peers:      common.NewPeerSet(reportingNode),
+			ReportedBy: common.NewPeerSet(reportingNode),
+		},
+	}
+	writeShardStatus(t, db, status)
+	writeStoreStatusWithShards(t, db, reportingNode, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, {0xff}},
+			},
+			Initializing: false,
+			ShardStats: &storedb.DBStats{
+				Storage: &storedb.DBStorageStats{Empty: true},
+			},
+		},
+	})
+
+	_, gotClient, err := ms.leaderClientForShardNoFallback(context.Background(), shardID)
+	require.NoError(t, err)
+	assert.NotNil(t, gotClient)
+	assert.Equal(t, reportingNode, gotClient.ID())
+}
+
+func TestLeaderClientForShardWithEffectiveID_EmptyLeaderFallsBackToNonEmptyReporter(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	shardID := types.ID(100)
+	leaderNode := types.ID(1)
+	follower := types.ID(2)
+
+	status := newShardStatus(shardID, leaderNode, []types.ID{leaderNode, follower}, []types.ID{leaderNode, follower})
+	writeShardStatus(t, db, status)
+	writeStoreStatusWithShards(t, db, leaderNode, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			Initializing: false,
+			ShardStats: &storedb.DBStats{
+				Storage: &storedb.DBStorageStats{Empty: true},
+			},
+		},
+	})
+	writeStoreStatusWithShards(t, db, follower, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			Initializing: false,
+			ShardStats: &storedb.DBStats{
+				Storage: &storedb.DBStorageStats{Empty: false},
+			},
+		},
+	})
+
+	effectiveID, gotClient, err := ms.leaderClientForShardWithEffectiveID(context.Background(), shardID)
+	require.NoError(t, err)
+	assert.NotNil(t, gotClient)
+	assert.Equal(t, shardID, effectiveID)
+	assert.Equal(t, follower, gotClient.ID())
+}
+
 func TestLeaderClientForShard_NoLeader_ReturnsErrNoLeaderElected(t *testing.T) {
 	ms, db := setupTestMetadataStore(t)
 
@@ -1155,6 +1964,231 @@ func TestShouldFallbackToParentShard_UsesFullReadinessGate(t *testing.T) {
 			assert.Equal(t, tc.expected, ms.shouldFallbackToParentShard(tc.status))
 		})
 	}
+}
+
+func TestShouldFallbackToParentShard_WhenParentIsRollingBack(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	parentID := types.ID(10)
+	childID := types.ID(11)
+	splitKey := []byte("m:\x00")
+
+	rollingBackState := &storedb.SplitState{}
+	rollingBackState.SetPhase(storedb.SplitState_PHASE_ROLLING_BACK)
+	rollingBackState.SetSplitKey(splitKey)
+	rollingBackState.SetNewShardId(uint64(childID))
+
+	writeShardStatus(t, db, &store.ShardStatus{
+		ID:    parentID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+			SplitState: rollingBackState,
+		},
+	})
+
+	childStatus := &store.ShardStatus{
+		ID:    childID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			HasSnapshot:         true,
+			Initializing:        false,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   true,
+			RaftStatus:          &common.RaftStatus{Lead: 1},
+		},
+	}
+	writeShardStatus(t, db, childStatus)
+
+	assert.True(t, ms.shouldFallbackToParentShard(childStatus))
+}
+
+func TestShouldFallbackToParentShard_DefaultChildDoesNotFallbackToFinalizedParent(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	parentShardID := types.ID(100)
+	childShardID := types.ID(101)
+	splitKey := []byte("m:\x00")
+
+	parentStatus := &store.ShardStatus{
+		ID:    parentShardID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+		},
+	}
+	childStatus := &store.ShardStatus{
+		ID:    childShardID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			HasSnapshot:         true,
+			Initializing:        false,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   false,
+			SplitParentShardID:  parentShardID,
+			RaftStatus:          &common.RaftStatus{Lead: 1},
+		},
+	}
+
+	writeShardStatus(t, db, parentStatus)
+	writeShardStatus(t, db, childStatus)
+
+	assert.False(t, ms.shouldFallbackToParentShard(childStatus))
+}
+
+func TestShouldFallbackToParentShard_DefaultChildFallsBackWhenParentRangeStillCoversChild(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	parentShardID := types.ID(100)
+	childShardID := types.ID(101)
+	splitKey := []byte("m:\x00")
+
+	parentStatus := &store.ShardStatus{
+		ID:    parentShardID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, {0xff}},
+			},
+		},
+	}
+	childStatus := &store.ShardStatus{
+		ID:    childShardID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			HasSnapshot:         true,
+			Initializing:        false,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   false,
+			SplitParentShardID:  parentShardID,
+			RaftStatus:          &common.RaftStatus{Lead: 1},
+		},
+	}
+
+	writeShardStatus(t, db, parentStatus)
+	writeShardStatus(t, db, childStatus)
+
+	assert.True(t, ms.shouldFallbackToParentShard(childStatus))
+}
+
+func TestFindReadShardForKeyWithStatuses_DefaultChildStaysOnChildAfterFinalize(t *testing.T) {
+	parentShardID := types.ID(100)
+	childShardID := types.ID(101)
+	splitKey := []byte("m:\x00")
+
+	table := &store.Table{
+		Name: "test_table",
+		Shards: map[types.ID]*store.ShardConfig{
+			parentShardID: {
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+			childShardID: {
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+		},
+	}
+
+	parentStatus := &store.ShardStatus{
+		ID:    parentShardID,
+		Table: table.Name,
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: *table.Shards[parentShardID],
+		},
+	}
+	childStatus := &store.ShardStatus{
+		ID:    childShardID,
+		Table: table.Name,
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig:         *table.Shards[childShardID],
+			HasSnapshot:         true,
+			Initializing:        false,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   false,
+			SplitParentShardID:  parentShardID,
+			RaftStatus:          &common.RaftStatus{Lead: 1},
+		},
+	}
+
+	shardID, err := findReadShardForKeyWithStatuses(table, map[types.ID]*store.ShardStatus{
+		parentShardID: parentStatus,
+		childShardID:  childStatus,
+	}, "m:doc")
+	require.NoError(t, err)
+	assert.Equal(t, childShardID, shardID)
+}
+
+func TestFindReadShardForKeyWithStatuses_DefaultChildFallsBackWhenParentStillOwnsRange(t *testing.T) {
+	parentShardID := types.ID(100)
+	childShardID := types.ID(101)
+	splitKey := []byte("m:\x00")
+
+	table := &store.Table{
+		Name: "test_table",
+		Shards: map[types.ID]*store.ShardConfig{
+			parentShardID: {
+				ByteRange: [2][]byte{{0x00}, {0xff}},
+			},
+			childShardID: {
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+		},
+	}
+
+	parentStatus := &store.ShardStatus{
+		ID:    parentShardID,
+		Table: table.Name,
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: *table.Shards[parentShardID],
+		},
+	}
+	childStatus := &store.ShardStatus{
+		ID:    childShardID,
+		Table: table.Name,
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig:         *table.Shards[childShardID],
+			HasSnapshot:         true,
+			Initializing:        false,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   false,
+			SplitParentShardID:  parentShardID,
+			RaftStatus:          &common.RaftStatus{Lead: 1},
+		},
+	}
+
+	shardID, err := findReadShardForKeyWithStatuses(table, map[types.ID]*store.ShardStatus{
+		parentShardID: parentStatus,
+		childShardID:  childStatus,
+	}, "m:doc")
+	require.NoError(t, err)
+	assert.Equal(t, parentShardID, shardID)
 }
 
 func TestLeaderClientForShardWithEffectiveID_SplitOffPreSnapFallsBackToParentUntilReady(t *testing.T) {
@@ -1309,6 +2343,223 @@ func TestForwardLookupToShardWithVersion_SplitParentMissFallsBackToWriteReadyChi
 	assert.Equal(t, 1, childRPC.lookupHit)
 }
 
+func TestForwardLookupToShardWithVersion_SplitParentOutOfRangeFallsBackToWriteReadyChild(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	parentShardID := types.ID(100)
+	childShardID := types.ID(101)
+	parentNodeID := types.ID(1)
+	childNodeID := types.ID(2)
+	splitKey := []byte("m")
+	key := "mango"
+	expectedDoc := []byte(`{"key":"mango"}`)
+	const expectedVersion = 42
+
+	parentRPC := &stubStoreRPC{
+		id: parentNodeID,
+		lookupWithVersionFn: func(shardID types.ID, gotKey string) ([]byte, uint64, error) {
+			assert.Equal(t, parentShardID, shardID)
+			assert.Equal(t, key, gotKey)
+			return nil, 0, client.ErrKeyOutOfRange
+		},
+	}
+	childRPC := &stubStoreRPC{
+		id: childNodeID,
+		lookupWithVersionFn: func(shardID types.ID, gotKey string) ([]byte, uint64, error) {
+			assert.Equal(t, childShardID, shardID)
+			assert.Equal(t, key, gotKey)
+			return expectedDoc, expectedVersion, nil
+		},
+	}
+	ms.tm.SetStoreClientFactory(func(_ *http.Client, id types.ID, _ string) client.StoreRPC {
+		switch id {
+		case parentNodeID:
+			return parentRPC
+		case childNodeID:
+			return childRPC
+		default:
+			return &stubStoreRPC{id: id}
+		}
+	})
+
+	parentStatus := &store.ShardStatus{
+		ID:    parentShardID,
+		Table: "test_table",
+		State: store.ShardState_Splitting,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+			Peers:      common.NewPeerSet(parentNodeID),
+			ReportedBy: common.NewPeerSet(parentNodeID),
+			RaftStatus: &common.RaftStatus{
+				Lead:   parentNodeID,
+				Voters: common.NewPeerSet(parentNodeID),
+			},
+		},
+	}
+	parentStatus.SplitState = &storedb.SplitState{}
+	parentStatus.SplitState.SetPhase(storedb.SplitState_PHASE_SPLITTING)
+	parentStatus.SplitState.SetSplitKey(splitKey)
+	parentStatus.SplitState.SetNewShardId(uint64(childShardID))
+
+	childStatus := &store.ShardStatus{
+		ID:    childShardID,
+		Table: "test_table",
+		State: store.ShardState_SplitOffPreSnap,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			Peers:               common.NewPeerSet(childNodeID),
+			ReportedBy:          common.NewPeerSet(childNodeID),
+			HasSnapshot:         true,
+			Initializing:        false,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   false,
+			RaftStatus: &common.RaftStatus{
+				Lead:   childNodeID,
+				Voters: common.NewPeerSet(childNodeID),
+			},
+		},
+	}
+
+	writeShardStatus(t, db, parentStatus)
+	writeShardStatus(t, db, childStatus)
+	writeStoreStatus(t, db, parentNodeID, true)
+	writeStoreStatus(t, db, childNodeID, true)
+
+	doc, version, err := ms.forwardLookupToShardWithVersion(context.Background(), childShardID, key)
+	require.NoError(t, err)
+	assert.Equal(t, expectedDoc, doc)
+	assert.Equal(t, uint64(expectedVersion), version)
+	assert.Equal(t, 1, parentRPC.lookupHit)
+	assert.Equal(t, 1, childRPC.lookupHit)
+}
+
+func TestForwardLookupToShardWithVersion_StaleParentOutOfRangeFallsBackToReadReadyChild(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	parentShardID := types.ID(100)
+	childShardID := types.ID(101)
+	parentNodeID := types.ID(1)
+	childNodeID := types.ID(2)
+	splitKey := []byte("m")
+	key := "mango"
+	expectedDoc := []byte(`{"key":"mango"}`)
+	const expectedVersion = 99
+
+	parentRPC := &stubStoreRPC{
+		id: parentNodeID,
+		lookupWithVersionFn: func(shardID types.ID, gotKey string) ([]byte, uint64, error) {
+			assert.Equal(t, parentShardID, shardID)
+			assert.Equal(t, key, gotKey)
+			return nil, 0, client.ErrKeyOutOfRange
+		},
+	}
+	childRPC := &stubStoreRPC{
+		id: childNodeID,
+		lookupWithVersionFn: func(shardID types.ID, gotKey string) ([]byte, uint64, error) {
+			assert.Equal(t, childShardID, shardID)
+			assert.Equal(t, key, gotKey)
+			return expectedDoc, expectedVersion, nil
+		},
+	}
+	ms.tm.SetStoreClientFactory(func(_ *http.Client, id types.ID, _ string) client.StoreRPC {
+		switch id {
+		case parentNodeID:
+			return parentRPC
+		case childNodeID:
+			return childRPC
+		default:
+			return &stubStoreRPC{id: id}
+		}
+	})
+	writeTable(t, db, &store.Table{
+		Name: "test_table",
+		Shards: map[types.ID]*store.ShardConfig{
+			parentShardID: {ByteRange: [2][]byte{{0x00}, {0xff}}},
+		},
+	})
+
+	parentStatus := &store.ShardStatus{
+		ID:    parentShardID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, splitKey},
+			},
+			Peers:      common.NewPeerSet(parentNodeID),
+			ReportedBy: common.NewPeerSet(parentNodeID),
+			RaftStatus: &common.RaftStatus{
+				Lead:   parentNodeID,
+				Voters: common.NewPeerSet(parentNodeID),
+			},
+		},
+	}
+	parentStatus.SplitState = &storedb.SplitState{}
+	parentStatus.SplitState.SetPhase(storedb.SplitState_PHASE_FINALIZING)
+	parentStatus.SplitState.SetSplitKey(splitKey)
+	parentStatus.SplitState.SetNewShardId(uint64(childShardID))
+
+	childStatus := &store.ShardStatus{
+		ID:    childShardID,
+		Table: "test_table",
+		State: store.ShardState_Default,
+		ShardInfo: storedb.ShardInfo{
+			ShardConfig: storedb.ShardConfig{
+				ByteRange: [2][]byte{splitKey, {0xff}},
+			},
+			Peers:               common.NewPeerSet(childNodeID),
+			ReportedBy:          common.NewPeerSet(childNodeID),
+			HasSnapshot:         true,
+			Initializing:        false,
+			SplitReplayRequired: true,
+			SplitReplayCaughtUp: true,
+			SplitCutoverReady:   true,
+			SplitParentShardID:  parentShardID,
+			RaftStatus: &common.RaftStatus{
+				Lead:   childNodeID,
+				Voters: common.NewPeerSet(childNodeID),
+			},
+		},
+	}
+
+	writeShardStatus(t, db, parentStatus)
+	writeShardStatus(t, db, childStatus)
+	parentStoreInfo := parentStatus.ShardInfo.DeepCopy()
+	parentStoreInfo.HasSnapshot = parentStatus.ShardInfo.HasSnapshot
+	parentStoreInfo.Initializing = parentStatus.ShardInfo.Initializing
+	childStoreInfo := childStatus.ShardInfo.DeepCopy()
+	childStoreInfo.HasSnapshot = childStatus.ShardInfo.HasSnapshot
+	childStoreInfo.Initializing = childStatus.ShardInfo.Initializing
+	writeStoreStatusWithShards(t, db, parentNodeID, true, map[types.ID]*store.ShardInfo{
+		parentShardID: parentStoreInfo,
+	})
+	writeStoreStatusWithShards(t, db, childNodeID, true, map[types.ID]*store.ShardInfo{
+		childShardID: childStoreInfo,
+	})
+
+	table, err := ms.tm.GetTable("test_table")
+	require.NoError(t, err)
+	reroutedShardID, err := findReadShardForKey(ms.tm, table, key)
+	require.NoError(t, err)
+	assert.Equal(t, childShardID, reroutedShardID)
+	reroutedEffectiveShardID, reroutedClient, err := ms.leaderClientForShardWithEffectiveID(context.Background(), childShardID)
+	require.NoError(t, err)
+	assert.Equal(t, childShardID, reroutedEffectiveShardID)
+	assert.Equal(t, childNodeID, reroutedClient.ID())
+
+	doc, version, err := ms.forwardLookupToShardWithVersion(context.Background(), parentShardID, key)
+	require.NoError(t, err)
+	assert.Equal(t, expectedDoc, doc)
+	assert.Equal(t, uint64(expectedVersion), version)
+	assert.Equal(t, 1, parentRPC.lookupHit)
+	assert.Equal(t, 1, childRPC.lookupHit)
+}
+
 func TestStrictLeaderClientForShardWithEffectiveID_LeaderUnreachable_ReturnsError(t *testing.T) {
 	ms, db := setupTestMetadataStore(t)
 
@@ -1352,4 +2603,36 @@ func TestStrictLeaderClientForShardWithEffectiveID_LeaderNotReported_StillReturn
 func TestIsTransientShardError_NoLeaderElected(t *testing.T) {
 	assert.True(t, isTransientShardError(ErrNoLeaderElected),
 		"ErrNoLeaderElected should be classified as transient")
+}
+
+func TestLeaderClientForShard_LeaderNotServingReturnsTransientError(t *testing.T) {
+	ms, db := setupTestMetadataStore(t)
+
+	shardID := types.ID(500)
+	leaderNode := types.ID(101)
+	followerNode := types.ID(102)
+
+	status := newShardStatus(shardID, leaderNode, []types.ID{leaderNode, followerNode}, []types.ID{leaderNode, followerNode})
+	writeShardStatus(t, db, status)
+	writeStoreStatusWithShards(t, db, leaderNode, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			ShardConfig: store.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, {0xff}},
+			},
+			Initializing: true,
+		},
+	})
+	writeStoreStatusWithShards(t, db, followerNode, true, map[types.ID]*store.ShardInfo{
+		shardID: {
+			ShardConfig: store.ShardConfig{
+				ByteRange: [2][]byte{{0x00}, {0xff}},
+			},
+			Initializing: true,
+		},
+	})
+
+	_, err := ms.leaderClientForShard(context.Background(), shardID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, client.ErrShardInitializing)
+	assert.True(t, isTransientShardError(err))
 }

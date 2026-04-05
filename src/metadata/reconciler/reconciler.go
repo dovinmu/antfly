@@ -1214,6 +1214,16 @@ func computeSplitTransitions(
 			continue
 		}
 
+		// Skip shards whose healthy reporters don't match the replication factor
+		// when reporter data is available. A full voter set is not enough here:
+		// after a node crash, stale voters can linger while only a subset of
+		// replicas are actually serving the shard. Starting another automatic
+		// split on that degraded shard can cascade the failure by propagating dead
+		// peers into follow-on split work.
+		if len(status.ReportedBy) > 0 && uint64(len(status.ReportedBy)) != replicationFactor {
+			continue
+		}
+
 		// Skip shards without an elected leader
 		if status.RaftStatus.Lead == 0 {
 			continue
