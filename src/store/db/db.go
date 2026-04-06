@@ -1181,13 +1181,25 @@ func (db *DBImpl) LeaderFactory(
 		zap.Bool("s3StorageEnabled", db.s3Storage != nil),
 	)
 
+	// Track background goroutines so we wait for them before returning.
+	// Returning without waiting would allow callers to close Pebble while
+	// these goroutines still hold open iterators/batches, causing a
+	// divide-by-zero panic in Pebble's freed FileCache.
+	var bgWG sync.WaitGroup
+
 	// Start transaction recovery loop
-	go db.transactionRecoveryLoop(ctx)
+	bgWG.Add(1)
+	go func() {
+		defer bgWG.Done()
+		db.transactionRecoveryLoop(ctx)
+	}()
 
 	// Start TTL cleanup job if TTL is configured
 	if db.schema != nil && db.schema.TtlDuration != "" {
 		ttlCleaner := NewTTLCleaner(db)
+		bgWG.Add(1)
 		go func() {
+			defer bgWG.Done()
 			if err := ttlCleaner.Start(ctx, persistFunc); err != nil &&
 				!errors.Is(err, context.Canceled) {
 				db.logger.Error("TTL cleanup job failed", zap.Error(err))
@@ -1197,7 +1209,9 @@ func (db *DBImpl) LeaderFactory(
 
 	// Start edge TTL cleanup job for graph indexes with TTL configured
 	edgeTTLCleaner := NewEdgeTTLCleaner(db)
+	bgWG.Add(1)
 	go func() {
+		defer bgWG.Done()
 		if err := edgeTTLCleaner.Start(ctx, persistFunc); err != nil &&
 			!errors.Is(err, context.Canceled) {
 			db.logger.Error("Edge TTL cleanup job failed", zap.Error(err))
@@ -1212,6 +1226,7 @@ func (db *DBImpl) LeaderFactory(
 		select {
 		case <-ctx.Done():
 			db.logger.Info("Leader factory context cancelled, stepping down as leader")
+			bgWG.Wait()
 			return ctx.Err()
 		case <-db.restartIndexManagerFactory:
 			db.logger.Info("Restarting index manager leader factory")

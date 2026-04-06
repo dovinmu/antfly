@@ -241,6 +241,21 @@ func CreateShardTransitionPlan(
 			}
 		}
 
+		// If an ideal peer is already a voter but hasn't reported yet, treat that
+		// as an in-flight add and defer removals until the replacement actually
+		// comes up. Otherwise we can remove a healthy serving peer before the new
+		// replica is ready.
+		pendingIdealVoter := false
+		for peer := range idealPeersSet {
+			if !currentReportedBySet[peer] && currentVotersSet[peer] {
+				pendingIdealVoter = true
+				break
+			}
+		}
+		if pendingIdealVoter {
+			removePeers = nil
+		}
+
 		// Sort for determinism
 		slices.Sort(addPeers)
 		slices.Sort(removePeers)

@@ -147,6 +147,9 @@ func NewStoreWithOptions(
 	storeMetadataOpts := &pebble.Options{
 		Logger:          &logger.NoopLoggerAndTracer{},
 		LoggerAndTracer: &logger.NoopLoggerAndTracer{},
+		// Store metadata is tiny local coordination state. Disable async table
+		// stats to avoid background Pebble work racing shutdown during tests.
+		DisableTableStats: true,
 	}
 	cache.Apply(storeMetadataOpts, 64<<20) // 64MB fallback
 	db, err := pebble.Open(storeMetadataDir, storeMetadataOpts)
