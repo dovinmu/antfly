@@ -297,7 +297,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.model_check == 'true' || needs.changes.outputs.trace_validate == 'true'
     runs-on: ${{ needs.changes.outputs.trace_validate == 'true' && 'arc-antfly-heavy' || 'arc-antfly-standard' }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       ZIG_LOCAL_CACHE_DIR: /mnt/cache/antfly/zig/${{ github.job }}/${{ github.run_id }}-${{ github.run_attempt }}/zig-local
       ZIG_GLOBAL_CACHE_DIR: /mnt/cache/antfly/zig/zig-global
@@ -355,7 +355,7 @@ jobs:
       - name: Validate raft traces
         if: needs.changes.outputs.trace_validate == 'true'
         working-directory: zig
-        run: make tla-trace-raft TRACE_FILES=/tmp/raft-trace.ndjson
+        run: make tla-trace TRACE=raft TRACE_FILES=/tmp/raft-trace.ndjson
 
       - name: Run transaction tests and extract traces
         if: needs.changes.outputs.trace_validate == 'true'
@@ -370,7 +370,7 @@ jobs:
       - name: Validate transaction traces
         if: needs.changes.outputs.trace_validate == 'true'
         working-directory: zig
-        run: make tla-trace-txn TRACE_FILES=/tmp/txn-trace.ndjson
+        run: make tla-trace TRACE=txn TRACE_FILES=/tmp/txn-trace.ndjson
 
   full-default:
     if: github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || github.event.schedule == '0 8 * * *'
