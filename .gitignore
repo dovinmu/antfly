@@ -94,3 +94,6 @@ scripts/__pycache__/
 
 # TLA+ model checker state directories
 specs/tla/states/
+
+# Lean/Lake local build artifacts
+specs/lean/.lake/

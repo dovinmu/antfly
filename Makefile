@@ -73,6 +73,12 @@ help:
 	@echo "  tla-trace-txn      Validate transaction ndjson traces against AntflyTransaction"
 	@echo "                     Options: TRACE_FILES=path/to/*.ndjson"
 	@echo ""
+	@echo "Lean Proving Commands:"
+	@echo "  lean-build         Build all Lean specs (requires elan + lake)"
+	@echo "  lean-test          Check Lean proofs"
+	@echo "  lean-test-stats    Check Lean stats proofs"
+	@echo "  lean-test-range    Check Lean range proofs"
+	@echo ""
 	@echo "Minikube Commands:"
 	@echo "  minikube-start     Start a Minikube instance"
 	@echo "  minikube-delete    Delete the Minikube instance"
@@ -156,6 +162,28 @@ zig-license-check:
 
 zig-tla-check:
 	$(ZIG_MAKE) tla-check
+
+# ====================================================================================
+# Lean Proving Targets
+# ====================================================================================
+
+.lean-check: ## Check Lean proofs (requires elan + lake)
+	@echo "==> Building Lean specs..."
+	cd specs/lean && lake build 2>&1 || { echo "Lean build failed"; exit 1; }
+
+lean-build: .lean-check ## Build all Lean specs
+
+lean-test: .lean-check ## Check Lean specs (proof elaboration is the test)
+
+.lean-test-stats: ## Check Lean StatsAccumulator proofs
+	cd specs/lean && lake build Antfly.StatsAccumulator 2>&1 || { echo "Lean stats proofs failed"; exit 1; }
+
+lean-test-stats: .lean-test-stats
+
+.lean-test-range: ## Check Lean Range algebra proofs
+	cd specs/lean && lake build Antfly.Range 2>&1 || { echo "Lean range proofs failed"; exit 1; }
+
+lean-test-range: .lean-test-range
 
 lint:
 	$(GO) run golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest -fix -test ./...
@@ -477,3 +505,13 @@ sdk-test: ## Run SDK tests
 
 sdk-lint: ## Run SDK linter
 	(cd ./go/pkg/sdk && $(GO) vet ./...)
+
+# ====================================================================================
+# Lean Proving Go Tests
+# ====================================================================================
+
+.lean-go-test: ## Run Go property tests comparing MergeIndexStats to Lean reference
+	@echo "==> Running Lean proving Go property tests..."
+	cd $(ANTFLY_GO_MODULE) && $(GO) test -v -run 'TestLeanReference' ./src/store/db/indexes/ 2>&1 || { echo "Lean proving Go tests failed"; exit 1; }
+
+lean-go-test: .lean-go-test ## Run Lean proving Go tests
