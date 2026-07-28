@@ -51,6 +51,7 @@ const artifact_ids = @import("artifact_ids.zig");
 const apply_state = @import("derived/apply_state.zig");
 const index_repair_state = @import("derived/index_repair_state.zig");
 const index_generation_manifest = @import("derived/index_generation_manifest.zig");
+const index_lifecycle_trace = @import("index_lifecycle_trace.zig");
 const root_identity = @import("root_identity.zig");
 
 test {
@@ -9866,6 +9867,7 @@ pub const DB = struct {
         }
         entry.intent.updated_at_ms = currentTimeNs() / std.time.ns_per_ms;
         try index_repair_state.putEntryAt(alloc, location, state.identity, expected, entry);
+        index_lifecycle_trace.intent("PersistIntentPhase", entry.intent, null, entry.intent.last_error);
         if (indexRepairIntentBlocksService(entry.intent)) {
             try self.core.index_manager.markRepairUnavailable(entry.intent.index_name);
         } else {
@@ -10660,14 +10662,23 @@ pub const DB = struct {
         const now_ms = currentTimeNs() / std.time.ns_per_ms;
         const attempt_count = @max(entry.intent.attempt_count, 1);
         const failure_streak = entry.intent.failure_streak +| 1;
+        const next_retry_at_ms = if (terminal)
+            0
+        else
+            now_ms +| indexRepairRetryDelayMs(repair_id, failure_streak);
         try self.updateIndexRepairIntent(alloc, repair_id, .{
             .phase = if (terminal) .terminal else entry.intent.phase,
             .attempt_count = attempt_count,
             .failure_streak = failure_streak,
-            .next_retry_at_ms = if (terminal) 0 else now_ms +| indexRepairRetryDelayMs(repair_id, failure_streak),
+            .next_retry_at_ms = next_retry_at_ms,
             .last_error = err_name,
             .replace_last_error = true,
         });
+        entry.intent.phase = if (terminal) .terminal else entry.intent.phase;
+        entry.intent.attempt_count = attempt_count;
+        entry.intent.failure_streak = failure_streak;
+        entry.intent.next_retry_at_ms = next_retry_at_ms;
+        index_lifecycle_trace.intent("FailBuild", entry.intent, false, err_name);
     }
 
     fn indexRepairFailureIsTerminal(err: anyerror) bool {
@@ -10764,6 +10775,7 @@ pub const DB = struct {
             error.NotFound => {},
             else => return err,
         };
+        index_lifecycle_trace.intent("ObserveReady", entry.intent, false, null);
         try index_repair_state.removeEntryAndPinAt(alloc, location, state.identity, .{
             .repair_id = repair_id,
             .revision = entry.intent.revision,
@@ -10838,6 +10850,7 @@ pub const DB = struct {
         {
             return false;
         }
+        index_lifecycle_trace.intent("SwapGeneration", entry.intent, true, "recovered_active_pointer");
 
         try self.core.index_manager.syncIndexByName(entry.intent.index_name, true);
         const checkpoint = try self.core.loadProjectionCheckpoint(alloc, entry.intent.index_name);
@@ -11252,6 +11265,7 @@ pub const DB = struct {
                 });
                 entry.intent.phase = retry_phase;
             } else {
+                index_lifecycle_trace.intent("WorkerDeferred", entry.intent, false, "terminal");
                 result.terminal = true;
                 return result;
             }
@@ -11271,17 +11285,20 @@ pub const DB = struct {
             return result;
         }
         if (entry.intent.automation == .paused) {
+            index_lifecycle_trace.intent("WorkerDeferred", entry.intent, false, "automation_paused");
             result.deferred = true;
             return result;
         }
         const now_ms = currentTimeNs() / std.time.ns_per_ms;
         if (entry.intent.next_retry_at_ms > now_ms) {
+            index_lifecycle_trace.intent("WorkerDeferred", entry.intent, false, "retry_deadline");
             result.deferred = true;
             result.next_retry_at_ms = entry.intent.next_retry_at_ms;
             return result;
         }
         checkArtifactRepairActivationOwner(options) catch |err| switch (err) {
             error.RepairOwnershipLost => {
+                index_lifecycle_trace.intent("WorkerDeferred", entry.intent, false, "ownership_lost");
                 result.deferred = true;
                 return result;
             },
@@ -11459,6 +11476,7 @@ pub const DB = struct {
             else => return err,
         };
         defer disk_reservation.release();
+        index_lifecycle_trace.intent("AdmitWorker", entry.intent, true, null);
         var capacity_guard = RepairCapacityGuard{
             .reservation = &disk_reservation,
             .db = self,
@@ -12787,6 +12805,16 @@ pub const DB = struct {
         );
         unpublished_replacement = null;
         shadow_installed = true;
+        if (durable_repair_id) |repair_id| {
+            index_lifecycle_trace.activation(
+                self.localRepairGroupId(),
+                cfg.name,
+                repair_id,
+                types.indexConfigHash(cfg),
+                reached_target,
+                final_target,
+            );
+        }
         if (self.shadow_index_repair_hook) |hook| {
             if (hook.after_pointer_activation) |after_activation| try after_activation(hook.ptr, self, cfg.name);
         }
@@ -15117,10 +15145,25 @@ pub const DB = struct {
             .managed_full_text => try self.core.addManagedIndex(cfg, admission_write),
         };
         catalog_committed = true;
+        index_lifecycle_trace.admission(
+            self.localRepairGroupId(),
+            cfg.name,
+            types.indexConfigHash(cfg),
+            self.core.nextDerivedSequence(),
+            disposition == .managed_rebuild,
+        );
         // Publish outbox work only after the catalog/marker transaction is
         // durable. Any later failure leaves a generation that the scheduler
         // can drain without relying on the failed request to reach its tail.
-        if (disposition == .managed_rebuild) self.requestManagedAdmissionMaterialization();
+        if (disposition == .managed_rebuild) {
+            index_lifecycle_trace.queued(
+                self.localRepairGroupId(),
+                cfg.name,
+                types.indexConfigHash(cfg),
+                self.core.nextDerivedSequence(),
+            );
+            self.requestManagedAdmissionMaterialization();
+        }
 
         var post_commit_error: ?anyerror = if (builtin.is_test and test_fail_index_activation_after_catalog_commit)
             error.TestPostCommitIndexActivation
