@@ -3479,3 +3479,55 @@ test "merge segments with sparse field coverage" {
     try std.testing.expect(cat_inv.lookup("books") != null);
     try std.testing.expect(cat_inv.lookup("music") != null);
 }
+
+// Demonstrates that a v3 segment carries no integrity check on open.
+//
+// All three segment writers store a literal zero in the footer checksum slot,
+// and SegmentReader.init only validates when that slot is non-zero, so the
+// normal path performs no verification beyond the 4-byte magic and the version
+// field. That is a deliberate tradeoff -- validating would fault the whole
+// segment resident on an mmap open -- but segments carry stored documents,
+// postings, and vector sections, so a torn write, a bad compaction merge, or
+// bit rot inside one is indistinguishable from good data.
+//
+// This test pins the current behavior rather than asserting it is correct. If
+// checksums are ever enabled by default, it should start failing, which is the
+// point: it marks exactly where silent corruption enters.
+test "segment open does not detect stored-document corruption" {
+    const alloc = std.testing.allocator;
+
+    var seg_writer = SegmentWriter.init(alloc);
+    defer seg_writer.deinit();
+    try seg_writer.addStoredDoc("doc-1", "the original payload");
+    const seg_bytes = try seg_writer.build();
+    defer alloc.free(seg_bytes);
+
+    // Sanity: the segment reads back correctly before corruption.
+    {
+        var reader = try SegmentReader.init(alloc, seg_bytes);
+        defer reader.deinit();
+        const doc = (try reader.storedDocDecompressed(alloc, 0)) orelse return error.TestExpectedEqual;
+        defer alloc.free(doc.data);
+        try std.testing.expectEqualStrings("the original payload", doc.data);
+    }
+
+    // The footer checksum slot is written as zero, so nothing covers the body.
+    const stored_crc = std.mem.readInt(u32, seg_bytes[seg_bytes.len - 8 ..][0..4], .big);
+    try std.testing.expectEqual(@as(u32, 0), stored_crc);
+
+    // Flip one bit in the body, well clear of the footer, emulating bit rot or
+    // a torn write landing mid-segment.
+    const corrupted = try alloc.dupe(u8, seg_bytes);
+    defer alloc.free(corrupted);
+    const flip_at = (seg_bytes.len - footer_size) / 2;
+    corrupted[flip_at] ^= 0x40;
+
+    // The reader opens it without complaint: no CrcMismatch, no error at all.
+    var reader = SegmentReader.init(alloc, corrupted) catch |err| {
+        // If a future change makes this detectable, that is a fix, not a
+        // regression -- but the expectation below documents today's behavior.
+        std.debug.print("\nsegment corruption now detected on open: {t}\n", .{err});
+        return err;
+    };
+    reader.deinit();
+}
