@@ -4524,3 +4524,81 @@ test "persistent sim soak stays green" {
     if (!storage_sim_soak) return;
     try runPersistentSoak(std.testing.allocator);
 }
+
+// Demonstrates that a present-but-invalid segment is silently dropped, not
+// merely skipped, when the index is reopened for writing.
+//
+// PersistentIndex.open hands each active segment to addSegmentWithIdData,
+// which validates via SegmentReader.init. A structural failure there
+// (InvalidMagic/InvalidSegment/UnsupportedVersion, or CrcMismatch once
+// checksums are enabled) is classified by isStaleActiveSegmentDataError as
+// "stale" -- the same bucket as FileNotFound -- and pruneMissingActiveSegmentsLocked
+// then deletes the segment entry, its deletion bitmap, and its key range, and
+// commits. The document it held is gone, with only a log.warn behind it.
+//
+// This test pins that behavior. If corruption is ever routed to a fail-closed
+// repair state instead of a committed delete, it should start failing.
+test "persistent index silently drops a corrupt segment on reopen" {
+    const alloc = std.testing.allocator;
+    var path_buf: [256]u8 = undefined;
+    const path = persistTmpPath(&path_buf);
+    defer cleanupPersistDir(path);
+
+    {
+        var pi = try PersistentIndex.open(alloc, .{ .path = path });
+        defer pi.close();
+
+        const seg1 = try buildSimpleSegment(alloc, "doc1", "hello");
+        defer alloc.free(seg1);
+        try pi.indexSegment(seg1);
+
+        const seg2 = try buildSimpleSegment(alloc, "doc2", "world");
+        defer alloc.free(seg2);
+        try pi.indexSegment(seg2);
+
+        try std.testing.expectEqual(@as(u32, 2), pi.snapshot().global_doc_count);
+    }
+
+    // Corrupt exactly one segment file on disk by clobbering its trailing
+    // magic, which is the cheapest way to make SegmentReader.init reject it.
+    var corrupted: usize = 0;
+    {
+        const io = std.testing.io;
+        var dir = try std.Io.Dir.cwd().openDir(io, std.mem.span(path), .{ .iterate = true });
+        defer dir.close(io);
+
+        var walker = try dir.walk(alloc);
+        defer walker.deinit();
+
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            const full = try std.fs.path.join(alloc, &.{ std.mem.span(path), entry.path });
+            defer alloc.free(full);
+
+            const contents = std.Io.Dir.cwd().readFileAlloc(io, full, alloc, .limited(8 * 1024 * 1024)) catch continue;
+            defer alloc.free(contents);
+            if (contents.len < 4) continue;
+            if (!std.mem.eql(u8, contents[contents.len - 4 ..], "AFSM")) continue;
+
+            @memcpy(contents[contents.len - 4 ..], "XXXX");
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = full, .data = contents });
+            corrupted += 1;
+            break;
+        }
+    }
+    if (corrupted == 0) return error.SkipZigTest; // segments are not separate files here
+
+    {
+        var pi = try PersistentIndex.open(alloc, .{ .path = path });
+        defer pi.close();
+
+        // The corrupt segment's document is gone. Open succeeded regardless:
+        // no error surfaced to the caller.
+        const remaining = pi.snapshot().global_doc_count;
+        std.debug.print(
+            "\ncorrupt-segment reopen: doc_count went 2 -> {d} (open returned no error)\n",
+            .{remaining},
+        );
+        try std.testing.expect(remaining < 2);
+    }
+}
