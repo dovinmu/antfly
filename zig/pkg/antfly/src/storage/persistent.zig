@@ -4520,6 +4520,37 @@ test "persistent modeled sim workload stays green" {
     try runModeledPersistentReplayCase(std.testing.allocator, "persistent-modeled-sim", 0xA17F_B501, 18);
 }
 
+// Seed sweep over the modeled-persistent replay case.
+//
+// The campaign above pins one seed at 18 steps. This replays the same modeled
+// storage case across a seed range and prints the failing seed for a
+// deterministic repro. Named to avoid the unit-test "persistent sim " and
+// "persistent modeled " skip filters, so it runs only when asked for by name:
+//
+//   ANTFLY_PERSIST_SWEEP_SEED_START=1 ANTFLY_PERSIST_SWEEP_SEED_COUNT=200 \
+//     ANTFLY_PERSIST_SWEEP_STEPS=64 zig build unit-test -- "persistent seeded sweep"
+fn persistSweepEnv(comptime name: [:0]const u8, fallback: u64) u64 {
+    const raw_z = std.c.getenv(name.ptr) orelse return fallback;
+    return std.fmt.parseUnsigned(u64, std.mem.sliceTo(raw_z, 0), 0) catch fallback;
+}
+
+test "persistent seeded sweep campaign" {
+    const start = persistSweepEnv("ANTFLY_PERSIST_SWEEP_SEED_START", 0xA17F_B501);
+    const count = persistSweepEnv("ANTFLY_PERSIST_SWEEP_SEED_COUNT", 1);
+    const steps: usize = @intCast(persistSweepEnv("ANTFLY_PERSIST_SWEEP_STEPS", 18));
+
+    for (0..count) |i| {
+        const seed = start +% i;
+        runModeledPersistentReplayCase(std.testing.allocator, "sweep", seed, steps) catch |err| {
+            std.debug.print(
+                "\nPERSIST SWEEP FAILURE seed=0x{X} steps={d} err={t}\n",
+                .{ seed, steps, err },
+            );
+            return err;
+        };
+    }
+}
+
 test "persistent sim soak stays green" {
     if (!storage_sim_soak) return;
     try runPersistentSoak(std.testing.allocator);
