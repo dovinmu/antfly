@@ -5771,6 +5771,80 @@ test "metadata VOPR expanded generated workload campaign" {
     });
 }
 
+/// Reads a positive integer from the environment, falling back to `fallback`.
+///
+/// Used only by the sweep campaigns below, which exist to drive the VOPR
+/// harness across many seeds rather than the two fixed ones CI pins.
+fn voprEnvUsize(comptime name: [:0]const u8, fallback: usize) usize {
+    const raw_z = std.c.getenv(name.ptr) orelse return fallback;
+    return std.fmt.parseUnsigned(usize, std.mem.sliceTo(raw_z, 0), 0) catch fallback;
+}
+
+fn voprEnvU64(comptime name: [:0]const u8, fallback: u64) u64 {
+    const raw_z = std.c.getenv(name.ptr) orelse return fallback;
+    return std.fmt.parseUnsigned(u64, std.mem.sliceTo(raw_z, 0), 0) catch fallback;
+}
+
+// Deliberately named so neither the `lib-metadata-vopr-test` filters (which
+// match the two campaign names above) nor the `unit-test` skip filter for
+// "metadata VOPR" will schedule these. They run only when asked for by name:
+//
+//   ANTFLY_VOPR_SEED_START=1 ANTFLY_VOPR_SEED_COUNT=200 ANTFLY_VOPR_OPS=256 \
+//     zig build lib-metadata-vopr-test -- "metadata VOPR seed sweep"
+//
+// A failure prints the exact seed, which reproduces deterministically via
+// ANTFLY_VOPR_SEED_START=<seed> ANTFLY_VOPR_SEED_COUNT=1.
+test "metadata VOPR seed sweep smoke workload" {
+    const start = voprEnvU64("ANTFLY_VOPR_SEED_START", 0xA17F_0001);
+    const count = voprEnvUsize("ANTFLY_VOPR_SEED_COUNT", 1);
+    const ops = voprEnvUsize("ANTFLY_VOPR_OPS", 24);
+
+    for (0..count) |i| {
+        const seed = start +% i;
+        runMetadataVoprCampaign(std.testing.allocator, .{
+            .seed = seed,
+            .operation_count = ops,
+            .metadata_group_id = 6100,
+            .table_id = 6101,
+            .range_group_id = 6102,
+            .split_group_id = 6103,
+            .split_transition_id = 6104,
+        }) catch |err| {
+            std.debug.print(
+                "\nVOPR SWEEP FAILURE workload=smoke seed=0x{X} ops={d} err={t}\n",
+                .{ seed, ops, err },
+            );
+            return err;
+        };
+    }
+}
+
+test "metadata VOPR seed sweep expanded workload" {
+    const start = voprEnvU64("ANTFLY_VOPR_SEED_START", 0xA17F_0002);
+    const count = voprEnvUsize("ANTFLY_VOPR_SEED_COUNT", 1);
+    const ops = voprEnvUsize("ANTFLY_VOPR_OPS", 48);
+
+    for (0..count) |i| {
+        const seed = start +% i;
+        runMetadataVoprCampaign(std.testing.allocator, .{
+            .seed = seed,
+            .operation_count = ops,
+            .metadata_group_id = 6200,
+            .table_id = 6201,
+            .range_group_id = 6202,
+            .split_group_id = 6203,
+            .split_transition_id = 6204,
+            .workload = .expanded,
+        }) catch |err| {
+            std.debug.print(
+                "\nVOPR SWEEP FAILURE workload=expanded seed=0x{X} ops={d} err={t}\n",
+                .{ seed, ops, err },
+            );
+            return err;
+        };
+    }
+}
+
 fn startMetadataAdminServers(
     comptime N: usize,
     alloc: std.mem.Allocator,
