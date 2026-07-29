@@ -2964,6 +2964,39 @@ test "wal modeled VOPR campaign stays green" {
     try runModeledWalSimCase(std.testing.allocator, "seed-b", 0xA17F_5002, 24);
 }
 
+// Seed sweep over the modeled-WAL VOPR case.
+//
+// The campaign above pins two seeds at 24 steps, so it only ever explores that
+// pair of schedules. This replays the same modeled-storage case across a seed
+// range and prints the failing seed, which reproduces deterministically.
+//
+//   ANTFLY_WAL_SWEEP_SEED_START=1 ANTFLY_WAL_SWEEP_SEED_COUNT=500 \
+//     ANTFLY_WAL_SWEEP_STEPS=128 zig build unit-test -- "wal seeded sweep"
+//
+// Named to avoid the unit-test "wal modeled "/"wal sim " skip filters and the
+// hardcoded wal-vopr-test filters, so it runs only when requested by name.
+fn walSweepEnv(comptime name: [:0]const u8, fallback: u64) u64 {
+    const raw_z = std.c.getenv(name.ptr) orelse return fallback;
+    return std.fmt.parseUnsigned(u64, std.mem.sliceTo(raw_z, 0), 0) catch fallback;
+}
+
+test "wal seeded sweep campaign" {
+    const start = walSweepEnv("ANTFLY_WAL_SWEEP_SEED_START", 0xA17F_5001);
+    const count = walSweepEnv("ANTFLY_WAL_SWEEP_SEED_COUNT", 1);
+    const steps: usize = @intCast(walSweepEnv("ANTFLY_WAL_SWEEP_STEPS", 24));
+
+    for (0..count) |i| {
+        const seed = start +% i;
+        runModeledWalSimCase(std.testing.allocator, "sweep", seed, steps) catch |err| {
+            std.debug.print(
+                "\nWAL SWEEP FAILURE seed=0x{X} steps={d} err={t}\n",
+                .{ seed, steps, err },
+            );
+            return err;
+        };
+    }
+}
+
 test "wal modeled replay fixtures stay green" {
     try runModeledWalReplayFixtures(std.testing.allocator);
 }
