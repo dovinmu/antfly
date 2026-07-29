@@ -502,7 +502,13 @@ fn parseTransformOps(alloc: std.mem.Allocator, value: std.json.Value) ![]db_mod.
     const ops = try alloc.alloc(db_mod.types.TransformOp, values.len);
     var initialized: usize = 0;
     errdefer {
-        freeTransformOps(alloc, ops[0..initialized]);
+        // Free only the initialized elements; `alloc.free(ops)` below owns the
+        // backing slice. Calling freeTransformOps here would free that slice a
+        // second time (and at the wrong length) once `initialized > 0`.
+        for (ops[0..initialized]) |op| {
+            alloc.free(@constCast(op.path));
+            if (op.value_json) |value_json| alloc.free(@constCast(value_json));
+        }
         alloc.free(ops);
     }
 
@@ -801,6 +807,50 @@ test "batch parser rejects every recognized but unsupported transform operator" 
             parseBatchRequest(std.testing.allocator, body),
         );
     }
+}
+
+test "batch parser rejects a trailing unsupported operator without double-freeing" {
+    // The single-operation cases above cannot reach the cleanup bug: they fail
+    // with zero operations initialized, so the errdefer never frees an element.
+    // A supported operation followed by an unsupported one is what exercises it,
+    // and is the shape a client actually sends.
+    const unsupported = [_][]const u8{
+        "$push",
+        "$pull",
+        "$pop",
+        "$mul",
+        "$min",
+        "$currentDate",
+        "$rename",
+    };
+    for (unsupported) |op| {
+        const body = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"transforms\":[{{\"key\":\"doc:a\",\"operations\":[" ++
+                "{{\"op\":\"$set\",\"path\":\"changed\",\"value\":true}}," ++
+                "{{\"op\":\"{s}\",\"path\":\"field\",\"value\":1}}]}}]}}",
+            .{op},
+        );
+        defer std.testing.allocator.free(body);
+        try std.testing.expectError(
+            error.InvalidBatchRequest,
+            parseBatchRequest(std.testing.allocator, body),
+        );
+    }
+}
+
+test "batch parser rejects an unsupported operator across multiple transforms" {
+    // Exercises the outer parseTransforms cleanup path with one fully-built
+    // transform already stored before the second one fails mid-operation.
+    try std.testing.expectError(
+        error.InvalidBatchRequest,
+        parseBatchRequest(std.testing.allocator,
+            \\{"transforms":[
+            \\{"key":"doc:a","operations":[{"op":"$set","path":"x","value":1}]},
+            \\{"key":"doc:b","operations":[{"op":"$inc","path":"y","value":2},{"op":"$push","path":"z","value":3}]}
+            \\]}
+        ),
+    );
 }
 
 test "batch parser preserves packed embeddings for mapper extraction" {
