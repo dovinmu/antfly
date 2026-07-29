@@ -901,3 +901,136 @@ test "batch parser accepts compact vdbbench-shaped embeddings batch" {
     try std.testing.expect(std.mem.indexOf(u8, extracted.cleaned_value.?, "\"vec_data\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, extracted.cleaned_value.?, "_embeddings") == null);
 }
+
+// Structure-aware randomized sweeps over the hand-rolled request parsers.
+//
+// Byte-level fuzzing is close to useless against these: the interesting
+// failures live past the JSON layer, in the manual allocation and errdefer
+// cleanup code. The double-free this file used to carry required a *valid*
+// request whose second operation was unsupported, which random bytes would
+// essentially never produce. So generate well-formed request shapes and vary
+// only the parts that drive allocation and error paths.
+//
+// These use a seeded PRNG rather than std.testing.fuzz because the repository
+// installs a custom test runner (build.zig defaults tests.test_runner to
+// pkg/antfly/src/test_runner.zig), and std.testing.fuzz requires the runner to
+// export a `fuzz` entry point that runner does not define -- it fails to
+// compile with "root source file struct 'test_runner' has no member named
+// 'fuzz'". A seeded sweep needs no runner support and reproduces exactly.
+//
+//   ANTFLY_PARSER_FUZZ_SEED=1 ANTFLY_PARSER_FUZZ_ITERS=200000 \
+//     zig build unit-test -- "parser sweep"
+//
+// std.testing.allocator turns any double-free, use-after-free, or leak on a
+// partially-built request into a hard failure rather than a latent segfault.
+fn parserSweepEnv(comptime name: [:0]const u8, fallback: u64) u64 {
+    const raw_z = std.c.getenv(name.ptr) orelse return fallback;
+    return std.fmt.parseUnsigned(u64, std.mem.sliceTo(raw_z, 0), 0) catch fallback;
+}
+
+test "batch transform parser sweep" {
+    const alloc = std.testing.allocator;
+    const op_names = [_][]const u8{
+        "$set",    "$setOnInsert", "$unset", "$inc",
+        "$max",    "$addToSet",    "$push",  "$pull",
+        "$pop",    "$mul",         "$min",   "$currentDate",
+        "$rename", "$bogus",       "",       "set",
+    };
+    const value_json = [_][]const u8{
+        "1", "true", "\"s\"", "null", "[1,2]", "{\"a\":1}", "\"\"", "-0.5",
+    };
+
+    const seed = parserSweepEnv("ANTFLY_PARSER_FUZZ_SEED", 0xB47C_0001);
+    const iters = parserSweepEnv("ANTFLY_PARSER_FUZZ_ITERS", 512);
+
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(alloc);
+
+    for (0..iters) |i| {
+        var prng = std.Random.DefaultPrng.init(seed +% i);
+        const rand = prng.random();
+
+        body.clearRetainingCapacity();
+        try body.appendSlice(alloc, "{\"transforms\":[");
+        const transform_count = rand.uintLessThan(usize, 4);
+        for (0..transform_count) |t| {
+            if (t > 0) try body.append(alloc, ',');
+            try body.appendSlice(alloc, "{");
+            if (rand.uintLessThan(u8, 10) > 0) try body.appendSlice(alloc, "\"key\":\"doc:a\",");
+            try body.appendSlice(alloc, "\"operations\":[");
+            const op_count = rand.uintLessThan(usize, 5);
+            for (0..op_count) |o| {
+                if (o > 0) try body.append(alloc, ',');
+                try body.appendSlice(alloc, "{\"op\":\"");
+                try body.appendSlice(alloc, op_names[rand.uintLessThan(usize, op_names.len)]);
+                try body.append(alloc, '"');
+                if (rand.uintLessThan(u8, 10) > 1) try body.appendSlice(alloc, ",\"path\":\"f\"");
+                if (rand.uintLessThan(u8, 10) > 3) {
+                    try body.appendSlice(alloc, ",\"value\":");
+                    try body.appendSlice(alloc, value_json[rand.uintLessThan(usize, value_json.len)]);
+                }
+                try body.append(alloc, '}');
+            }
+            try body.append(alloc, ']');
+            if (rand.uintLessThan(u8, 4) == 0) try body.appendSlice(alloc, ",\"upsert\":true");
+            try body.append(alloc, '}');
+        }
+        try body.appendSlice(alloc, "]}");
+
+        var parsed = parseBatchRequest(alloc, body.items) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => continue,
+        };
+        parsed.deinit(alloc);
+    }
+}
+
+test "table contract parser sweep" {
+    const alloc = std.testing.allocator;
+    const table_contract = @import("table_contract.zig");
+    const index_types = [_][]const u8{
+        "\"full_text\"",   "\"embeddings\"", "\"graph\"", "\"algebraic\"",
+        "\"aknn_v0\"",     "\"\"",           "7",         "\"dense_vector\"",
+        "null",            "[]",             "{}",        "true",
+    };
+    const extras = [_][]const u8{
+        "",
+        ",\"dimension\":3",
+        ",\"dimension\":-1",
+        ",\"edge_types\":[\"a\"]",
+        ",\"fields\":{\"body\":{}}",
+        ",\"external\":true",
+        ",\"name\":\"idx\"",
+    };
+
+    const seed = parserSweepEnv("ANTFLY_PARSER_FUZZ_SEED", 0xB47C_0002);
+    const iters = parserSweepEnv("ANTFLY_PARSER_FUZZ_ITERS", 512);
+
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(alloc);
+
+    for (0..iters) |i| {
+        var prng = std.Random.DefaultPrng.init(seed +% i);
+        const rand = prng.random();
+
+        body.clearRetainingCapacity();
+        try body.appendSlice(alloc, "{\"indexes\":{");
+        const index_count = rand.uintLessThan(usize, 4);
+        for (0..index_count) |n| {
+            if (n > 0) try body.append(alloc, ',');
+            try body.appendSlice(alloc, "\"idx");
+            try body.append(alloc, @as(u8, '0') + @as(u8, @intCast(n)));
+            try body.appendSlice(alloc, "\":{\"type\":");
+            try body.appendSlice(alloc, index_types[rand.uintLessThan(usize, index_types.len)]);
+            try body.appendSlice(alloc, extras[rand.uintLessThan(usize, extras.len)]);
+            try body.append(alloc, '}');
+        }
+        try body.appendSlice(alloc, "}}");
+
+        var req = table_contract.parseCreateTableRequest(alloc, body.items) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => continue,
+        };
+        req.deinit(alloc);
+    }
+}
