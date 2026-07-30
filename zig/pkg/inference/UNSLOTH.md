@@ -46,7 +46,9 @@ requires downloading the complete 16-17 GiB model file.
 
 ### `gemma-4-26B-A4B-it-UD-Q4_K_M.gguf`
 
-- File size from Hugging Face HEAD: 16,868,240,704 bytes.
+- Validated Hugging Face revision: `c099eb48e663fd284577b04978a94ffccb261841`.
+- File size: 16,947,541,728 bytes.
+- SHA-256: `f2c28b3dc4776931ac6f879e11f203dec637ea0f14267a86ec8f6165f63f293f`.
 - GGUF version: 3.
 - Tensor count: 658.
 - Metadata entries: 60.
@@ -61,12 +63,12 @@ Tensor-type histogram:
 | Type | Name | Count |
 | --- | --- | ---: |
 | 0 | `F32` | 392 |
-| 7 | `Q5_1` | 30 |
-| 8 | `Q8_0` | 206 |
+| 7 | `Q5_1` | 29 |
+| 8 | `Q8_0` | 207 |
 | 12 | `Q4_K` | 30 |
 
-All 30 `Q5_1` tensors are `blk.N.ffn_down_exps.weight` with shape
-`[704, 2816, 128]`.
+The `Q5_1` tensors are packed `blk.N.ffn_down_exps.weight` tensors with shape
+`[704, 2816, 128]`; one layer uses `Q8_0` instead.
 
 ### `gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf`
 
@@ -116,13 +118,14 @@ is `blk.1.ffn_gate_up_exps.weight` with shape `[2816, 1408, 128]`.
 - [ ] Ensure every hot path has fast backend support where practical:
   native direct matmul, Metal device-native linear, Metal grouped MoE, and optional
   WebGPU dispatch.
-- [ ] Run and record the real text smoke for
+- [x] Run and record the real text smoke for
   `unsloth/gemma-4-26B-A4B-it-GGUF:gguf:UD-Q4_K_M` using the recipe below.
   It must verify:
   - no unsupported tensor types
   - no unmapped Gemma 4 text tensors
   - a short text-only generation completes
-  - quantized execution counters are hit
+  - packed expert and fused gate/up views select their correct quantized byte
+    spans
 - [ ] Add a multimodal smoke with the companion `mmproj` once text-only is
   stable.
 
@@ -160,8 +163,8 @@ antfly inference smoke ~/.antfly/inference/models/unsloth/gemma-4-26B-A4B-it-GGU
 The default backend is `auto`. Do not force `--backend native` for the normal
 smoke; `auto` uses the best compiled backend available and is the closest path
 to how users run the model. Use `--backend native` only when intentionally
-validating CPU fallback behavior, and use `--backend metal` or `--backend metal`
-when isolating those backend-specific paths.
+validating CPU fallback behavior, and use `--backend metal` when isolating the
+Metal path.
 
 For the 26B `UD-Q4_K_M` artifact, the local Metal smoke needs an explicit
 backend budget because the weight file is about 16 GiB and the default Metal
@@ -169,31 +172,36 @@ budget is lower:
 
 ```sh
 antfly inference smoke ~/.antfly/inference/models/unsloth/gemma-4-26B-A4B-it-GGUF "hello" \
-  --backend metal --backend-budget-mb 18000 --max-tokens 4
+  --backend metal --backend-budget-mb 24000 --combined-budget-mb 30000 --max-tokens 4
 ```
 
-Local result:
+Local correctness result on an Apple M4 Max with 36 GB unified memory:
 
 - `native backend=metal`
 - `chat_template=true`
 - `unsupported_tensor_types=none`
 - `missing_required_tensors=none`
 - `unmapped_gguf_tensor_names=none`
-- `finish_reason=length tokens=4`
-- generated text remained nonsensical (`Sund sameanja same` under the local
-  validator run), so this is only an execution smoke pass, not a quality or
-  logits-parity pass
-- Metal API and GPU validation reported no shader validation failure or crash in
-  the local 4-token debug bundle
+- the 27 prompt token IDs exactly matched llama.cpp for
+  `What is 2 + 2? Reply with only the numeral.`
+- greedy one-token output was `4` in both Antfly inference and llama.cpp
+- Metal API and GPU validation reported no shader validation failure or crash
+
+ReleaseSmall throughput on the same machine and model, with the same chat
+template, prompt, greedy sampling, 32 generated tokens, and EOS ignored:
+
+| Engine | Prompt tokens/s | Generated tokens/s |
+| --- | ---: | ---: |
+| Antfly inference Metal | 11.1 | 1.762 |
+| llama.cpp b9870 Metal (`-ngl 999`) | 234.6 | 77.9 |
+
+llama.cpp is about 21.2x faster for this short prefill and 44.2x faster for
+decode. The correctness fallback is therefore usable for bounded validation,
+but grouped Metal MoE execution remains the main performance follow-up.
 
 The smoke still reports packed MoE expert tensors separately as
 `packed_moe_expert_tensors`; those are expected Gemma 4 expert-pack samples,
 not unmapped decoder weights.
-
-The remaining proof gap is the quantized execution assertion. If `antfly inference smoke`
-does not print enough runtime counters to prove direct quantized execution for
-this model, add or expose those counters in smoke output before marking the real
-text smoke complete.
 
 ## Implementation Notes
 

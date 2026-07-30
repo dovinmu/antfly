@@ -6973,17 +6973,18 @@ pub fn linearNoBiasQuantized(
 
     switch (storage.tensor_type) {
         .known => |known| if (known == .Q4_0 or known == .Q4_1 or known == .Q5_0 or known == .Q5_1) {
-            if (storage.packed_expert != null) return false;
-            if (storage.shape.len != 2) return false;
-            if (storage.shape[0] != out_dim or storage.shape[1] != in_dim) return false;
-            const values_per_block: usize = 32;
-            if (in_dim % values_per_block != 0) return error.InvalidQuantizedLinearShape;
-            const row_blocks = in_dim / values_per_block;
-            if (shouldUseQ8_0ActivationQuant(rows, out_dim, row_blocks)) {
-                if (storage.preparedBytes(.row_major_blocks)) |prepared_blocks| {
-                    try linearNoBiasLegacyPreparedActivation(storage.allocator, io, input, prepared_blocks, storage.preparedBytes(.panel4), known != .Q4_0, output, rows, in_dim, out_dim);
-                    noteNativeQuantDispatch(.legacy_activation);
-                    return true;
+            if (storage.packed_expert == null) {
+                if (storage.shape.len != 2) return false;
+                if (storage.shape[0] != out_dim or storage.shape[1] != in_dim) return false;
+                const values_per_block: usize = 32;
+                if (in_dim % values_per_block != 0) return error.InvalidQuantizedLinearShape;
+                const row_blocks = in_dim / values_per_block;
+                if (shouldUseQ8_0ActivationQuant(rows, out_dim, row_blocks)) {
+                    if (storage.preparedBytes(.row_major_blocks)) |prepared_blocks| {
+                        try linearNoBiasLegacyPreparedActivation(storage.allocator, io, input, prepared_blocks, storage.preparedBytes(.panel4), known != .Q4_0, output, rows, in_dim, out_dim);
+                        noteNativeQuantDispatch(.legacy_activation);
+                        return true;
+                    }
                 }
             }
         },
@@ -40570,6 +40571,40 @@ test "linear packed q8_0 kernel supports ggml expert-last layout" {
     try linearNoBiasPackedQuantized(&input, &storage, storage.packed_expert.?, &output, 1, 32, 2, .{ .known = .Q8_0 });
     try std.testing.expectApproxEqAbs(@as(f32, 96.0), output[0], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 128.0), output[1], 1e-4);
+}
+
+test "linear packed q5_1 dispatch reaches generic packed kernel" {
+    const allocator = std.testing.allocator;
+    const in_dim = 32;
+    const out_dim = 2;
+    const expert_count = 2;
+    var dense: [expert_count * out_dim * in_dim]f32 = undefined;
+    for (&dense, 0..) |*value, idx| {
+        const expert = idx / (out_dim * in_dim);
+        const row = (idx / in_dim) % out_dim;
+        value.* = @floatFromInt(1 + expert * 2 + row);
+    }
+    const weight_raw = try quant_codec.quantizeQ5_1FromF32(allocator, &dense);
+    defer allocator.free(weight_raw);
+
+    var input: [in_dim]f32 = [_]f32{1.0} ** in_dim;
+    var output: [out_dim]f32 = [_]f32{0.0} ** out_dim;
+    const storage = QuantizedStorage{
+        .tensor_type = .{ .known = .Q5_1 },
+        .raw_bytes = weight_raw,
+        .shape = &.{ expert_count, out_dim, in_dim },
+        .packed_expert = .{
+            .expert_index = 1,
+            .expert_count = expert_count,
+            .expert_axis = 0,
+        },
+        .raw_owned = false,
+        .allocator = allocator,
+    };
+
+    try std.testing.expect(try linearNoBiasQuantized(null, &storage, &input, &output, 1, in_dim, out_dim));
+    try std.testing.expectApproxEqAbs(@as(f32, 96.0), output[0], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 128.0), output[1], 1e-3);
 }
 
 test "native mulMatId supports ggml expert-last dense layout" {

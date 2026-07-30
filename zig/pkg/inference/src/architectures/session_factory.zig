@@ -1635,6 +1635,8 @@ fn overlayGptStructuralConfig(target: *gpt_mod.Config, source: gpt_mod.Config) v
     }
     target.num_local_experts = source.num_local_experts;
     target.num_experts_per_tok = source.num_experts_per_tok;
+    target.num_shared_experts = source.num_shared_experts;
+    target.expert_intermediate_size = source.expert_intermediate_size;
     if (target.family == .other or source.family != .llama or target.family == .llama) {
         target.norm_type = source.norm_type;
         target.position_encoding = source.position_encoding;
@@ -2671,7 +2673,69 @@ fn appendPackedMoeLazyWeights(
         });
     }
 
+    try appendPackedMoeExpertViews(
+        allocator,
+        lazy_weights,
+        gpt_cfg,
+        packed_tensor,
+        &base_ref,
+        projs,
+        plan_context,
+    );
+
     return true;
+}
+
+fn appendPackedMoeExpertViews(
+    allocator: std.mem.Allocator,
+    lazy_weights: anytype,
+    gpt_cfg: gpt_mod.Config,
+    packed_tensor: PackedMoeTensor,
+    base_ref: *const tensor_store_mod.LazyTensorRef,
+    projs: []const []const u8,
+    plan_context: runtime.tier.planner.PlanContext,
+) !void {
+    // Backends without a grouped MoE matmul consume one expert at a time.
+    // Register canonical per-expert views over the same packed GGUF tensor so
+    // those backends can retain quantized storage without materializing the
+    // entire 3-D expert tensor.
+    const expert_byte_len = base_ref.byte_len / @as(usize, @intCast(gpt_cfg.num_local_experts));
+    for (0..gpt_cfg.num_local_experts) |expert_index| {
+        for (projs, 0..) |proj, proj_idx| {
+            const key = try std.fmt.allocPrint(
+                allocator,
+                "model.layers.{d}.block_sparse_moe.experts.{d}.{s}.weight",
+                .{ packed_tensor.layer, expert_index, proj },
+            );
+            errdefer allocator.free(key);
+            if (lazy_weights.contains(key)) {
+                allocator.free(key);
+                continue;
+            }
+            const projection_byte_len = if (packed_tensor.fused_gate_up)
+                expert_byte_len / 2
+            else
+                expert_byte_len;
+            try lazy_weights.put(allocator, key, .{
+                .tensor_ref = .{
+                    .name = try allocator.dupe(u8, key),
+                    .source_name = try allocator.dupe(u8, base_ref.name),
+                    .byte_len = projection_byte_len,
+                    .quantized = base_ref.quantized,
+                    .packed_expert_index = @intCast(expert_index),
+                    .packed_expert_count = gpt_cfg.num_local_experts,
+                    .fused_gate_up = packed_tensor.fused_gate_up,
+                    .fused_gate_up_index = @intCast(proj_idx),
+                },
+                .expert_coord = .{
+                    .layer_index = packed_tensor.layer,
+                    .expert_index = @intCast(expert_index),
+                },
+                .projection_mask = projectionMaskForWeightKey(key),
+                .placement = runtime.tier.planner.planForContext(plan_context, key, projection_byte_len),
+            });
+        }
+    }
 }
 
 fn appendDeepseekV4MoeLazyWeights(
@@ -5869,6 +5933,34 @@ test "overlay gpt structural config clears sidecar-only shared tail ffn size" {
     try std.testing.expectEqual(@as(u32, 10240), target.intermediateSize(41));
 }
 
+test "overlay gpt structural config preserves gemma4 moe topology from gguf" {
+    var target: gpt_mod.Config = .{
+        .family = .gemma,
+        .intermediate_size = 2112,
+        .expert_intermediate_size = 0,
+        .num_local_experts = 0,
+        .num_experts_per_tok = 0,
+        .num_shared_experts = 0,
+    };
+    const source: gpt_mod.Config = .{
+        .family = .gemma,
+        .intermediate_size = 2112,
+        .expert_intermediate_size = 704,
+        .num_local_experts = 128,
+        .num_experts_per_tok = 8,
+        .num_shared_experts = 1,
+    };
+
+    overlayGptStructuralConfig(&target, source);
+
+    try std.testing.expectEqual(@as(u32, 128), target.num_local_experts);
+    try std.testing.expectEqual(@as(u32, 8), target.num_experts_per_tok);
+    try std.testing.expectEqual(@as(u32, 1), target.num_shared_experts);
+    try std.testing.expectEqual(@as(u32, 704), target.expert_intermediate_size);
+    try std.testing.expect(target.usesMoe());
+    try std.testing.expect(target.hasSharedExpert());
+}
+
 test "metal gguf preflight rejects release-unsafe iq4 xs tensors" {
     var tensor_types = [_]UnsupportedTensorTypeCount{
         .{ .tensor_type = .{ .known = .IQ4_XS }, .count = 15 },
@@ -6325,6 +6417,49 @@ test "deepseek v4 gguf packed moe names map to routed expert lazy keys" {
     try std.testing.expectEqual(@as(u8, 0x4), projectionMaskForWeightKey("model.layers.2.mlp.experts.7.up_proj"));
     try std.testing.expectEqual(@as(u8, 0x5), projectionMaskForWeightKey("model.layers.2.mlp.experts.7.gate_up_proj"));
     try std.testing.expect(shouldLazyLoadWeight(.gguf, .{ .gpt = .{ .family = .deepseek_v4, .num_local_experts = 8, .num_experts_per_tok = 2 } }, "model.layers.2.mlp.experts.7.gate_proj"));
+}
+
+test "packed moe tensors register per-expert quantized views" {
+    const allocator = std.testing.allocator;
+    var lazy_weights = std.StringHashMapUnmanaged(LazyWeightEntry){};
+    defer {
+        var it = lazy_weights.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.tensor_ref.deinit(allocator);
+            allocator.free(entry.key_ptr.*);
+        }
+        lazy_weights.deinit(allocator);
+    }
+
+    const base_ref: tensor_store_mod.LazyTensorRef = .{
+        .name = "blk.2.ffn_gate_up_exps.weight",
+        .source_name = "blk.2.ffn_gate_up_exps.weight",
+        .byte_len = 400,
+        .quantized = true,
+    };
+    try appendPackedMoeExpertViews(
+        allocator,
+        &lazy_weights,
+        .{ .family = .gemma, .num_local_experts = 2, .num_experts_per_tok = 1 },
+        .{ .layer = 2, .proj = "w1", .proj2 = "w3", .fused_gate_up = true },
+        &base_ref,
+        &.{ "w1", "w3" },
+        .{ .backend = .cpu },
+    );
+
+    try std.testing.expectEqual(@as(usize, 4), lazy_weights.count());
+    const gate = lazy_weights.get("model.layers.2.block_sparse_moe.experts.1.w1.weight").?;
+    try std.testing.expectEqual(@as(?u32, 1), gate.tensor_ref.packed_expert_index);
+    try std.testing.expectEqual(@as(u32, 2), gate.tensor_ref.packed_expert_count);
+    try std.testing.expectEqual(@as(usize, 100), gate.tensor_ref.byte_len);
+    try std.testing.expect(gate.tensor_ref.quantized);
+    try std.testing.expect(gate.tensor_ref.fused_gate_up);
+    try std.testing.expectEqual(@as(u8, 0), gate.tensor_ref.fused_gate_up_index);
+    try std.testing.expectEqualStrings("blk.2.ffn_gate_up_exps.weight", gate.tensor_ref.source_name.?);
+    try std.testing.expectEqual(@as(?u32, 1), if (gate.expert_coord) |coord| coord.expert_index else null);
+
+    const up = lazy_weights.get("model.layers.2.block_sparse_moe.experts.1.w3.weight").?;
+    try std.testing.expectEqual(@as(u8, 1), up.tensor_ref.fused_gate_up_index);
 }
 
 fn missingContains(missing: []const []const u8, expected: []const u8) bool {

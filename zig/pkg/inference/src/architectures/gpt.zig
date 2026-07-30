@@ -5542,9 +5542,6 @@ fn decoderBlock(
             try maybeCaptureActivationTrace(trace_sink, cb, allocator, "attn_residual", layer, sa_out, hidden_size);
 
             if (config.usesMoe() and config.hasSharedExpert()) {
-                // Gemma 4 three-sublayer block: attention → shared expert FFN → MoE routed experts.
-                // Each sublayer has its own pre/post norms and residual connection.
-
                 // Gemma 4 parallel FFN: shared expert and MoE both branch from attn_out,
                 // their outputs are summed, then an overall post-norm + residual is applied.
                 //
@@ -5568,7 +5565,17 @@ fn decoderBlock(
                 defer cb.free(moe_normed);
                 debug_timing_stats.norm_nanos += @intCast(monotonicNowNs() - norm_started_at);
                 const moe_started_at = monotonicNowNs();
-                const moe_out = try moeFeedForwardRoutedOnly(cb, allocator, config, moe_normed, total, layer, &name_buf, decode_context);
+                const moe_out = try moeFeedForwardRoutedOnly(
+                    cb,
+                    allocator,
+                    config,
+                    moe_normed,
+                    sa_out,
+                    total,
+                    layer,
+                    &name_buf,
+                    decode_context,
+                );
                 defer cb.free(moe_out);
                 debug_timing_stats.ffn_nanos += @intCast(monotonicNowNs() - moe_started_at);
                 norm_started_at = monotonicNowNs();
@@ -8028,7 +8035,7 @@ fn moeFeedForward(
     name_buf: *[256]u8,
     decode_context: ?*const DecodeContext,
 ) !CT {
-    return moeFeedForwardInner(cb, allocator, config, input, total, layer, name_buf, decode_context, false);
+    return moeFeedForwardInner(cb, allocator, config, input, null, total, layer, name_buf, decode_context, false);
 }
 
 /// MoE feed-forward that skips the shared expert addition (used when the caller
@@ -8038,12 +8045,13 @@ fn moeFeedForwardRoutedOnly(
     allocator: std.mem.Allocator,
     config: Config,
     input: CT,
+    router_source: CT,
     total: usize,
     layer: usize,
     name_buf: *[256]u8,
     decode_context: ?*const DecodeContext,
 ) !CT {
-    return moeFeedForwardInner(cb, allocator, config, input, total, layer, name_buf, decode_context, true);
+    return moeFeedForwardInner(cb, allocator, config, input, router_source, total, layer, name_buf, decode_context, true);
 }
 
 fn moeFeedForwardInner(
@@ -8051,6 +8059,7 @@ fn moeFeedForwardInner(
     allocator: std.mem.Allocator,
     config: Config,
     input: CT,
+    router_source_override: ?CT,
     total: usize,
     layer: usize,
     name_buf: *[256]u8,
@@ -8067,8 +8076,17 @@ fn moeFeedForwardInner(
     debug_timing_stats.moe_router_weight_fetch_nanos += @intCast(monotonicNowNs() - router_weight_fetch_started_at);
     defer cb.free(router_w);
 
-    const router_input = try scaleMoeRouterInput(cb, config, input, hidden_size, layer, name_buf);
-    defer if (router_input != input) cb.free(router_input);
+    const router_source = router_source_override orelse input;
+    const router_input = try prepareMoeRouterInput(
+        cb,
+        allocator,
+        config,
+        router_source,
+        hidden_size,
+        layer,
+        name_buf,
+    );
+    defer if (router_input != router_source) cb.free(router_input);
 
     const router_proj_started_at = monotonicNowNs();
     const router_logits_ct = try cb.linearNoBias(router_input, router_w, total, hidden_size, num_experts);
@@ -8314,7 +8332,6 @@ fn runMoeWithLocalBatches(
             expert_counts[expert_index] += 1;
         }
     }
-
     var expert_batches = try allocator.alloc(ExpertBatch, num_experts);
     defer {
         for (expert_batches) |batch| {
@@ -8660,7 +8677,7 @@ fn runGroupedExpertBatch(
     name_buf: *[256]u8,
 ) !bool {
     const started_at = monotonicNowNs();
-    if (cb.vtable.moeLinearNoBias == null) return false;
+    if (!supportsGroupedMoeLinear(cb)) return false;
     if (grouped.rows.len == 0) return true;
 
     const batch_size = grouped.rows.len;
@@ -8766,7 +8783,7 @@ fn runGroupedExpertBatchTensor(
     name_buf: *[256]u8,
 ) !?CT {
     const started_at = monotonicNowNs();
-    if (cb.vtable.moeLinearNoBias == null or cb.vtable.moeScatterAdd == null) return null;
+    if (!supportsGroupedMoeLinear(cb) or cb.vtable.moeScatterAdd == null) return null;
     if (grouped.rows.len == 0) return null;
 
     const batch_size = grouped.rows.len;
@@ -9538,18 +9555,36 @@ fn getMoeRouterWeight(cb: *const ComputeBackend, config: Config, layer: usize, b
 }
 
 fn getMoeExpertWeight(cb: *const ComputeBackend, config: Config, layer: usize, expert_index: usize, proj: []const u8, buf: *[256]u8) !CT {
-    const packed_name = std.fmt.bufPrint(buf, "model.layers.{d}.block_sparse_moe.packed.{s}.weight", .{ layer, proj }) catch return error.NameTooLong;
-    return getModelWeight(cb, config, packed_name) catch |err| switch (err) {
+    if (supportsGroupedMoeLinear(cb)) {
+        const packed_name = std.fmt.bufPrint(buf, "model.layers.{d}.block_sparse_moe.packed.{s}.weight", .{ layer, proj }) catch return error.NameTooLong;
+        return getModelWeight(cb, config, packed_name) catch |err| switch (err) {
+            error.MissingWeight => {
+                const primary = std.fmt.bufPrint(buf, "model.layers.{d}.block_sparse_moe.experts.{d}.{s}.weight", .{ layer, expert_index, proj }) catch return error.NameTooLong;
+                return getModelWeight(cb, config, primary);
+            },
+            else => err,
+        };
+    }
+
+    const primary = std.fmt.bufPrint(buf, "model.layers.{d}.block_sparse_moe.experts.{d}.{s}.weight", .{ layer, expert_index, proj }) catch return error.NameTooLong;
+    return getModelWeight(cb, config, primary) catch |err| switch (err) {
         error.MissingWeight => {
-            const primary = std.fmt.bufPrint(buf, "model.layers.{d}.block_sparse_moe.experts.{d}.{s}.weight", .{ layer, expert_index, proj }) catch return error.NameTooLong;
-            return getModelWeight(cb, config, primary);
+            const packed_name = std.fmt.bufPrint(buf, "model.layers.{d}.block_sparse_moe.packed.{s}.weight", .{ layer, proj }) catch return error.NameTooLong;
+            return getModelWeight(cb, config, packed_name);
         },
         else => err,
     };
 }
 
+fn supportsGroupedMoeLinear(cb: *const ComputeBackend) bool {
+    // `mulMatId` is also exposed by NativeCompute instances used as host shims
+    // inside GPU sessions. Those shims cannot own grouped outputs, so only the
+    // explicit MoE hook is a backend-level grouped execution capability.
+    return cb.vtable.moeLinearNoBias != null;
+}
+
 fn prefetchMoeExperts(cb: *const ComputeBackend, layer: usize, expert_indices: []const u32, expert_scores: []const u32, buf: *[256]u8) void {
-    if (cb.vtable.moeLinearNoBias != null and cb.vtable.moeScatterAdd != null) return;
+    if (supportsGroupedMoeLinear(cb)) return;
     for (expert_indices, 0..) |expert_index, rank| {
         const score = if (rank < expert_scores.len) expert_scores[rank] else 0;
         const expert_hint = prefetchHintForExpertPrediction(expert_indices.len, rank, score);
@@ -10086,22 +10121,119 @@ fn applyGeluNew(cb: *const ComputeBackend, input: CT) !CT {
     return cb.geluNew(input);
 }
 
-fn scaleMoeRouterInput(
+fn bareRmsNorm(
     cb: *const ComputeBackend,
+    allocator: std.mem.Allocator,
+    input: CT,
+    hidden_size: usize,
+    eps: f32,
+) !CT {
+    if (try cb.rmsNormBare(input, hidden_size, eps)) |normed| return normed;
+
+    const ones = try allocator.alloc(f32, hidden_size);
+    defer allocator.free(ones);
+    @memset(ones, 1.0);
+    const shape = [_]i32{@intCast(hidden_size)};
+    const ones_ct = try cb.fromFloat32Shape(ones, &shape);
+    defer cb.free(ones_ct);
+    return cb.rmsNorm(input, ones_ct, hidden_size, eps);
+}
+
+fn multiplyScalar(
+    cb: *const ComputeBackend,
+    input: CT,
+    scale: f32,
+) !CT {
+    if (try cb.multiplyScalar(input, scale)) |scaled| return scaled;
+
+    const scale_data = [_]f32{scale};
+    const scale_ct = try cb.fromFloat32(&scale_data);
+    defer cb.free(scale_ct);
+    return cb.multiply(input, scale_ct);
+}
+
+fn prepareMoeRouterInput(
+    cb: *const ComputeBackend,
+    allocator: std.mem.Allocator,
     config: Config,
     input: CT,
     hidden_size: usize,
     layer: usize,
     name_buf: *[256]u8,
 ) !CT {
-    const scaled = input;
+    const scale_name = std.fmt.bufPrint(
+        name_buf,
+        "model.layers.{d}.block_sparse_moe.gate.input_scale",
+        .{layer},
+    ) catch return error.NameTooLong;
 
-    _ = hidden_size;
+    if (config.family != .gemma or !config.usesMoe()) {
+        const scale_w = getModelWeight(cb, config, scale_name) catch return input;
+        defer cb.free(scale_w);
+        return cb.multiply(input, scale_w);
+    }
 
-    const scale_name = std.fmt.bufPrint(name_buf, "model.layers.{d}.block_sparse_moe.gate.input_scale", .{layer}) catch return scaled;
-    const scale_w = getModelWeight(cb, config, scale_name) catch return scaled;
+    // Gemma 4 routes from the post-attention residual, not the separately
+    // pre-normalized expert input. Its router performs an unweighted RMSNorm,
+    // scales by hidden_size^-0.5, then applies the learned per-channel scale.
+    const normed = try bareRmsNorm(cb, allocator, input, hidden_size, config.norm_eps);
+    defer cb.free(normed);
+    const root_scaled = try multiplyScalar(
+        cb,
+        normed,
+        1.0 / @sqrt(@as(f32, @floatFromInt(hidden_size))),
+    );
+    defer cb.free(root_scaled);
+    const scale_w = try getModelWeight(cb, config, scale_name);
     defer cb.free(scale_w);
-    return cb.multiply(scaled, scale_w);
+    return cb.multiply(root_scaled, scale_w);
+}
+
+test "gemma4 moe router applies bare rms root scale and learned scale" {
+    const allocator = std.testing.allocator;
+    var store = native_compute_mod.WeightStore{ .allocator = allocator, .resident_weights = .{}, .lazy_weights = .{} };
+    defer deinitDeepSeekV4TestWeightStore(allocator, &store);
+    var compute = native_compute_mod.NativeCompute.init(allocator, &store, null);
+    defer compute.weight_reservations.deinit(allocator);
+    var cb = ComputeBackend{ .ptr = &compute, .vtable = &native_compute_mod.vtable_impl };
+
+    try putDeepSeekV4TestWeight(
+        allocator,
+        &store,
+        "model.layers.0.block_sparse_moe.gate.input_scale",
+        &.{4},
+        &.{ 2.0, 3.0, 4.0, 5.0 },
+    );
+
+    const input_shape = [_]i32{ 1, 4 };
+    const input = try cb.fromFloat32Shape(&.{ 3.0, 4.0, 0.0, 0.0 }, &input_shape);
+    defer cb.free(input);
+    var name_buf: [256]u8 = undefined;
+    const output = try prepareMoeRouterInput(
+        &cb,
+        allocator,
+        .{
+            .family = .gemma,
+            .hidden_size = 4,
+            .num_local_experts = 2,
+            .num_experts_per_tok = 1,
+            .norm_eps = 0.0,
+        },
+        input,
+        4,
+        0,
+        &name_buf,
+    );
+    defer cb.free(output);
+
+    const values = try cb.toFloat32(output, allocator);
+    defer allocator.free(values);
+    try std.testing.expectEqual(@as(usize, 4), values.len);
+    // RMS([3,4,0,0]) = 2.5; root scaling is 1/sqrt(4) = 0.5.
+    try std.testing.expectApproxEqAbs(@as(f32, 1.2), values[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.4), values[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), values[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), values[3], 1e-5);
 }
 
 pub fn applyActivation(cb: *const ComputeBackend, config: Config, input: CT) !CT {

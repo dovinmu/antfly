@@ -651,7 +651,11 @@ pub fn parseConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !Config
     };
     if (text_obj.get("moe_intermediate_size")) |v| if (jsonU32(v)) |val| {
         config.expert_intermediate_size = val;
-        if (config.shared_expert_intermediate_size == 0) config.shared_expert_intermediate_size = val;
+        // Gemma 4's dense/shared branch uses `intermediate_size`; only the
+        // routed experts use `moe_intermediate_size`.
+        if (config.family != .gemma and config.shared_expert_intermediate_size == 0) {
+            config.shared_expert_intermediate_size = val;
+        }
     };
     if (text_obj.get("hidden_activation") orelse text_obj.get("hidden_act")) |v| {
         if (v == .string) {
@@ -688,6 +692,12 @@ pub fn parseConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !Config
     if (text_obj.get("num_local_experts")) |v| if (jsonU32(v)) |val| {
         config.num_local_experts = val;
     };
+    if (obj.get("num_experts")) |v| if (jsonU32(v)) |val| {
+        config.num_local_experts = val;
+    };
+    if (text_obj.get("num_experts")) |v| if (jsonU32(v)) |val| {
+        config.num_local_experts = val;
+    };
     if (obj.get("n_routed_experts")) |v| if (jsonU32(v)) |val| {
         config.num_local_experts = val;
     };
@@ -698,6 +708,12 @@ pub fn parseConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !Config
         config.num_experts_per_tok = val;
     };
     if (text_obj.get("num_experts_per_tok")) |v| if (jsonU32(v)) |val| {
+        config.num_experts_per_tok = val;
+    };
+    if (obj.get("top_k_experts")) |v| if (jsonU32(v)) |val| {
+        config.num_experts_per_tok = val;
+    };
+    if (text_obj.get("top_k_experts")) |v| if (jsonU32(v)) |val| {
         config.num_experts_per_tok = val;
     };
     if (obj.get("num_shared_experts")) |v| if (jsonU32(v)) |val| {
@@ -724,6 +740,23 @@ pub fn parseConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !Config
     if (text_obj.get("expert_intermediate_size")) |v| if (jsonU32(v)) |val| {
         config.expert_intermediate_size = val;
     };
+    const gemma4_moe_enabled = blk: {
+        if (text_obj.get("enable_moe_block")) |v| {
+            if (jsonBool(v)) |enabled| break :blk enabled;
+        }
+        if (obj.get("enable_moe_block")) |v| {
+            if (jsonBool(v)) |enabled| break :blk enabled;
+        }
+        break :blk false;
+    };
+    if (config.family == .gemma and
+        (gemma4_moe_enabled or config.usesMoe()) and
+        config.num_shared_experts == 0)
+    {
+        // Gemma 4 names the ordinary dense MLP as the shared branch of each
+        // MoE block; it does not expose a separate shared-expert count.
+        config.num_shared_experts = 1;
+    }
 
     if (config.family == .deepseek_v4) {
         if (text_obj.get("q_lora_rank")) |v| if (jsonU32(v)) |val| {
@@ -2693,6 +2726,34 @@ test "parse gemma4 moe fields from text_config" {
     try std.testing.expectEqual(ModelFamily.gemma, config.family);
     try std.testing.expectEqual(@as(u32, 128), config.num_local_experts);
     try std.testing.expectEqual(@as(u32, 8), config.num_experts_per_tok);
+    try std.testing.expect(config.usesMoe());
+}
+
+test "parse published gemma4 moe config names and dense shared branch" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "model_type": "gemma4",
+        \\  "text_config": {
+        \\    "hidden_size": 2816,
+        \\    "num_hidden_layers": 30,
+        \\    "num_attention_heads": 16,
+        \\    "intermediate_size": 2112,
+        \\    "moe_intermediate_size": 704,
+        \\    "num_experts": 128,
+        \\    "top_k_experts": 8,
+        \\    "enable_moe_block": true
+        \\  }
+        \\}
+    ;
+    const config = try parseConfig(allocator, json);
+    try std.testing.expectEqual(ModelFamily.gemma, config.family);
+    try std.testing.expectEqual(@as(u32, 128), config.num_local_experts);
+    try std.testing.expectEqual(@as(u32, 8), config.num_experts_per_tok);
+    try std.testing.expectEqual(@as(u32, 1), config.num_shared_experts);
+    try std.testing.expectEqual(@as(u32, 704), config.expert_intermediate_size);
+    try std.testing.expectEqual(@as(u32, 0), config.shared_expert_intermediate_size);
+    try std.testing.expect(config.hasSharedExpert());
     try std.testing.expect(config.usesMoe());
 }
 

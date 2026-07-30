@@ -5316,6 +5316,32 @@ pub fn tryRawProviderQuantizedLinearHost(
     return tryRawProviderQuantizedLinearHostWithDispatch(self, storage, input, rows, in_dim, out_dim, output, null);
 }
 
+fn quantizedLinearSourceBytes(
+    storage: *const QuantizedStorage,
+    in_dim: usize,
+    out_dim: usize,
+) ![]const u8 {
+    const expert_view = storage.packed_expert orelse return storage.raw_bytes;
+    if (out_dim == 0) return error.InvalidQuantizedLinearShape;
+
+    const meta = try quant_codec.packedExpertLinearMeta(
+        storage.shape,
+        expert_view.expert_axis,
+        expert_view.expert_index,
+        in_dim,
+        out_dim,
+        storage.tensor_type,
+    );
+    const span = try quant_codec.packedExpertLinearByteSpan(
+        meta,
+        expert_view.expert_index,
+        expert_view.row_offset,
+        out_dim,
+        storage.raw_bytes.len,
+    );
+    return storage.raw_bytes[span.offset..][0..span.len];
+}
+
 pub fn tryRawProviderQuantizedLinearHostWithDispatch(
     self: anytype,
     storage: *const QuantizedStorage,
@@ -5327,7 +5353,7 @@ pub fn tryRawProviderQuantizedLinearHostWithDispatch(
     planned_dispatch: ?u8,
 ) !bool {
     const raw_provider = self.raw_provider orelse return false;
-    const source_bytes = storage.raw_bytes;
+    const source_bytes = try quantizedLinearSourceBytes(storage, in_dim, out_dim);
     const bitnet_source_bytes = storage.preparedBytes(.row_major_blocks) orelse storage.raw_bytes;
     switch (storage.tensor_type) {
         .known => |known| switch (known) {

@@ -583,6 +583,44 @@ pub fn packedExpertLinearRowBlockBase(
     return std.math.mul(usize, row_linear, meta.row_blocks) catch return error.InvalidPackedExpertTensor;
 }
 
+pub const PackedExpertLinearByteSpan = struct {
+    offset: usize,
+    len: usize,
+};
+
+pub fn packedExpertLinearByteSpan(
+    meta: PackedExpertLinearMeta,
+    expert_index: u32,
+    row_offset: usize,
+    out_dim: usize,
+    raw_byte_len: usize,
+) !PackedExpertLinearByteSpan {
+    if (out_dim == 0) return error.InvalidQuantizedLinearShape;
+
+    const first_block = try packedExpertLinearRowBlockBase(meta, expert_index, 0, row_offset);
+    const last_block = try packedExpertLinearRowBlockBase(meta, expert_index, out_dim - 1, row_offset);
+    const expected_last_block = std.math.add(
+        usize,
+        first_block,
+        std.math.mul(usize, out_dim - 1, meta.row_blocks) catch
+            return error.InvalidPackedExpertTensor,
+    ) catch return error.InvalidPackedExpertTensor;
+    if (last_block != expected_last_block) return error.InvalidPackedExpertTensor;
+
+    const offset = std.math.mul(usize, first_block, meta.block_size) catch
+        return error.InvalidPackedExpertTensor;
+    const len = std.math.mul(
+        usize,
+        std.math.mul(usize, out_dim, meta.row_blocks) catch
+            return error.InvalidPackedExpertTensor,
+        meta.block_size,
+    ) catch return error.InvalidPackedExpertTensor;
+    const end = std.math.add(usize, offset, len) catch
+        return error.InvalidPackedExpertTensor;
+    if (end > raw_byte_len) return error.InvalidPackedExpertTensor;
+    return .{ .offset = offset, .len = len };
+}
+
 pub fn quantizeQ8_0FromF32(allocator: std.mem.Allocator, input: []const f32) ![]u8 {
     const block_values = tensor_types.valuesPerBlock(.{ .known = .Q8_0 }).?;
     const block_bytes = tensor_types.bytesPerBlock(.{ .known = .Q8_0 }).?;
@@ -3239,6 +3277,28 @@ test "materialize packed q8_0 fused expert half supports ggml expert-last layout
     for (values[32..64]) |value| {
         try std.testing.expectApproxEqAbs(@as(f32, 14.0), value, 1e-3);
     }
+}
+
+test "packed expert byte span selects expert and fused projection half" {
+    const block_size = tensor_types.bytesPerBlock(.{ .known = .Q8_0 }).?;
+    const full_shape = [_]i64{ 32, 4, 2 };
+    const meta = try packedExpertLinearMeta(
+        &full_shape,
+        2,
+        1,
+        32,
+        2,
+        .{ .known = .Q8_0 },
+    );
+    const raw_byte_len = 4 * 2 * block_size;
+
+    const gate = try packedExpertLinearByteSpan(meta, 1, 0, 2, raw_byte_len);
+    try std.testing.expectEqual(@as(usize, 4 * block_size), gate.offset);
+    try std.testing.expectEqual(@as(usize, 2 * block_size), gate.len);
+
+    const up = try packedExpertLinearByteSpan(meta, 1, 2, 2, raw_byte_len);
+    try std.testing.expectEqual(@as(usize, 6 * block_size), up.offset);
+    try std.testing.expectEqual(@as(usize, 2 * block_size), up.len);
 }
 
 test "dequantize q2_k uniform block" {

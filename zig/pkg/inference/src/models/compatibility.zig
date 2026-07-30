@@ -245,13 +245,7 @@ fn assessWithFacts(
 }
 
 fn assessGenerator(architecture: []const u8, expert_count: u32) Assessment {
-    if (std.mem.startsWith(u8, architecture, "gemma4") and expert_count > 0) {
-        return makeIncompatible(
-            architecture,
-            .unsupported_backend,
-            "Gemma 4 mixture-of-experts layouts are not enabled for this release",
-        );
-    }
+    _ = expert_count;
 
     if (stringIn(architecture, &.{
         "llama",
@@ -414,13 +408,13 @@ test "artifact architecture remains authoritative over a supported sidecar famil
     try std.testing.expectEqual(Level.unknown, assessInspection(&man, inspection).level);
 }
 
-test "gemma 4 E4B architecture is enabled while unified layout is blocked" {
+test "gemma 4 dense and moe architectures are enabled while unified layout is blocked" {
     var man = manifest_mod.ModelManifest{ .allocator = std.testing.allocator };
     man.model_type = .generator;
     try std.testing.expectEqual(Level.compatible, assess(&man, "gemma4").level);
     try std.testing.expectEqual(Level.incompatible, assess(&man, "gemma4_unified").level);
     try std.testing.expectEqual(
-        Level.incompatible,
+        Level.compatible,
         assessWithFacts(&man, "gemma4", 128).level,
     );
 }
