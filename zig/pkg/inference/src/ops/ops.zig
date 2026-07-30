@@ -350,6 +350,7 @@ pub const MoeForwardFusedRequest = struct {
     inter_size: usize,
     num_experts: usize,
     top_k: usize,
+    activation: DecoderRuntimeActivationKind,
 };
 
 pub const RunMoeBlockRequest = MoeForwardFusedRequest;
@@ -440,6 +441,9 @@ pub const NativeQuantTimingStats = struct {
     decoder_runtime_frame_submits: u64 = 0,
     decoder_runtime_frame_wait_nanos: u128 = 0,
     decoder_runtime_frame_gpu_nanos: u128 = 0,
+    gemma4_moe_fused_attempts: u64 = 0,
+    gemma4_moe_fused_successes: u64 = 0,
+    gemma4_moe_fused_fallbacks: u64 = 0,
     metal_tensor_device_owned_buffers_created: u64 = 0,
     metal_tensor_device_owned_buffers_released: u64 = 0,
     metal_tensor_device_owned_live_bytes: u64 = 0,
@@ -1145,6 +1149,11 @@ pub const ComputeBackend = struct {
         /// Y = (rms_norm(input, weight, dim, eps) + residual) * scalar[0].
         /// Backends may fuse Gemma4 PLE/post-FFN residual output-scale epilogues.
         rmsNormAddOutputScaleTensor: ?*const fn (ctx: *anyopaque, input: CT, weight: CT, residual: CT, scalar: CT, dim: usize, eps: f32) anyerror!?CT = null,
+
+        /// Gemma 4 parallel-FFN epilogue:
+        /// Y = (residual + rms_norm(rms_norm(shared, shared_weight) +
+        /// rms_norm(routed, routed_weight), combined_weight)) * scalar[0].
+        gemmaParallelFfnEpilogue: ?*const fn (ctx: *anyopaque, shared: CT, shared_weight: CT, routed: CT, routed_weight: CT, combined_weight: CT, residual: CT, scalar: CT, dim: usize, eps: f32) anyerror!?CT = null,
 
         /// Y = rope(rms_norm_heads(input, weight, eps), ...), optionally scaled.
         /// Backends may fuse Gemma/Qwen Q/K head norm immediately followed by RoPE.
@@ -3071,6 +3080,22 @@ pub const ComputeBackend = struct {
     pub fn rmsNormAddOutputScaleTensor(self: *const ComputeBackend, input: CT, weight: CT, residual: CT, scalar: CT, dim: usize, eps: f32) !?CT {
         const op = self.vtable.rmsNormAddOutputScaleTensor orelse return null;
         return op(self.ptr, input, weight, residual, scalar, dim, eps);
+    }
+
+    pub fn gemmaParallelFfnEpilogue(
+        self: *const ComputeBackend,
+        shared: CT,
+        shared_weight: CT,
+        routed: CT,
+        routed_weight: CT,
+        combined_weight: CT,
+        residual: CT,
+        scalar: CT,
+        dim: usize,
+        eps: f32,
+    ) !?CT {
+        const op = self.vtable.gemmaParallelFfnEpilogue orelse return null;
+        return op(self.ptr, shared, shared_weight, routed, routed_weight, combined_weight, residual, scalar, dim, eps);
     }
 
     pub fn rmsNormHeadsRope(self: *const ComputeBackend, input: CT, weight: CT, rows: usize, total_dim: usize, head_dim: usize, rope_dim: usize, eps: f32, theta: f32, freq_scale: f32, position_offset: usize, seq_len: usize, consecutive_pairs: bool, scale: f32) !?CT {

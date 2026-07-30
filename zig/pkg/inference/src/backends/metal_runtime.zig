@@ -104,6 +104,14 @@ pub const RawQuantizedRuntimeLinearStorageMode = enum {
     mapped_shared,
 };
 
+pub const PackedMoeLinearDescriptor = struct {
+    slot: usize,
+    format: MetalQuantFormat,
+    source_out_dim: usize,
+    row_offset: usize,
+    expert_count: usize,
+};
+
 pub const MetalQuantFormat = enum(u32) {
     unsupported = 0,
     q1_0 = 1,
@@ -798,29 +806,35 @@ pub fn decoderRuntimePreparedSlotsMatchFamily(self: anytype, gpt_config: anytype
                     if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=attn_q slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .attn_q), gpt_config.hidden_size, attention_input_size });
                     return false;
                 }
-                if (!decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .attn_k), gpt_config.hidden_size, layer_kv_heads * layer_head_dim)) {
-                    if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=attn_k slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .attn_k), gpt_config.hidden_size, layer_kv_heads * layer_head_dim });
-                    return false;
-                }
-                if (!decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .attn_v), gpt_config.hidden_size, layer_kv_heads * layer_head_dim)) {
-                    if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=attn_v slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .attn_v), gpt_config.hidden_size, layer_kv_heads * layer_head_dim });
-                    return false;
+                if (!gpt_config.layerSharesKv(layer)) {
+                    if (!decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .attn_k), gpt_config.hidden_size, layer_kv_heads * layer_head_dim)) {
+                        if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=attn_k slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .attn_k), gpt_config.hidden_size, layer_kv_heads * layer_head_dim });
+                        return false;
+                    }
+                    if (!gpt_config.layerOmitsVProj(layer) and
+                        !decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .attn_v), gpt_config.hidden_size, layer_kv_heads * layer_head_dim))
+                    {
+                        if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=attn_v slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .attn_v), gpt_config.hidden_size, layer_kv_heads * layer_head_dim });
+                        return false;
+                    }
                 }
                 if (!decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .attn_out_proj), attention_input_size, gpt_config.hidden_size)) {
                     if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=attn_out_proj slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .attn_out_proj), attention_input_size, gpt_config.hidden_size });
                     return false;
                 }
-                if (!decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .mlp_gate), gpt_config.hidden_size, gpt_config.intermediateSize(layer))) {
-                    if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=mlp_gate slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .mlp_gate), gpt_config.hidden_size, gpt_config.intermediateSize(layer) });
-                    return false;
-                }
-                if (!decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .mlp_up), gpt_config.hidden_size, gpt_config.intermediateSize(layer))) {
-                    if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=mlp_up slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .mlp_up), gpt_config.hidden_size, gpt_config.intermediateSize(layer) });
-                    return false;
-                }
-                if (!decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .mlp_down), gpt_config.intermediateSize(layer), gpt_config.hidden_size)) {
-                    if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=mlp_down slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .mlp_down), gpt_config.intermediateSize(layer), gpt_config.hidden_size });
-                    return false;
+                if (!gpt_config.usesMoe()) {
+                    if (!decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .mlp_gate), gpt_config.hidden_size, gpt_config.intermediateSize(layer))) {
+                        if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=mlp_gate slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .mlp_gate), gpt_config.hidden_size, gpt_config.intermediateSize(layer) });
+                        return false;
+                    }
+                    if (!decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .mlp_up), gpt_config.hidden_size, gpt_config.intermediateSize(layer))) {
+                        if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=mlp_up slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .mlp_up), gpt_config.hidden_size, gpt_config.intermediateSize(layer) });
+                        return false;
+                    }
+                    if (!decoderRuntimeLinearSlotPrepared(self, decoder_gated_runtime.linearSlot(layer, .mlp_down), gpt_config.intermediateSize(layer), gpt_config.hidden_size)) {
+                        if (trace) std.debug.print("prepare-trace: slot-miss family={s} layer={d} kind=mlp_down slot={d} in={d} out={d}\n", .{ @tagName(gpt_config.family), layer, decoder_gated_runtime.linearSlot(layer, .mlp_down), gpt_config.intermediateSize(layer), gpt_config.hidden_size });
+                        return false;
+                    }
                 }
             }
             if (!decoderRuntimeRmsNormSlotPrepared(self, decoder_gated_runtime.finalNormSlot(gpt_config.num_hidden_layers), gpt_config.hidden_size)) {
@@ -855,11 +869,10 @@ pub fn supportsDecoderRuntimeConfig(gpt_config: anytype) bool {
         .gpt2 => decoder_gpt_runtime.supportsConfig(gpt_config),
         .bitnet => decoder_bitnet_runtime.supportsConfig(gpt_config),
         .llama, .mistral, .qwen2, .qwen3 => decoder_gated_runtime.supportsConfig(gpt_config),
-        // The Metal whole-model executor can still own text-only runs for
-        // multimodal/PLE Gemma variants even when the deepest family-local
-        // decoder-runtime fast path declines and falls back to the generic GPT
-        // path. Do not reject those models at the top-level executor gate.
-        .gemma => !gpt_config.usesMoe(),
+        // The Gemma runtime owns attention/tail for dense and MoE variants.
+        // MoE FFNs delegate to the routed block contract while remaining in
+        // the same decoder frame.
+        .gemma => decoder_gated_runtime.supportsConfig(gpt_config),
         else => false,
     };
 }
@@ -2153,10 +2166,14 @@ pub fn decoderRuntimeApplyAttentionF32DeviceBatched(self: anytype, request: anyt
 
 pub fn decoderRuntimeApplyPagedKvAttentionSlot(self: anytype, request: anytype) !?MetalTensor {
     const runtime = self.raw_decode_runtime orelse return null;
-    return decoderRuntimeApplyPagedKvAttentionSlotOnRuntime(runtime, request);
+    return decoderRuntimeApplyPagedKvAttentionSlotOnRuntime(runtime, request, false);
 }
 
-pub fn decoderRuntimeApplyPagedKvAttentionSlotOnRuntime(runtime: *RawMetalDecodeRuntime, request: anytype) !?MetalTensor {
+pub fn decoderRuntimeApplyPagedKvAttentionSlotOnRuntime(
+    runtime: *RawMetalDecodeRuntime,
+    request: anytype,
+    synchronize_output: bool,
+) !?MetalTensor {
     if (termite_metal_decode_runtime_ready(runtime) == 0) return null;
     if (!request.q.isDevice()) return null;
     if (request.q.ndim() != 2) return null;
@@ -2262,8 +2279,9 @@ pub fn decoderRuntimeApplyPagedKvAttentionSlotOnRuntime(runtime: *RawMetalDecode
     // caller may consume `output` from a DIFFERENT runtime's queue with no
     // cross-queue ordering. Drain the owner's frame before handing the
     // output back so it is complete.
-    if (termite_metal_decode_runtime_has_active_frame(runtime) != 0 or
-        termite_metal_decode_runtime_has_submitted_frame(runtime) != 0)
+    if (synchronize_output and
+        (termite_metal_decode_runtime_has_active_frame(runtime) != 0 or
+            termite_metal_decode_runtime_has_submitted_frame(runtime) != 0))
     {
         if (termite_metal_decode_runtime_flush_active_frame(runtime) != 0) {
             output.deinit();
@@ -2794,6 +2812,59 @@ pub fn decoderRuntimeApplyRmsNormWeightDevice(
         input.deviceByteOffset(),
         weight.deviceHandle(),
         weight.deviceByteOffset(),
+        rows,
+        hidden_size,
+        eps,
+        output.deviceHandle(),
+        output.deviceByteOffset(),
+    );
+    if (rc != 0) return null;
+    return output;
+}
+
+pub fn decoderRuntimeGemmaParallelFfnEpilogue(
+    self: anytype,
+    shared: MetalTensor,
+    shared_weight: MetalTensor,
+    routed: MetalTensor,
+    routed_weight: MetalTensor,
+    combined_weight: MetalTensor,
+    residual: MetalTensor,
+    scale: MetalTensor,
+    hidden_size: usize,
+    eps: f32,
+) !?MetalTensor {
+    const runtime = self.raw_decode_runtime orelse return null;
+    if (termite_metal_decode_runtime_ready(runtime) == 0) return null;
+    if (!shared.isDevice() or !shared_weight.isDevice() or !routed.isDevice() or
+        !routed_weight.isDevice() or !combined_weight.isDevice() or
+        !residual.isDevice() or !scale.isDevice()) return null;
+    if (hidden_size == 0 or shared.ndim() != 2 or routed.ndim() != 2 or residual.ndim() != 2) return null;
+    const rows: usize = @intCast(shared.dim(0));
+    if (rows == 0 or @as(usize, @intCast(shared.dim(1))) != hidden_size) return null;
+    if (@as(usize, @intCast(routed.dim(0))) != rows or @as(usize, @intCast(routed.dim(1))) != hidden_size) return null;
+    if (@as(usize, @intCast(residual.dim(0))) != rows or @as(usize, @intCast(residual.dim(1))) != hidden_size) return null;
+    if (shared_weight.elemCount() != hidden_size or routed_weight.elemCount() != hidden_size or
+        combined_weight.elemCount() != hidden_size or scale.elemCount() != 1) return null;
+
+    var output = try MetalTensor.deviceAllocate(runtime, rows * hidden_size * @sizeOf(f32), .private, shared.shape());
+    errdefer output.deinit();
+    const rc = termite_metal_decode_runtime_gemma_parallel_ffn_epilogue_device(
+        runtime,
+        shared.deviceHandle(),
+        shared.deviceByteOffset(),
+        shared_weight.deviceHandle(),
+        shared_weight.deviceByteOffset(),
+        routed.deviceHandle(),
+        routed.deviceByteOffset(),
+        routed_weight.deviceHandle(),
+        routed_weight.deviceByteOffset(),
+        combined_weight.deviceHandle(),
+        combined_weight.deviceByteOffset(),
+        residual.deviceHandle(),
+        residual.deviceByteOffset(),
+        scale.deviceHandle(),
+        scale.deviceByteOffset(),
         rows,
         hidden_size,
         eps,
@@ -7743,6 +7814,28 @@ pub extern fn termite_metal_decode_runtime_apply_rms_norm_weight_device(
     output_handle: ?*anyopaque,
     output_offset: usize,
 ) c_int;
+pub extern fn termite_metal_decode_runtime_gemma_parallel_ffn_epilogue_device(
+    runtime: ?*RawMetalDecodeRuntime,
+    shared_handle: ?*anyopaque,
+    shared_offset: usize,
+    shared_weight_handle: ?*anyopaque,
+    shared_weight_offset: usize,
+    routed_handle: ?*anyopaque,
+    routed_offset: usize,
+    routed_weight_handle: ?*anyopaque,
+    routed_weight_offset: usize,
+    combined_weight_handle: ?*anyopaque,
+    combined_weight_offset: usize,
+    residual_handle: ?*anyopaque,
+    residual_offset: usize,
+    scale_handle: ?*anyopaque,
+    scale_offset: usize,
+    rows: usize,
+    hidden_size: usize,
+    eps: f32,
+    output_handle: ?*anyopaque,
+    output_offset: usize,
+) c_int;
 pub extern fn termite_metal_decode_runtime_apply_rms_norm_weight_scratch_device(
     runtime: ?*RawMetalDecodeRuntime,
     input_handle: ?*anyopaque,
@@ -8020,6 +8113,74 @@ pub extern fn termite_metal_decode_runtime_apply_quantized_linear_slot_device(
     out_dim: usize,
     output_handle: ?*anyopaque,
     output_offset: usize,
+) c_int;
+pub extern fn termite_metal_decode_runtime_apply_quantized_linear_id_slot_device(
+    runtime: ?*RawMetalDecodeRuntime,
+    format: u32,
+    slot: usize,
+    input_handle: ?*anyopaque,
+    input_offset: usize,
+    expert_ids: [*]const u32,
+    rows: usize,
+    in_dim: usize,
+    out_dim: usize,
+    source_out_dim: usize,
+    row_offset: usize,
+    expert_count: usize,
+    output_handle: ?*anyopaque,
+    output_offset: usize,
+) c_int;
+pub extern fn termite_metal_decode_runtime_apply_quantized_linear_id_slot_host(
+    runtime: ?*RawMetalDecodeRuntime,
+    format: u32,
+    slot: usize,
+    input: [*]const f32,
+    expert_ids: [*]const u32,
+    rows: usize,
+    in_dim: usize,
+    out_dim: usize,
+    source_out_dim: usize,
+    row_offset: usize,
+    expert_count: usize,
+    output: [*]f32,
+) c_int;
+pub extern fn termite_metal_decode_runtime_moe_scatter_add_device(
+    runtime: ?*RawMetalDecodeRuntime,
+    base_handle: ?*anyopaque,
+    base_offset: usize,
+    updates_handle: ?*anyopaque,
+    updates_offset: usize,
+    row_ids: [*]const u32,
+    route_weights: [*]const f32,
+    base_rows: usize,
+    route_rows: usize,
+    dim: usize,
+    output_handle: ?*anyopaque,
+    output_offset: usize,
+) c_int;
+pub extern fn termite_metal_decode_runtime_moe_forward_device(
+    runtime: ?*RawMetalDecodeRuntime,
+    input_handle: ?*anyopaque,
+    input_offset: usize,
+    router_logits_handle: ?*anyopaque,
+    router_logits_offset: usize,
+    gate_slot: usize,
+    down_slot: usize,
+    gate_source_out_dim: usize,
+    gate_row_offset: usize,
+    up_row_offset: usize,
+    down_source_out_dim: usize,
+    down_row_offset: usize,
+    expert_count: usize,
+    total_rows: usize,
+    hidden_size: usize,
+    inter_size: usize,
+    num_experts: usize,
+    top_k: usize,
+    activation_kind: u32,
+    expert_scale_handle: ?*anyopaque,
+    expert_scale_offset: usize,
+    output_handle: *?*anyopaque,
 ) c_int;
 pub extern fn termite_metal_decode_runtime_apply_linear_bias_device(
     runtime: ?*RawMetalDecodeRuntime,
@@ -10768,7 +10929,7 @@ fn mappedQuantRawSpan(storage: *const QuantizedStorage, raw_bytes: []const u8, o
 
 fn mappedQuantWeightSpan(storage: *const QuantizedStorage, descriptor: PackedWeightDescriptor) ?MappedQuantWeightSpan {
     switch (descriptor.format) {
-        .q4_0, .q4_k, .q6_k, .q8_0 => {},
+        .q4_0, .q4_k, .q5_1, .q6_k, .q8_0 => {},
         else => return null,
     }
     if (storage.preparedBytes(.row_major_blocks) != null or
@@ -11656,6 +11817,443 @@ pub fn tryApplyQuantizedRuntimeLinear(
     }
     const shape = [_]i32{ @intCast(rows), @intCast(out_dim) };
     return MetalTensor.owned(output, &shape);
+}
+
+pub fn decoderRuntimePreparePackedMoeLinear(
+    self: anytype,
+    storage: *const QuantizedStorage,
+    slot: usize,
+    in_dim: usize,
+    out_dim: usize,
+) !?PackedMoeLinearDescriptor {
+    const runtime = self.raw_decode_runtime orelse return null;
+    if (termite_metal_decode_runtime_ready(runtime) == 0 or slot >= decoder_runtime_linear_slot_capacity) return null;
+    const packed_meta = storage.packed_expert orelse return null;
+    const expert_count: usize = @intCast(packed_meta.expert_count);
+    if (expert_count == 0) return null;
+    const meta = quant_codec.packedExpertLinearMeta(
+        storage.shape,
+        @intCast(packed_meta.expert_axis),
+        packed_meta.expert_index,
+        in_dim,
+        out_dim,
+        storage.tensor_type,
+    ) catch return null;
+    const row_offset: usize = @intCast(packed_meta.row_offset);
+    if (row_offset > meta.source_out_dim or out_dim > meta.source_out_dim - row_offset) return null;
+    const flat_out_dim = std.math.mul(usize, meta.source_out_dim, expert_count) catch return null;
+    const kind = quantizedRuntimeLinearKind(storage);
+    switch (kind) {
+        .q4_k, .q5_1, .q8_0 => {},
+        else => return null,
+    }
+    const format = metalQuantFormatForKind(kind);
+    const layout = packedQuantBlockLayout(kind) orelse return null;
+
+    if (self.raw_linear_slots_prepared[slot]) {
+        if (self.raw_linear_slot_kinds[slot] != .quantized or
+            self.raw_linear_slot_in_dims[slot] != in_dim or
+            self.raw_linear_slot_out_dims[slot] != flat_out_dim or
+            self.raw_linear_slot_runtime_prepared_kind[slot] != kind)
+        {
+            return null;
+        }
+        return .{
+            .slot = slot,
+            .format = format,
+            .source_out_dim = meta.source_out_dim,
+            .row_offset = row_offset,
+            .expert_count = expert_count,
+        };
+    }
+
+    // The 26B packed experts account for most of the model. They must remain
+    // mmap-backed and shared with Metal; a private upload duplicates enough
+    // memory to exhaust a 36 GB machine.
+    const span = mappedQuantRawSpan(storage, storage.raw_bytes, @alignOf(u16)) orelse return null;
+    const started_at = monotonicNowNs();
+    incrementRuntimeQuantMappedAttempts(self);
+    const rc = termite_metal_decode_runtime_prepare_quantized_linear_slot_no_copy_region(
+        runtime,
+        @intFromEnum(format),
+        slot,
+        span.base_ptr,
+        span.base_len,
+        span.weight_offset,
+        span.weight_len,
+        in_dim,
+        flat_out_dim,
+    );
+    addRuntimeQuantMappedPrepareNanos(self, monotonicNowNs() - started_at);
+    if (rc != 0) {
+        incrementRuntimeQuantMappedFailures(self);
+        return null;
+    }
+    self.raw_linear_slots_prepared[slot] = true;
+    self.raw_linear_slot_kinds[slot] = .quantized;
+    self.raw_linear_slot_in_dims[slot] = in_dim;
+    self.raw_linear_slot_out_dims[slot] = flat_out_dim;
+    // This slot borrows model-owned mmap storage. The runtime's no-copy Metal
+    // buffer retains the mapping for GPU use; do not put the borrowed metadata
+    // in the cache's owned-storage field, which is destroyed at slot teardown.
+    self.raw_linear_slot_quantized_storage[slot] = null;
+    self.raw_linear_slot_runtime_prepared_kind[slot] = kind;
+    self.raw_linear_slot_runtime_prepared_modes[slot] = .mapped_shared;
+    self.raw_linear_slot_disable_mapped_quant_weight[slot] = false;
+    _ = layout;
+    return .{
+        .slot = slot,
+        .format = format,
+        .source_out_dim = meta.source_out_dim,
+        .row_offset = row_offset,
+        .expert_count = expert_count,
+    };
+}
+
+pub fn decoderRuntimeApplyPackedMoeLinear(
+    self: anytype,
+    descriptor: PackedMoeLinearDescriptor,
+    input: MetalTensor,
+    expert_ids: []const u32,
+    in_dim: usize,
+    out_dim: usize,
+) !?MetalTensor {
+    const runtime = self.raw_decode_runtime orelse return null;
+    if (termite_metal_decode_runtime_ready(runtime) == 0 or !input.isDevice()) return null;
+    if (expert_ids.len == 0 or input.ndim() != 2) return null;
+    const rows = expert_ids.len;
+    if (@as(usize, @intCast(input.dim(0))) != rows or @as(usize, @intCast(input.dim(1))) != in_dim) return null;
+    const shape = [_]i32{ @intCast(rows), @intCast(out_dim) };
+    var output = try MetalTensor.deviceAllocate(runtime, rows * out_dim * @sizeOf(f32), .private, &shape);
+    errdefer output.deinit();
+    const rc = termite_metal_decode_runtime_apply_quantized_linear_id_slot_device(
+        runtime,
+        @intFromEnum(descriptor.format),
+        descriptor.slot,
+        input.deviceHandle(),
+        input.deviceByteOffset(),
+        expert_ids.ptr,
+        rows,
+        in_dim,
+        out_dim,
+        descriptor.source_out_dim,
+        descriptor.row_offset,
+        descriptor.expert_count,
+        output.deviceHandle(),
+        output.deviceByteOffset(),
+    );
+    if (rc != 0) return null;
+    return output;
+}
+
+pub fn decoderRuntimeMoeScatterAdd(
+    self: anytype,
+    base: MetalTensor,
+    updates: MetalTensor,
+    row_ids: []const u32,
+    route_weights: []const f32,
+    dim: usize,
+) !?MetalTensor {
+    const runtime = self.raw_decode_runtime orelse return null;
+    if (termite_metal_decode_runtime_ready(runtime) == 0 or !base.isDevice() or !updates.isDevice()) return null;
+    if (base.ndim() != 2 or updates.ndim() != 2 or row_ids.len == 0 or row_ids.len != route_weights.len) return null;
+    const base_rows: usize = @intCast(base.dim(0));
+    const route_rows = row_ids.len;
+    if (@as(usize, @intCast(base.dim(1))) != dim or
+        @as(usize, @intCast(updates.dim(0))) != route_rows or
+        @as(usize, @intCast(updates.dim(1))) != dim) return null;
+    var output = try MetalTensor.deviceAllocate(runtime, base_rows * dim * @sizeOf(f32), .private, base.shape());
+    errdefer output.deinit();
+    const rc = termite_metal_decode_runtime_moe_scatter_add_device(
+        runtime,
+        base.deviceHandle(),
+        base.deviceByteOffset(),
+        updates.deviceHandle(),
+        updates.deviceByteOffset(),
+        row_ids.ptr,
+        route_weights.ptr,
+        base_rows,
+        route_rows,
+        dim,
+        output.deviceHandle(),
+        output.deviceByteOffset(),
+    );
+    if (rc != 0) return null;
+    return output;
+}
+
+pub fn decoderRuntimeMoeForward(
+    self: anytype,
+    input: MetalTensor,
+    router_logits: MetalTensor,
+    gate: PackedMoeLinearDescriptor,
+    up: PackedMoeLinearDescriptor,
+    down: PackedMoeLinearDescriptor,
+    expert_scale: ?MetalTensor,
+    total_rows: usize,
+    hidden_size: usize,
+    inter_size: usize,
+    num_experts: usize,
+    top_k: usize,
+    activation: ops.DecoderRuntimeActivationKind,
+) !?MetalTensor {
+    const runtime = self.raw_decode_runtime orelse return null;
+    if (termite_metal_decode_runtime_ready(runtime) == 0 or !input.isDevice() or !router_logits.isDevice()) return null;
+    if (total_rows == 0 or hidden_size == 0 or inter_size == 0 or num_experts == 0 or top_k == 0) return null;
+    if (input.ndim() != 2 or router_logits.ndim() != 2) return null;
+    if (@as(usize, @intCast(input.dim(0))) != total_rows or
+        @as(usize, @intCast(input.dim(1))) != hidden_size or
+        @as(usize, @intCast(router_logits.dim(0))) != total_rows or
+        @as(usize, @intCast(router_logits.dim(1))) != num_experts) return null;
+    if (gate.format != .q4_k or up.format != .q4_k or gate.slot != up.slot) return null;
+    if (gate.source_out_dim != up.source_out_dim or gate.expert_count != num_experts or up.expert_count != num_experts) return null;
+    if ((down.format != .q5_1 and down.format != .q8_0) or down.expert_count != num_experts) return null;
+    if (gate.row_offset > gate.source_out_dim or inter_size > gate.source_out_dim - gate.row_offset) return null;
+    if (up.row_offset > up.source_out_dim or inter_size > up.source_out_dim - up.row_offset) return null;
+    if (down.row_offset > down.source_out_dim or hidden_size > down.source_out_dim - down.row_offset) return null;
+    if (expert_scale) |scale| {
+        if (!scale.isDevice() or scale.elemCount() != num_experts) return null;
+    }
+
+    var output_handle: ?*anyopaque = null;
+    const rc = termite_metal_decode_runtime_moe_forward_device(
+        runtime,
+        input.deviceHandle(),
+        input.deviceByteOffset(),
+        router_logits.deviceHandle(),
+        router_logits.deviceByteOffset(),
+        gate.slot,
+        down.slot,
+        gate.source_out_dim,
+        gate.row_offset,
+        up.row_offset,
+        down.source_out_dim,
+        down.row_offset,
+        num_experts,
+        total_rows,
+        hidden_size,
+        inter_size,
+        num_experts,
+        top_k,
+        @intFromEnum(activation),
+        if (expert_scale) |scale| scale.deviceHandle() else null,
+        if (expert_scale) |scale| scale.deviceByteOffset() else 0,
+        &output_handle,
+    );
+    if (rc != 0) return null;
+    const handle = output_handle orelse return null;
+    const shape = [_]i32{ @intCast(total_rows), @intCast(hidden_size) };
+    return MetalTensor.deviceBorrowed(@ptrCast(runtime), handle, 0, total_rows * hidden_size * @sizeOf(f32), &shape);
+}
+
+fn testDecoderRuntimeMoeForward(
+    down_format: MetalQuantFormat,
+    activation: ops.DecoderRuntimeActivationKind,
+) !void {
+    if (!build_options.enable_metal) return error.SkipZigTest;
+    if (!metalDeviceAvailable()) return error.SkipZigTest;
+    if (down_format != .q5_1 and down_format != .q8_0) return error.UnsupportedTensorType;
+
+    const metal_native_provider = @import("metal_native_provider.zig");
+    var provider = try metal_native_provider.MetalNativeProvider.create();
+    defer provider.deinitOwned();
+    const runtime = provider.raw_decode_runtime orelse return error.SkipZigTest;
+
+    const hidden_size: usize = 256;
+    const inter_size: usize = 32;
+    const num_experts: usize = 3;
+    const top_k: usize = 2;
+    const gate_source_out_dim = inter_size * 2;
+    const gate_row_bytes: usize = 144;
+    const down_row_bytes: usize = if (down_format == .q5_1) 24 else 34;
+
+    const allocator = std.testing.allocator;
+    const gate_raw = try allocator.alloc(u8, num_experts * gate_source_out_dim * gate_row_bytes);
+    defer allocator.free(gate_raw);
+    const down_raw = try allocator.alloc(u8, num_experts * hidden_size * down_row_bytes);
+    defer allocator.free(down_raw);
+
+    var gate_row: [hidden_size]f32 = undefined;
+    for (0..num_experts) |expert| {
+        for (0..gate_source_out_dim) |row| {
+            for (&gate_row, 0..) |*value, col| {
+                const signed = @as(i32, @intCast((expert * 29 + row * 17 + col * 11 + 3) % 127)) - 63;
+                value.* = @as(f32, @floatFromInt(signed)) / 83.0;
+            }
+            const raw_row = expert * gate_source_out_dim + row;
+            quant_codec.quantizeQ4_KBlock(
+                &gate_row,
+                gate_raw[raw_row * gate_row_bytes ..][0..gate_row_bytes],
+            );
+        }
+    }
+
+    var down_row: [inter_size]f32 = undefined;
+    for (0..num_experts) |expert| {
+        for (0..hidden_size) |row| {
+            for (&down_row, 0..) |*value, col| {
+                const signed = @as(i32, @intCast((expert * 31 + row * 13 + col * 7 + 5) % 113)) - 56;
+                value.* = @as(f32, @floatFromInt(signed)) / 79.0;
+            }
+            const raw_row = expert * hidden_size + row;
+            switch (down_format) {
+                .q5_1 => quant_codec.quantizeQ5_1Block(
+                    &down_row,
+                    down_raw[raw_row * down_row_bytes ..][0..down_row_bytes],
+                ),
+                .q8_0 => quant_codec.quantizeQ8_0Block(
+                    &down_row,
+                    down_raw[raw_row * down_row_bytes ..][0..down_row_bytes],
+                ),
+                else => unreachable,
+            }
+        }
+    }
+
+    const gate_slot: usize = 500;
+    const down_slot: usize = 501;
+    try std.testing.expectEqual(@as(c_int, 0), termite_metal_decode_runtime_prepare_quantized_linear_slot(
+        runtime,
+        @intFromEnum(MetalQuantFormat.q4_k),
+        gate_slot,
+        gate_raw.ptr,
+        gate_raw.len,
+        hidden_size,
+        gate_source_out_dim * num_experts,
+    ));
+    try std.testing.expectEqual(@as(c_int, 0), termite_metal_decode_runtime_prepare_quantized_linear_slot(
+        runtime,
+        @intFromEnum(down_format),
+        down_slot,
+        down_raw.ptr,
+        down_raw.len,
+        inter_size,
+        hidden_size * num_experts,
+    ));
+
+    var input_data: [hidden_size]f32 = undefined;
+    for (&input_data, 0..) |*value, i| {
+        const signed = @as(i32, @intCast((i * 19 + 7) % 109)) - 54;
+        value.* = @as(f32, @floatFromInt(signed)) / 97.0;
+    }
+    const router_data = [_]f32{ 0.3, 1.1, -0.2 };
+    const expert_scale_data = [_]f32{ 0.75, 1.25, 0.5 };
+    var input = try testDeviceTensorFromSlice(runtime, &input_data, &[_]i32{ 1, @intCast(hidden_size) });
+    defer input.deinit();
+    var router = try testDeviceTensorFromSlice(runtime, &router_data, &[_]i32{ 1, @intCast(num_experts) });
+    defer router.deinit();
+    var expert_scale = try testDeviceTensorFromSlice(runtime, &expert_scale_data, &[_]i32{@intCast(num_experts)});
+    defer expert_scale.deinit();
+
+    const gate_descriptor = PackedMoeLinearDescriptor{
+        .slot = gate_slot,
+        .format = .q4_k,
+        .source_out_dim = gate_source_out_dim,
+        .row_offset = 0,
+        .expert_count = num_experts,
+    };
+    const up_descriptor = PackedMoeLinearDescriptor{
+        .slot = gate_slot,
+        .format = .q4_k,
+        .source_out_dim = gate_source_out_dim,
+        .row_offset = inter_size,
+        .expert_count = num_experts,
+    };
+    const down_descriptor = PackedMoeLinearDescriptor{
+        .slot = down_slot,
+        .format = down_format,
+        .source_out_dim = hidden_size,
+        .row_offset = 0,
+        .expert_count = num_experts,
+    };
+    var output = (try decoderRuntimeMoeForward(
+        &provider,
+        input,
+        router,
+        gate_descriptor,
+        up_descriptor,
+        down_descriptor,
+        expert_scale,
+        1,
+        hidden_size,
+        inter_size,
+        num_experts,
+        top_k,
+        activation,
+    )) orelse return error.UnexpectedNull;
+    defer output.deinit();
+
+    const gate_dequant = try allocator.alloc(f32, num_experts * gate_source_out_dim * hidden_size);
+    defer allocator.free(gate_dequant);
+    try quant_codec.dequantizeToFloat32(.{ .known = .Q4_K }, gate_raw, gate_dequant);
+    const down_dequant = try allocator.alloc(f32, num_experts * hidden_size * inter_size);
+    defer allocator.free(down_dequant);
+    const down_tensor_type: gguf_tensor_types.TensorType = if (down_format == .q5_1)
+        .{ .known = .Q5_1 }
+    else
+        .{ .known = .Q8_0 };
+    try quant_codec.dequantizeToFloat32(
+        down_tensor_type,
+        down_raw,
+        down_dequant,
+    );
+
+    const selected_experts = [_]usize{ 1, 0 };
+    const unnormalized = [_]f32{ 1.0, @exp(@as(f32, 0.3 - 1.1)) };
+    const route_sum = unnormalized[0] + unnormalized[1];
+    var expected = [_]f32{0.0} ** hidden_size;
+    var intermediate: [top_k][inter_size]f32 = undefined;
+    for (selected_experts, 0..) |expert, route| {
+        for (0..inter_size) |row| {
+            var gate_value: f32 = 0.0;
+            var up_value: f32 = 0.0;
+            const gate_base = (expert * gate_source_out_dim + row) * hidden_size;
+            const up_base = (expert * gate_source_out_dim + inter_size + row) * hidden_size;
+            for (input_data, 0..) |x, col| {
+                gate_value += x * gate_dequant[gate_base + col];
+                up_value += x * gate_dequant[up_base + col];
+            }
+            const activated = switch (activation) {
+                .gelu, .gelu_new => 0.5 * gate_value *
+                    (1.0 + std.math.tanh(0.7978845608 * (gate_value + 0.044715 * gate_value * gate_value * gate_value))),
+                .silu => gate_value / (1.0 + @exp(-gate_value)),
+                .relu => @max(gate_value, 0.0),
+                .quick_gelu => gate_value / (1.0 + @exp(-1.702 * gate_value)),
+                .relu_squared => blk: {
+                    const relu = @max(gate_value, 0.0);
+                    break :blk relu * relu;
+                },
+            };
+            intermediate[route][row] = activated * up_value;
+        }
+        const route_weight = unnormalized[route] / route_sum * expert_scale_data[expert];
+        for (0..hidden_size) |row| {
+            var down_value: f32 = 0.0;
+            const down_base = (expert * hidden_size + row) * inter_size;
+            for (intermediate[route], 0..) |x, col| {
+                down_value += x * down_dequant[down_base + col];
+            }
+            expected[row] += route_weight * down_value;
+        }
+    }
+
+    var output_mut = output;
+    const actual = try tensorHostSlice(&output_mut);
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual, 0..) |exp, got, i| {
+        if (!std.math.approxEqAbs(f32, exp, got, 2e-2)) {
+            std.debug.print("fused MoE mismatch format={s} idx={d} expected={d} got={d}\n", .{ @tagName(down_format), i, exp, got });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "metal native fused packed MoE q4_k q5_1 GELU-tanh matches decomposed reference" {
+    try testDecoderRuntimeMoeForward(.q5_1, .gelu_new);
+}
+
+test "metal native fused packed MoE q4_k q8_0 SiLU matches decomposed reference" {
+    try testDecoderRuntimeMoeForward(.q8_0, .silu);
 }
 
 pub fn tryApplyQuantizedRuntimeLinearScratch(
@@ -26885,8 +27483,11 @@ test "metal native decoder runtime activation scratch pool and hidden state" {
     try std.testing.expectEqual(max_prefill_rows * 2, hiddenStateMaxRows(runtime));
     try std.testing.expect(hiddenStateCapacity(runtime) >= prev_capacity);
 
-    // Scratch pool acquisition returns distinct handles until exhausted.
-    const capacity = 16; // TERMITE_METAL_SCRATCH_POOL_CAPACITY
+    // Scratch pool acquisition returns distinct handles, and released handles
+    // can be reused. Keep the test batch modest: the production pool is sized
+    // for a complete decoder frame and exhausting all of it can exceed the
+    // host's per-process Metal allocation limit before reaching the pool cap.
+    const capacity = 16;
     var handles: [capacity]?*anyopaque = [_]?*anyopaque{null} ** capacity;
     var acquired: usize = 0;
     errdefer for (handles[0..acquired]) |h| {
@@ -26899,8 +27500,6 @@ test "metal native decoder runtime activation scratch pool and hidden state" {
             try std.testing.expect(handles[i] != handles[j]);
         }
     }
-    try std.testing.expectError(ScratchAcquireError.ScratchPoolExhausted, acquireScratch(runtime, 4096));
-
     // Release then re-acquire reuses a previously-returned slot. The pool
     // scans linearly for the first idle slot with enough capacity, so
     // releasing slot 3 and re-acquiring must return the same buffer handle —

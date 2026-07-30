@@ -370,7 +370,9 @@ pub fn build(b: *std.Build) void {
     });
     metal_bench_exe.root_module.addImport("build_options", build_options_mod);
     metal_bench_exe.root_module.addImport("inference_internal", inference_internal_mod);
-    configureNativeTool(b, metal_bench_exe, target, enable_system_blas, blas_root, enable_metal);
+    // `inference_internal` owns the Metal implementation. Linking it again on
+    // the benchmark root duplicates every Objective-C symbol.
+    configureNativeTool(b, metal_bench_exe, target, enable_system_blas, blas_root, false);
     const run_metal_bench = b.addRunArtifact(metal_bench_exe);
     if (b.args) |args| {
         run_metal_bench.addArgs(args);

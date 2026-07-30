@@ -104,6 +104,17 @@ fn getenvBool(comptime name: [*:0]const u8) bool {
     return enabled;
 }
 
+fn fusedMoeDisabled() bool {
+    if (comptime @import("builtin").os.tag == .freestanding) return false;
+    const c = @cImport(@cInclude("stdlib.h"));
+    const value = c.getenv("TERMITE_METAL_DISABLE_FUSED_MOE") orelse return false;
+    const slice = std.mem.span(value);
+    return std.mem.eql(u8, slice, "1") or
+        std.ascii.eqlIgnoreCase(slice, "true") or
+        std.ascii.eqlIgnoreCase(slice, "yes") or
+        std.ascii.eqlIgnoreCase(slice, "on");
+}
+
 fn getenvUsize(comptime name: [*:0]const u8) ?usize {
     if (comptime @import("builtin").os.tag == .freestanding) return null;
     const c = @cImport(@cInclude("stdlib.h"));
@@ -836,6 +847,99 @@ pub const MetalCompute = if (build_options.enable_metal) struct {
             .activation = activation,
         })) orelse return null;
         return self.ctFromOwnedMetalTensor(result);
+    }
+
+    pub fn applyGemmaDecodeAttentionSetup(
+        cb: *const ops.ComputeBackend,
+        input: CT,
+        q_weight: CT,
+        k_weight: CT,
+        v_weight: CT,
+        q_norm_weight: CT,
+        k_norm_weight: CT,
+        hidden_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        rope_dim: usize,
+        position: usize,
+        theta: f32,
+        freq_scale: f32,
+        eps: f32,
+        consecutive_pairs: bool,
+        query_value_scale: f32,
+    ) !?ops.LinearNoBiasTripleResult {
+        if (cb.kind() != .metal or num_heads == 0 or num_kv_heads == 0 or head_dim == 0) return null;
+        const self: *MetalCompute = @ptrCast(@alignCast(cb.ptr));
+        const q_dim = num_heads * head_dim;
+        const kv_dim = num_kv_heads * head_dim;
+        const q_zero_bias = try self.cachedZeroBiasBuf(q_dim);
+        defer freeOp(self, q_zero_bias);
+        const kv_zero_bias = try self.cachedZeroBiasBuf(kv_dim);
+        defer freeOp(self, kv_zero_bias);
+        const q_linear_slot = (try self.ensureDynamicLinearSlot(q_weight, q_zero_bias, hidden_size, q_dim)) orelse return null;
+        const k_linear_slot = (try self.ensureDynamicLinearSlot(k_weight, kv_zero_bias, hidden_size, kv_dim)) orelse return null;
+        const v_linear_slot = (try self.ensureDynamicLinearSlot(v_weight, kv_zero_bias, hidden_size, kv_dim)) orelse return null;
+        const q_norm_slot = (try self.ensureDynamicRmsNormSlot(q_norm_weight, head_dim)) orelse return null;
+        const k_norm_slot = (try self.ensureDynamicRmsNormSlot(k_norm_weight, head_dim)) orelse return null;
+        var input_tensor = try self.ownedDeviceMetalTensorFromCt(input);
+        defer input_tensor.deinit();
+        var setup = (try metal_runtime.decoderRuntimeApplyPrefillSetupDevice(self.provider_impl, .{
+            .shares_kv = false,
+            .q_slot = q_linear_slot,
+            .k_slot = k_linear_slot,
+            .v_slot = v_linear_slot,
+            .input = input_tensor,
+            .rows = 1,
+            .hidden_size = hidden_size,
+            .attention_input_size = q_dim,
+            .kv_dim = kv_dim,
+            .q_norm_slot = q_norm_slot,
+            .k_norm_slot = k_norm_slot,
+            .value_norm_weight = @as(?MetalTensor, null),
+            .num_heads = num_heads,
+            .num_kv_heads = num_kv_heads,
+            .head_dim = head_dim,
+            .rope_dim = rope_dim,
+            .position = position,
+            .theta = theta,
+            .freq_scale = freq_scale,
+            .eps = eps,
+            .query_value_scale = query_value_scale,
+            .consecutive_pairs = consecutive_pairs,
+            .planned_layer_contract = ops.PlannedLayerContract{},
+            .keep_scope_open_after = true,
+        })) orelse return null;
+        if (setup.k == null or setup.v == null) {
+            setup.deinit();
+            return null;
+        }
+
+        var q = setup.q;
+        var k = setup.k.?;
+        var v = setup.v.?;
+        const q_ct = self.ctFromOwnedMetalTensor(q) catch |err| {
+            q.deinit();
+            k.deinit();
+            v.deinit();
+            return err;
+        };
+        errdefer freeOp(self, q_ct);
+        const k_ct = self.ctFromOwnedMetalTensor(k) catch |err| {
+            k.deinit();
+            v.deinit();
+            return err;
+        };
+        errdefer freeOp(self, k_ct);
+        const v_ct = self.ctFromOwnedMetalTensor(v) catch |err| {
+            v.deinit();
+            return err;
+        };
+        return .{
+            .first = q_ct,
+            .second = k_ct,
+            .third = v_ct,
+        };
     }
 
     pub fn debugGatherPagedKvLayer(
@@ -3138,6 +3242,160 @@ pub const MetalCompute = if (build_options.enable_metal) struct {
         }))) return null;
         try self.dynamic_linear_slots.put(self.allocator, key, slot);
         return slot;
+    }
+
+    fn ensurePackedMoeLinearDescriptor(
+        self: *MetalCompute,
+        weight: CT,
+        in_dim: usize,
+        out_dim: usize,
+    ) !?metal_runtime.PackedMoeLinearDescriptor {
+        if (!self.provider_impl.hasDecoderRuntime()) return null;
+        const weight_buf = toBuf(weight);
+        const storage = weight_buf.quantized_storage orelse weight_buf.runtime_quantized_storage orelse return null;
+        const packed_meta = storage.packed_expert orelse return null;
+        const source_out_dim: usize = blk: {
+            if (storage.shape.len != 3) return null;
+            const expert_axis: usize = @intCast(packed_meta.expert_axis);
+            if (expert_axis >= storage.shape.len) return null;
+            var result: ?usize = null;
+            for (storage.shape, 0..) |dim, axis| {
+                if (axis == expert_axis or dim == @as(i64, @intCast(in_dim))) continue;
+                const candidate: usize = @intCast(dim);
+                if (candidate == out_dim or candidate == out_dim * 2) {
+                    result = candidate;
+                    break;
+                }
+            }
+            break :blk result orelse return null;
+        };
+        const expert_count: usize = @intCast(packed_meta.expert_count);
+        const flat_out_dim = std.math.mul(usize, source_out_dim, expert_count) catch return null;
+        const key = DynamicLinearSlotKey{
+            .weight_buf = @intFromPtr(storage.raw_bytes.ptr),
+            .bias_buf = std.math.maxInt(usize),
+            .quantized_storage = storage.raw_bytes.len,
+            .in_dim = in_dim,
+            .out_dim = flat_out_dim,
+        };
+        if (self.dynamic_linear_slots.get(key)) |slot| {
+            return metal_runtime.decoderRuntimePreparePackedMoeLinear(
+                self.provider_impl,
+                storage,
+                slot,
+                in_dim,
+                out_dim,
+            );
+        }
+        const slot = self.nextFreeDynamicLinearSlot() orelse return null;
+        const descriptor = (try metal_runtime.decoderRuntimePreparePackedMoeLinear(
+            self.provider_impl,
+            storage,
+            slot,
+            in_dim,
+            out_dim,
+        )) orelse return null;
+        try self.dynamic_linear_slots.put(self.allocator, key, slot);
+        return descriptor;
+    }
+
+    fn mulMatIdOp(ctx: *anyopaque, request: *const ops.MulMatIdRequest) anyerror!?CT {
+        const self: *MetalCompute = @ptrCast(@alignCast(ctx));
+        if (request.rows == 0 or request.expert_ids.len != request.rows) return null;
+        const descriptor = (try self.ensurePackedMoeLinearDescriptor(
+            request.weight,
+            request.in_dim,
+            request.out_dim,
+        )) orelse return null;
+        var input = try self.ownedDeviceMetalTensorFromCt(request.input);
+        defer input.deinit();
+        const output = (try metal_runtime.decoderRuntimeApplyPackedMoeLinear(
+            self.provider_impl,
+            descriptor,
+            input,
+            request.expert_ids,
+            request.in_dim,
+            request.out_dim,
+        )) orelse return null;
+        return self.ctFromOwnedMetalTensor(output);
+    }
+
+    fn moeScatterAddOp(ctx: *anyopaque, request: *const ops.MoeScatterAddRequest) anyerror!?CT {
+        const self: *MetalCompute = @ptrCast(@alignCast(ctx));
+        if (request.rows == 0 or request.row_ids.len != request.rows or request.row_weights.len != request.rows) return null;
+        var base = try self.ownedDeviceMetalTensorFromCt(request.base);
+        defer base.deinit();
+        var updates = try self.ownedDeviceMetalTensorFromCt(request.updates);
+        defer updates.deinit();
+        const output = (try metal_runtime.decoderRuntimeMoeScatterAdd(
+            self.provider_impl,
+            base,
+            updates,
+            request.row_ids,
+            request.row_weights,
+            request.dim,
+        )) orelse return null;
+        return self.ctFromOwnedMetalTensor(output);
+    }
+
+    fn moeForwardFusedOp(ctx: *anyopaque, request: *const ops.MoeForwardFusedRequest) anyerror!?CT {
+        const self: *MetalCompute = @ptrCast(@alignCast(ctx));
+        self.timing_stats.gemma4_moe_fused_attempts += 1;
+        var fused_success = false;
+        defer {
+            if (fused_success) {
+                self.timing_stats.gemma4_moe_fused_successes += 1;
+            } else {
+                self.timing_stats.gemma4_moe_fused_fallbacks += 1;
+            }
+        }
+        if (fusedMoeDisabled()) return null;
+        if (request.total == 0 or request.hidden_size == 0 or request.inter_size == 0 or
+            request.num_experts == 0 or request.top_k == 0 or request.top_k > request.num_experts) return null;
+
+        const gate = (try self.ensurePackedMoeLinearDescriptor(
+            request.w1,
+            request.hidden_size,
+            request.inter_size,
+        )) orelse return null;
+        const up = (try self.ensurePackedMoeLinearDescriptor(
+            request.w3,
+            request.hidden_size,
+            request.inter_size,
+        )) orelse return null;
+        const down = (try self.ensurePackedMoeLinearDescriptor(
+            request.w2,
+            request.inter_size,
+            request.hidden_size,
+        )) orelse return null;
+
+        var input = try self.ownedDeviceMetalTensorFromCt(request.input);
+        defer input.deinit();
+        var router_logits = try self.ownedDeviceMetalTensorFromCt(request.router_logits);
+        defer router_logits.deinit();
+        var expert_scale: ?MetalTensor = if (request.expert_scale) |scale|
+            try self.ownedDeviceMetalTensorFromCt(scale)
+        else
+            null;
+        defer if (expert_scale) |*scale| scale.deinit();
+
+        const output = (try metal_runtime.decoderRuntimeMoeForward(
+            self.provider_impl,
+            input,
+            router_logits,
+            gate,
+            up,
+            down,
+            expert_scale,
+            request.total,
+            request.hidden_size,
+            request.inter_size,
+            request.num_experts,
+            request.top_k,
+            request.activation,
+        )) orelse return null;
+        fused_success = true;
+        return self.ctFromOwnedMetalTensor(output);
     }
 
     fn dequantizeQuantTensorWithRuntimeRowCopy(
@@ -7544,6 +7802,48 @@ pub const MetalCompute = if (build_options.enable_metal) struct {
         return denseBuf(self.allocator, output, true, shape_i32);
     }
 
+    fn gemmaParallelFfnEpilogueOp(
+        ctx: *anyopaque,
+        shared: CT,
+        shared_weight: CT,
+        routed: CT,
+        routed_weight: CT,
+        combined_weight: CT,
+        residual: CT,
+        scalar: CT,
+        dim: usize,
+        eps: f32,
+    ) anyerror!?CT {
+        const self: *MetalCompute = @ptrCast(@alignCast(ctx));
+        var shared_mt = try self.ownedDeviceMetalTensorFromCt(shared);
+        defer shared_mt.deinit();
+        var shared_weight_mt = try self.ownedDeviceMetalTensorFromCt(shared_weight);
+        defer shared_weight_mt.deinit();
+        var routed_mt = try self.ownedDeviceMetalTensorFromCt(routed);
+        defer routed_mt.deinit();
+        var routed_weight_mt = try self.ownedDeviceMetalTensorFromCt(routed_weight);
+        defer routed_weight_mt.deinit();
+        var combined_weight_mt = try self.ownedDeviceMetalTensorFromCt(combined_weight);
+        defer combined_weight_mt.deinit();
+        var residual_mt = try self.ownedDeviceMetalTensorFromCt(residual);
+        defer residual_mt.deinit();
+        var scalar_mt = try self.ownedDeviceMetalTensorFromCt(scalar);
+        defer scalar_mt.deinit();
+        const output = (try metal_runtime.decoderRuntimeGemmaParallelFfnEpilogue(
+            self.provider_impl,
+            shared_mt,
+            shared_weight_mt,
+            routed_mt,
+            routed_weight_mt,
+            combined_weight_mt,
+            residual_mt,
+            scalar_mt,
+            dim,
+            eps,
+        )) orelse return null;
+        return self.ctFromOwnedMetalTensor(output);
+    }
+
     fn layerNormOp(ctx: *anyopaque, input: CT, gamma: CT, beta: CT, dim: usize, eps: f32) anyerror!CT {
         const self: *MetalCompute = @ptrCast(@alignCast(ctx));
         const input_buf = toBuf(input);
@@ -7867,6 +8167,30 @@ pub const MetalCompute = if (build_options.enable_metal) struct {
         in_dim: usize,
         out_dim: usize,
     ) anyerror!ops.LinearNoBiasPairResult {
+        const self: *MetalCompute = @ptrCast(@alignCast(ctx));
+        const input_buf = toBuf(input);
+        if (input_buf.quantized_storage == null) {
+            if (input_buf.metal_tensor) |*input_metal| {
+                if (deviceTensorMatchesLinearRows(input_metal, rows, in_dim)) {
+                    const zero_bias = try self.cachedZeroBiasBuf(out_dim);
+                    defer freeOp(ctx, zero_bias);
+                    const slot_a = try self.ensureDynamicLinearSlot(weight_a, zero_bias, in_dim, out_dim);
+                    const slot_b = try self.ensureDynamicLinearSlot(weight_b, zero_bias, in_dim, out_dim);
+                    if (slot_a != null and slot_b != null) {
+                        if (try decoderRuntimeApplyLinearPairOp(ctx, &.{
+                            .slot_a = slot_a.?,
+                            .slot_b = slot_b.?,
+                            .input = input,
+                            .in_dim = in_dim,
+                            .out_dim = out_dim,
+                        })) |pair| {
+                            return pair;
+                        }
+                    }
+                }
+            }
+        }
+
         const first = try linearNoBiasOp(ctx, input, weight_a, rows, in_dim, out_dim);
         errdefer freeOp(ctx, first);
         const second = try linearNoBiasOp(ctx, input, weight_b, rows, in_dim, out_dim);
@@ -7874,6 +8198,41 @@ pub const MetalCompute = if (build_options.enable_metal) struct {
             .first = first,
             .second = second,
         };
+    }
+
+    fn linearNoBiasQkvOp(
+        ctx: *anyopaque,
+        input: CT,
+        q_weight: CT,
+        k_weight: CT,
+        v_weight: CT,
+        rows: usize,
+        in_dim: usize,
+        q_out_dim: usize,
+        kv_out_dim: usize,
+    ) anyerror!?ops.LinearNoBiasTripleResult {
+        const self: *MetalCompute = @ptrCast(@alignCast(ctx));
+        const input_buf = toBuf(input);
+        if (input_buf.quantized_storage != null) return null;
+        const input_metal = if (input_buf.metal_tensor) |*metal| metal else return null;
+        if (!deviceTensorMatchesLinearRows(input_metal, rows, in_dim)) return null;
+
+        const q_zero_bias = try self.cachedZeroBiasBuf(q_out_dim);
+        defer freeOp(ctx, q_zero_bias);
+        const kv_zero_bias = try self.cachedZeroBiasBuf(kv_out_dim);
+        defer freeOp(ctx, kv_zero_bias);
+        const q_slot = (try self.ensureDynamicLinearSlot(q_weight, q_zero_bias, in_dim, q_out_dim)) orelse return null;
+        const k_slot = (try self.ensureDynamicLinearSlot(k_weight, kv_zero_bias, in_dim, kv_out_dim)) orelse return null;
+        const v_slot = (try self.ensureDynamicLinearSlot(v_weight, kv_zero_bias, in_dim, kv_out_dim)) orelse return null;
+        return decoderRuntimeApplyLinearQkvOp(ctx, &.{
+            .q_slot = q_slot,
+            .k_slot = k_slot,
+            .v_slot = v_slot,
+            .input = input,
+            .in_dim = in_dim,
+            .q_out_dim = q_out_dim,
+            .kv_out_dim = kv_out_dim,
+        });
     }
 
     fn concatOp(
@@ -10052,18 +10411,24 @@ pub const MetalCompute = if (build_options.enable_metal) struct {
                     if (try pagedKvLayerFromDeviceHook(attention, num_kv_heads, head_dim)) |paged_layer| {
                         if (pagedSlotAttentionSupported(paged_layer)) {
                             if (paged_layer.runtime) |layer_runtime_ptr| {
+                                const layer_runtime: *metal_runtime.RawMetalDecodeRuntime =
+                                    @ptrCast(@alignCast(layer_runtime_ptr));
+                                const current_runtime = self.provider_impl.raw_decode_runtime;
+                                const cross_runtime = current_runtime == null or current_runtime.? != layer_runtime;
                                 const block_offsets_opt = try self.pagedKvBlockTokenOffsets(attention, @intCast(paged_layer.page_size_tokens));
                                 defer if (block_offsets_opt) |block_offsets| self.allocator.free(block_offsets);
                                 if (block_offsets_opt) |block_offsets| {
                                     // Q may still be pending in this backend's active
                                     // frame while the slot attention runs inline on the
-                                    // KV owner's runtime — drain our frame first.
-                                    if (metal_runtime.hasActiveFrame(self.provider_impl.raw_decode_runtime)) {
+                                    // KV owner's runtime. Cross-runtime queues need an
+                                    // explicit producer/consumer handoff; same-runtime
+                                    // attention stays ordered in the current frame.
+                                    if (cross_runtime and metal_runtime.hasActiveFrame(current_runtime)) {
                                         if (metal_runtime.termite_metal_decode_runtime_flush_active_frame(self.provider_impl.raw_decode_runtime) != 0) {
                                             return error.MetalFrameSyncFailed;
                                         }
                                     }
-                                    if (try metal_runtime.decoderRuntimeApplyPagedKvAttentionSlotOnRuntime(@as(*metal_runtime.RawMetalDecodeRuntime, @ptrCast(@alignCast(layer_runtime_ptr))), .{
+                                    if (try metal_runtime.decoderRuntimeApplyPagedKvAttentionSlotOnRuntime(layer_runtime, .{
                                         .q = q_mt,
                                         .slot = paged_layer.slot,
                                         .format = paged_layer.format,
@@ -10079,7 +10444,7 @@ pub const MetalCompute = if (build_options.enable_metal) struct {
                                         .query_position_offset = query_position_offset,
                                         .kv_position_offset = attention.kv_position_offset,
                                         .sliding_window = attention.sliding_window,
-                                    })) |tensor| {
+                                    }, cross_runtime)) |tensor| {
                                         return self.ctFromOwnedMetalTensor(tensor);
                                     }
                                 }
@@ -19762,6 +20127,7 @@ pub const MetalCompute = if (build_options.enable_metal) struct {
         vt.tanh_act = tanhOp;
         vt.concat = concatOp;
         vt.rmsNorm = rmsNormOp;
+        vt.gemmaParallelFfnEpilogue = gemmaParallelFfnEpilogueOp;
         vt.layerNorm = layerNormOp;
         vt.linear = linearOp;
         vt.linearPlanned = linearPlannedOp;
@@ -19771,6 +20137,12 @@ pub const MetalCompute = if (build_options.enable_metal) struct {
         vt.linearNoBiasArgmaxRowsSuppress = linearNoBiasArgmaxRowsSuppressOp;
         vt.gemma4MtpVerifyCommit = gemma4MtpVerifyCommitOp;
         vt.linearNoBiasPair = linearNoBiasPairOp;
+        vt.linearNoBiasQkv = linearNoBiasQkvOp;
+        vt.mulMatId = mulMatIdOp;
+        vt.moeLinearNoBias = mulMatIdOp;
+        vt.moeScatterAdd = moeScatterAddOp;
+        vt.moeForwardFused = moeForwardFusedOp;
+        vt.runMoeBlock = moeForwardFusedOp;
         vt.splitLastDim3 = splitLastDim3Op;
         vt.linearPair = linearPairOp;
         vt.linearTriple = linearTripleOp;
@@ -19893,6 +20265,29 @@ pub const MetalCompute = if (build_options.enable_metal) struct {
         _: f32,
         _: ops.DecoderRuntimeActivationKind,
     ) !?CT {
+        return null;
+    }
+
+    pub fn applyGemmaDecodeAttentionSetup(
+        _: *const ops.ComputeBackend,
+        _: CT,
+        _: CT,
+        _: CT,
+        _: CT,
+        _: CT,
+        _: CT,
+        _: usize,
+        _: usize,
+        _: usize,
+        _: usize,
+        _: usize,
+        _: usize,
+        _: f32,
+        _: f32,
+        _: f32,
+        _: bool,
+        _: f32,
+    ) !?ops.LinearNoBiasTripleResult {
         return null;
     }
 

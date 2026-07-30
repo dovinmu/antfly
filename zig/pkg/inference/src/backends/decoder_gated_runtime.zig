@@ -1796,7 +1796,10 @@ fn shouldUseDecoderRuntimeFrame(
     // submissions. Keep those on the conservative per-call path.
     if (gatedFamilyCompareRequested() and !gatedFamilyCompareAllowFrameRequested()) return false;
     if (c_std.getenv("TERMITE_DEBUG_GPT_STATS") != null) return false;
-    if (disableGatedFamilyRuntimePrefillBlockRequested(gpt_config, configured_layer_count)) return false;
+    // Gemma MoE uses the canonical staged block inside this outer frame rather
+    // than the dense whole-frame contract. It can still batch the complete
+    // token even though that dense contract correctly rejects MoE.
+    if (!gpt_config.usesMoe() and disableGatedFamilyRuntimePrefillBlockRequested(gpt_config, configured_layer_count)) return false;
     return true;
 }
 
@@ -2095,6 +2098,51 @@ fn forwardFinalHiddenTensorGemmaDirect(
     var hidden = if (reserved_hidden) |*carrier| carrier.active() else hidden_input;
     var owns_hidden = false;
     errdefer if (owns_hidden) cb.free(hidden);
+
+    // Keep Gemma 4 MoE on the canonical decoder block. Reimplementing its
+    // parallel shared/routed FFN here caused tiny attention-residual rounding
+    // differences to change near-tied expert routes. The direct runtime still
+    // owns the outer Metal frame and prepared tail, so all layer work remains
+    // device-resident and batched without duplicating model semantics.
+    if (gpt_config.usesMoe()) {
+        if (reserved_hidden) |*carrier| {
+            carrier.deinit(cb, false);
+            reserved_hidden = null;
+            hidden = hidden_input;
+        }
+        for (0..gpt_config.num_hidden_layers) |layer| {
+            const next_hidden = planned_layer: {
+                const planned_scope = if (phase != .prefill)
+                    try metal_compute_mod.MetalCompute.beginPlannedGraphScope(cb, .ffn)
+                else
+                    metal_compute_mod.MetalCompute.PlannedGraphScope{};
+                defer metal_compute_mod.MetalCompute.endPlannedGraphScope(cb, planned_scope) catch {};
+                break :planned_layer try gpt_arch.debugDecoderBlockNoOverrides(
+                    cb,
+                    allocator,
+                    gpt_config,
+                    hidden,
+                    1,
+                    seq_len,
+                    gpt_config.effectiveKVHeadsForLayer(layer),
+                    gpt_config.effectiveHeadDimForLayer(layer),
+                    layer,
+                    decode_context,
+                    ple_vectors,
+                );
+            };
+            cb.free(hidden);
+            hidden = next_hidden;
+            owns_hidden = true;
+        }
+        return_decoder_frame = decoder_frame_active and phase == .prefill and decode_context.query_sequence_len > 1;
+        return .{
+            .hidden = hidden,
+            .total_rows = decode_context.query_sequence_len,
+            .decoder_frame_active = return_decoder_frame,
+        };
+    }
+
     var compare_hidden: ?ops.CT = null;
     defer if (compare_hidden) |ct| cb.free(ct);
     if (gatedFamilyCompareRequested()) {
@@ -2309,7 +2357,13 @@ fn forwardFinalHiddenTensorGemmaDirect(
             }
         }
 
-        const q: ops.CT, const k_value: ops.CT, const v_value: ops.CT = if (shares_kv) blk: {
+        const AttentionProjections = struct {
+            q: ops.CT,
+            k: ops.CT,
+            v: ops.CT,
+            v_aliases_k: bool = false,
+        };
+        const attention_projected: AttentionProjections = if (shares_kv) blk: {
             const q_local = (try cb.decoderRuntimeApplyLinear(&.{
                 .slot = linearSlot(layer, .attn_q),
                 .input = attn_normed,
@@ -2324,9 +2378,10 @@ fn forwardFinalHiddenTensorGemmaDirect(
             const zero_k = try createZeroTensor(cb, allocator, decode_context.query_sequence_len * kv_dim);
             errdefer cb.free(zero_k);
             const zero_v = try createZeroTensor(cb, allocator, decode_context.query_sequence_len * kv_dim);
-            break :blk .{ q_local, zero_k, zero_v };
+            break :blk .{ .q = q_local, .k = zero_k, .v = zero_v };
         } else blk: {
             if (!disableGemmaFusedQkvRequested() and
+                !gpt_config.layerOmitsVProj(layer) and
                 !preferSplitGemmaDecodeQkv(gpt_config, phase, decode_context.query_sequence_len))
             {
                 if (try cb.decoderRuntimeApplyLinearQkv(&.{
@@ -2343,7 +2398,7 @@ fn forwardFinalHiddenTensorGemmaDirect(
                         timing_stats.prefill_qkv_ops += 1;
                         timing_stats.prefill_qkv_fused_ops += 1;
                     }
-                    break :blk .{ qkv.first, qkv.second, qkv.third };
+                    break :blk .{ .q = qkv.first, .k = qkv.second, .v = qkv.third };
                 }
             }
             recordGemmaDirectQkv(false);
@@ -2375,6 +2430,10 @@ fn forwardFinalHiddenTensorGemmaDirect(
                     return null;
                 };
                 errdefer cb.free(k_local);
+                if (gpt_config.layerOmitsVProj(layer)) {
+                    if (phase == .prefill) timing_stats.prefill_q_linear_ops += 1;
+                    break :blk .{ .q = q_local, .k = k_local, .v = k_local, .v_aliases_k = true };
+                }
                 const v_local = (try cb.decoderRuntimeApplyLinear(&.{
                     .slot = linearSlot(layer, .attn_v),
                     .input = attn_normed,
@@ -2387,7 +2446,7 @@ fn forwardFinalHiddenTensorGemmaDirect(
                     return null;
                 };
                 if (phase == .prefill) timing_stats.prefill_q_linear_ops += 2;
-                break :blk .{ q_local, k_local, v_local };
+                break :blk .{ .q = q_local, .k = k_local, .v = v_local };
             } else {
                 const kv_local = (try cb.decoderRuntimeApplyLinearPair(&.{
                     .slot_a = linearSlot(layer, .attn_k),
@@ -2401,12 +2460,15 @@ fn forwardFinalHiddenTensorGemmaDirect(
                     return null;
                 };
                 if (phase == .prefill) timing_stats.prefill_kv_pair_ops += 1;
-                break :blk .{ q_local, kv_local.first, kv_local.second };
+                break :blk .{ .q = q_local, .k = kv_local.first, .v = kv_local.second };
             }
         };
+        const q = attention_projected.q;
+        const k_value = attention_projected.k;
+        const v_value = attention_projected.v;
         defer cb.free(q);
         defer cb.free(k_value);
-        defer cb.free(v_value);
+        defer if (!attention_projected.v_aliases_k) cb.free(v_value);
         traceGatedFamilyDevice(cb, layer, "q_projected", q);
         traceGatedFamilyDevice(cb, layer, "k_projected", k_value);
         traceGatedFamilyDevice(cb, layer, "v_projected", v_value);
@@ -3282,7 +3344,10 @@ fn forwardFinalHiddenTensorGemmaDirect(
         const attention_apply_started_at = monotonicNowNs();
         const attn_residual = if (decode_context.attention_mode == .paged_decode and decode_context.query_sequence_len == 1) blk: {
             const fused_residual_started_at = monotonicNowNs();
-            if (!qk_already_roped) {
+            // MoE routing can change experts at very small logit margins. Keep
+            // its attention residual bitwise-aligned with the staged reference
+            // path instead of using the fused norm+add reduction.
+            if (!gpt_config.usesMoe() and !qk_already_roped) {
                 if (try gpt_arch.applyAttentionResidual(
                     cb,
                     gpt_config,
@@ -3358,30 +3423,32 @@ fn forwardFinalHiddenTensorGemmaDirect(
                 attention_input_size,
             );
 
-            if (try cb.runAttentionOutputResidual(&.{
-                .attention_output = attn_out,
-                .residual = hidden,
-                .rows = decode_context.query_sequence_len,
-                .attention_input_size = attention_input_size,
-                .hidden_size = gpt_config.hidden_size,
-                .linear_slot = linearSlot(layer, .attn_out_proj),
-                .post_linear_rms_norm_slot = normSlot(layer, .attn_post),
-                .eps = gpt_config.norm_eps,
-            })) |fused_attn_residual| {
-                recordGemmaDirectAttentionResidual(true, true);
-                const fused_residual_finished_at = monotonicNowNs();
-                if (fused_residual_finished_at > fused_residual_started_at) {
-                    addBlockAttentionFusedResidualTiming(phase, fused_residual_finished_at - fused_residual_started_at);
+            if (!gpt_config.usesMoe()) {
+                if (try cb.runAttentionOutputResidual(&.{
+                    .attention_output = attn_out,
+                    .residual = hidden,
+                    .rows = decode_context.query_sequence_len,
+                    .attention_input_size = attention_input_size,
+                    .hidden_size = gpt_config.hidden_size,
+                    .linear_slot = linearSlot(layer, .attn_out_proj),
+                    .post_linear_rms_norm_slot = normSlot(layer, .attn_post),
+                    .eps = gpt_config.norm_eps,
+                })) |fused_attn_residual| {
+                    recordGemmaDirectAttentionResidual(true, true);
+                    const fused_residual_finished_at = monotonicNowNs();
+                    if (fused_residual_finished_at > fused_residual_started_at) {
+                        addBlockAttentionFusedResidualTiming(phase, fused_residual_finished_at - fused_residual_started_at);
+                    }
+                    try gpt_arch.maybeDumpGatedLayerStageStats(
+                        cb,
+                        allocator,
+                        layer,
+                        "attn-residual",
+                        fused_attn_residual,
+                        gpt_config.hidden_size,
+                    );
+                    break :blk fused_attn_residual;
                 }
-                try gpt_arch.maybeDumpGatedLayerStageStats(
-                    cb,
-                    allocator,
-                    layer,
-                    "attn-residual",
-                    fused_attn_residual,
-                    gpt_config.hidden_size,
-                );
-                break :blk fused_attn_residual;
             }
             recordGemmaDirectAttentionResidual(false, true);
             const fused_residual_finished_at = monotonicNowNs();
@@ -3484,30 +3551,32 @@ fn forwardFinalHiddenTensorGemmaDirect(
             );
 
             const fused_residual_started_at = monotonicNowNs();
-            if (try cb.runAttentionOutputResidual(&.{
-                .attention_output = attn_out,
-                .residual = hidden,
-                .rows = decode_context.query_sequence_len,
-                .attention_input_size = attention_input_size,
-                .hidden_size = gpt_config.hidden_size,
-                .linear_slot = linearSlot(layer, .attn_out_proj),
-                .post_linear_rms_norm_slot = normSlot(layer, .attn_post),
-                .eps = gpt_config.norm_eps,
-            })) |fused_attn_residual| {
-                recordGemmaDirectAttentionResidual(true, true);
-                const fused_residual_finished_at = monotonicNowNs();
-                if (fused_residual_finished_at > fused_residual_started_at) {
-                    addBlockAttentionFusedResidualTiming(phase, fused_residual_finished_at - fused_residual_started_at);
+            if (!gpt_config.usesMoe()) {
+                if (try cb.runAttentionOutputResidual(&.{
+                    .attention_output = attn_out,
+                    .residual = hidden,
+                    .rows = decode_context.query_sequence_len,
+                    .attention_input_size = attention_input_size,
+                    .hidden_size = gpt_config.hidden_size,
+                    .linear_slot = linearSlot(layer, .attn_out_proj),
+                    .post_linear_rms_norm_slot = normSlot(layer, .attn_post),
+                    .eps = gpt_config.norm_eps,
+                })) |fused_attn_residual| {
+                    recordGemmaDirectAttentionResidual(true, true);
+                    const fused_residual_finished_at = monotonicNowNs();
+                    if (fused_residual_finished_at > fused_residual_started_at) {
+                        addBlockAttentionFusedResidualTiming(phase, fused_residual_finished_at - fused_residual_started_at);
+                    }
+                    try gpt_arch.maybeDumpGatedLayerStageStats(
+                        cb,
+                        allocator,
+                        layer,
+                        "attn-residual",
+                        fused_attn_residual,
+                        gpt_config.hidden_size,
+                    );
+                    break :blk fused_attn_residual;
                 }
-                try gpt_arch.maybeDumpGatedLayerStageStats(
-                    cb,
-                    allocator,
-                    layer,
-                    "attn-residual",
-                    fused_attn_residual,
-                    gpt_config.hidden_size,
-                );
-                break :blk fused_attn_residual;
             }
             recordGemmaDirectAttentionResidual(false, true);
             const fused_residual_finished_at = monotonicNowNs();
@@ -4066,6 +4135,19 @@ fn forwardFinalHiddenTensorGemmaDirect(
         defer if (compare_layer_hidden_pre_ple) |ct| cb.free(ct);
         var layer_hidden_output_scaled = false;
         const layer_hidden = blk: {
+            if (gpt_config.usesMoe() and gpt_config.hasSharedExpert()) {
+                break :blk try gpt_arch.gemmaMoeParallelFfnResidual(
+                    cb,
+                    allocator,
+                    gpt_config,
+                    attn_residual,
+                    ffn_normed,
+                    decode_context.query_sequence_len,
+                    layer,
+                    &name_buf,
+                    decode_context,
+                );
+            }
             const ffn_fused_started_at = monotonicNowNs();
             if (try cb.runGatedFfnResidual(&.{
                 .gate_linear_slot = linearSlot(layer, .mlp_gate),
@@ -5055,20 +5137,25 @@ pub fn prepareDecodeRuntime(
             finished_at = monotonicNowNs();
             if (finished_at > started_at) timing_stats.linear_prep_nanos += finished_at - started_at;
 
-            started_at = monotonicNowNs();
-            const v_name = try std.fmt.bufPrint(&name_buf, "model.layers.{d}.self_attn.v_proj.weight", .{layer});
-            const v_w = try gpt_arch.getModelWeight(cb, gpt_config, v_name);
-            defer cb.free(v_w);
-            finished_at = monotonicNowNs();
-            if (finished_at > started_at) timing_stats.lookup_nanos += finished_at - started_at;
-            started_at = monotonicNowNs();
-            if (!(try prepareLinearNoBiasSlotForConfig(cb, allocator, gpt_config, linearSlot(layer, .attn_v), v_w, gpt_config.hidden_size, layer_kv_heads * layer_head_dim, false))) {
-                timing_stats.prepare_attn_v_failures += 1;
-                tracePrepareLayerFailure(layer, "attn_v", linearSlot(layer, .attn_v), gpt_config.hidden_size, layer_kv_heads * layer_head_dim);
-                return false;
+            // Gemma 4 full-attention layers may define V = K and omit v_proj.
+            // The direct runtime aliases the projected K tensor for V and
+            // applies Gemma's separate bare value RMS normalization below.
+            if (!gpt_config.layerOmitsVProj(layer)) {
+                started_at = monotonicNowNs();
+                const v_name = try std.fmt.bufPrint(&name_buf, "model.layers.{d}.self_attn.v_proj.weight", .{layer});
+                const v_w = try gpt_arch.getModelWeight(cb, gpt_config, v_name);
+                defer cb.free(v_w);
+                finished_at = monotonicNowNs();
+                if (finished_at > started_at) timing_stats.lookup_nanos += finished_at - started_at;
+                started_at = monotonicNowNs();
+                if (!(try prepareLinearNoBiasSlotForConfig(cb, allocator, gpt_config, linearSlot(layer, .attn_v), v_w, gpt_config.hidden_size, layer_kv_heads * layer_head_dim, false))) {
+                    timing_stats.prepare_attn_v_failures += 1;
+                    tracePrepareLayerFailure(layer, "attn_v", linearSlot(layer, .attn_v), gpt_config.hidden_size, layer_kv_heads * layer_head_dim);
+                    return false;
+                }
+                finished_at = monotonicNowNs();
+                if (finished_at > started_at) timing_stats.linear_prep_nanos += finished_at - started_at;
             }
-            finished_at = monotonicNowNs();
-            if (finished_at > started_at) timing_stats.linear_prep_nanos += finished_at - started_at;
         }
 
         started_at = monotonicNowNs();
@@ -5103,47 +5190,54 @@ pub fn prepareDecodeRuntime(
         finished_at = monotonicNowNs();
         if (finished_at > started_at) timing_stats.linear_prep_nanos += finished_at - started_at;
 
-        started_at = monotonicNowNs();
-        const gate_w = try gpt_arch.getFFNWeight(cb, gpt_config, layer, "gate", &name_buf);
-        defer cb.free(gate_w);
-        finished_at = monotonicNowNs();
-        if (finished_at > started_at) timing_stats.lookup_nanos += finished_at - started_at;
-        started_at = monotonicNowNs();
-        if (!(try prepareLinearNoBiasSlotForConfig(cb, allocator, gpt_config, linearSlot(layer, .mlp_gate), gate_w, gpt_config.hidden_size, gpt_config.intermediateSize(layer), false))) {
-            timing_stats.prepare_mlp_gate_failures += 1;
-            tracePrepareLayerFailure(layer, "mlp_gate", linearSlot(layer, .mlp_gate), gpt_config.hidden_size, gpt_config.intermediateSize(layer));
-            return false;
-        }
-        finished_at = monotonicNowNs();
-        if (finished_at > started_at) timing_stats.linear_prep_nanos += finished_at - started_at;
+        // Gemma 4 MoE executes the shared dense expert and routed experts as
+        // parallel branches in gemmaMoeParallelFfnResidual. Those weights use
+        // their own persistent Metal descriptors, so preparing the ordinary
+        // sequential MLP slots here is both unused and incorrect for layers
+        // whose GGUF layout omits a conventional dense FFN mapping.
+        if (!gpt_config.usesMoe()) {
+            started_at = monotonicNowNs();
+            const gate_w = try gpt_arch.getFFNWeight(cb, gpt_config, layer, "gate", &name_buf);
+            defer cb.free(gate_w);
+            finished_at = monotonicNowNs();
+            if (finished_at > started_at) timing_stats.lookup_nanos += finished_at - started_at;
+            started_at = monotonicNowNs();
+            if (!(try prepareLinearNoBiasSlotForConfig(cb, allocator, gpt_config, linearSlot(layer, .mlp_gate), gate_w, gpt_config.hidden_size, gpt_config.intermediateSize(layer), false))) {
+                timing_stats.prepare_mlp_gate_failures += 1;
+                tracePrepareLayerFailure(layer, "mlp_gate", linearSlot(layer, .mlp_gate), gpt_config.hidden_size, gpt_config.intermediateSize(layer));
+                return false;
+            }
+            finished_at = monotonicNowNs();
+            if (finished_at > started_at) timing_stats.linear_prep_nanos += finished_at - started_at;
 
-        started_at = monotonicNowNs();
-        const up_w = try gpt_arch.getFFNWeight(cb, gpt_config, layer, "up", &name_buf);
-        defer cb.free(up_w);
-        finished_at = monotonicNowNs();
-        if (finished_at > started_at) timing_stats.lookup_nanos += finished_at - started_at;
-        started_at = monotonicNowNs();
-        if (!(try prepareLinearNoBiasSlotForConfig(cb, allocator, gpt_config, linearSlot(layer, .mlp_up), up_w, gpt_config.hidden_size, gpt_config.intermediateSize(layer), false))) {
-            timing_stats.prepare_mlp_up_failures += 1;
-            tracePrepareLayerFailure(layer, "mlp_up", linearSlot(layer, .mlp_up), gpt_config.hidden_size, gpt_config.intermediateSize(layer));
-            return false;
-        }
-        finished_at = monotonicNowNs();
-        if (finished_at > started_at) timing_stats.linear_prep_nanos += finished_at - started_at;
+            started_at = monotonicNowNs();
+            const up_w = try gpt_arch.getFFNWeight(cb, gpt_config, layer, "up", &name_buf);
+            defer cb.free(up_w);
+            finished_at = monotonicNowNs();
+            if (finished_at > started_at) timing_stats.lookup_nanos += finished_at - started_at;
+            started_at = monotonicNowNs();
+            if (!(try prepareLinearNoBiasSlotForConfig(cb, allocator, gpt_config, linearSlot(layer, .mlp_up), up_w, gpt_config.hidden_size, gpt_config.intermediateSize(layer), false))) {
+                timing_stats.prepare_mlp_up_failures += 1;
+                tracePrepareLayerFailure(layer, "mlp_up", linearSlot(layer, .mlp_up), gpt_config.hidden_size, gpt_config.intermediateSize(layer));
+                return false;
+            }
+            finished_at = monotonicNowNs();
+            if (finished_at > started_at) timing_stats.linear_prep_nanos += finished_at - started_at;
 
-        started_at = monotonicNowNs();
-        const down_w = try gpt_arch.getFFNWeight(cb, gpt_config, layer, "down", &name_buf);
-        defer cb.free(down_w);
-        finished_at = monotonicNowNs();
-        if (finished_at > started_at) timing_stats.lookup_nanos += finished_at - started_at;
-        started_at = monotonicNowNs();
-        if (!(try prepareLinearNoBiasSlotForConfig(cb, allocator, gpt_config, linearSlot(layer, .mlp_down), down_w, gpt_config.intermediateSize(layer), gpt_config.hidden_size, false))) {
-            timing_stats.prepare_mlp_down_failures += 1;
-            tracePrepareLayerFailure(layer, "mlp_down", linearSlot(layer, .mlp_down), gpt_config.intermediateSize(layer), gpt_config.hidden_size);
-            return false;
+            started_at = monotonicNowNs();
+            const down_w = try gpt_arch.getFFNWeight(cb, gpt_config, layer, "down", &name_buf);
+            defer cb.free(down_w);
+            finished_at = monotonicNowNs();
+            if (finished_at > started_at) timing_stats.lookup_nanos += finished_at - started_at;
+            started_at = monotonicNowNs();
+            if (!(try prepareLinearNoBiasSlotForConfig(cb, allocator, gpt_config, linearSlot(layer, .mlp_down), down_w, gpt_config.intermediateSize(layer), gpt_config.hidden_size, false))) {
+                timing_stats.prepare_mlp_down_failures += 1;
+                tracePrepareLayerFailure(layer, "mlp_down", linearSlot(layer, .mlp_down), gpt_config.intermediateSize(layer), gpt_config.hidden_size);
+                return false;
+            }
+            finished_at = monotonicNowNs();
+            if (finished_at > started_at) timing_stats.linear_prep_nanos += finished_at - started_at;
         }
-        finished_at = monotonicNowNs();
-        if (finished_at > started_at) timing_stats.linear_prep_nanos += finished_at - started_at;
 
         if (gpt_config.family == .gemma and gpt_config.hasPle()) {
             started_at = monotonicNowNs();
@@ -6428,7 +6522,7 @@ test "raw whole-token gated supports multimodal decode-only gemma config" {
     var moe = multimodal;
     moe.num_local_experts = 8;
     moe.num_experts_per_tok = 2;
-    try std.testing.expect(!supportsConfig(moe));
+    try std.testing.expect(supportsConfig(moe));
 }
 
 test "direct gemma runtime allows gemma4-style global head configs without shared kv" {

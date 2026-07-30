@@ -23,6 +23,8 @@ const ops = inference_internal.ops;
 
 const Mode = enum {
     linear,
+    q8_linear,
+    q8_mapped_linear,
     q6_linear,
     q6_argmax,
     head_rope,
@@ -34,6 +36,8 @@ const Mode = enum {
 
     fn parse(value: []const u8) !Mode {
         if (std.mem.eql(u8, value, "linear")) return .linear;
+        if (std.mem.eql(u8, value, "q8-linear")) return .q8_linear;
+        if (std.mem.eql(u8, value, "q8-mapped-linear")) return .q8_mapped_linear;
         if (std.mem.eql(u8, value, "q6-linear")) return .q6_linear;
         if (std.mem.eql(u8, value, "q6-argmax")) return .q6_argmax;
         if (std.mem.eql(u8, value, "head-rope")) return .head_rope;
@@ -48,6 +52,8 @@ const Mode = enum {
     fn name(self: Mode) []const u8 {
         return switch (self) {
             .linear => "linear",
+            .q8_linear => "q8-linear",
+            .q8_mapped_linear => "q8-mapped-linear",
             .q6_linear => "q6-linear",
             .q6_argmax => "q6-argmax",
             .head_rope => "head-rope",
@@ -74,7 +80,7 @@ const Config = struct {
 
 fn usage() void {
     std.debug.print(
-        \\usage: zig build inference-metal-bench -- [--mode linear|q6-linear|q6-argmax|head-rope|pair|qkv|split-qkv|ffn|ple] [--in N] [--out N] [--kv-out N] [--warmup N] [--iters N] [--ops-per-frame N]
+        \\usage: zig build inference-metal-bench -- [--mode linear|q8-linear|q8-mapped-linear|q6-linear|q6-argmax|head-rope|pair|qkv|split-qkv|ffn|ple] [--in N] [--out N] [--kv-out N] [--warmup N] [--iters N] [--ops-per-frame N]
         \\
     , .{});
 }
@@ -125,8 +131,8 @@ fn parseArgs(args: []const [:0]const u8) !Config {
     if (cfg.in_dim % 32 != 0) return error.InvalidArgument;
     if ((cfg.mode == .q6_linear or cfg.mode == .q6_argmax) and cfg.in_dim % 256 != 0) return error.InvalidArgument;
     if (cfg.mode == .head_rope and (cfg.out_dim == 0 or cfg.in_dim % cfg.out_dim != 0 or cfg.kv_out_dim > cfg.out_dim)) return error.InvalidArgument;
-    if (cfg.mode != .linear and cfg.kv_out_dim == 0) return error.InvalidArgument;
-    if (cfg.rows != 1 and cfg.mode != .linear and cfg.mode != .q6_linear) return error.InvalidArgument;
+    if (cfg.mode != .linear and cfg.mode != .q8_linear and cfg.mode != .q8_mapped_linear and cfg.kv_out_dim == 0) return error.InvalidArgument;
+    if (cfg.rows != 1 and cfg.mode != .linear and cfg.mode != .q8_linear and cfg.mode != .q8_mapped_linear and cfg.mode != .q6_linear) return error.InvalidArgument;
     return cfg;
 }
 
@@ -178,6 +184,26 @@ fn fillQ6_KWeights(raw: []u8, dense_block: []f32, in_dim: usize, out_dim: usize)
     }
 }
 
+fn fillQ8_0Weights(raw: []u8, dense_row: []f32, in_dim: usize, out_dim: usize) void {
+    const values_per_block: usize = 32;
+    const bytes_per_block: usize = 34;
+    const row_blocks = in_dim / values_per_block;
+    const row_bytes = row_blocks * bytes_per_block;
+
+    for (0..out_dim) |row| {
+        for (dense_row, 0..) |*value, col| {
+            const signed = @as(i32, @intCast((row * 31 + col * 13 + 7) % 139)) - 69;
+            value.* = @as(f32, @floatFromInt(signed)) / 97.0;
+        }
+        for (0..row_blocks) |block| {
+            quant_codec.quantizeQ8_0Block(
+                dense_row[block * values_per_block ..][0..values_per_block],
+                raw[row * row_bytes + block * bytes_per_block ..][0..bytes_per_block],
+            );
+        }
+    }
+}
+
 fn deviceTensorFromSlice(runtime: *metal_runtime.RawMetalDecodeRuntime, data: []const f32, dims: []const i32) !MetalTensor {
     var host = try MetalTensor.ownedCloneFrom(data, dims);
     defer host.deinit();
@@ -189,6 +215,7 @@ fn deviceTensorFromSlice(runtime: *metal_runtime.RawMetalDecodeRuntime, data: []
 
 const PreparedQuantSlot = struct {
     raw: []u8,
+    page_backing: ?[]u8 = null,
     shape: []i64,
     storage: *QuantizedStorage,
     bias: MetalTensor,
@@ -197,7 +224,11 @@ const PreparedQuantSlot = struct {
         self.bias.deinit();
         allocator.destroy(self.storage);
         allocator.free(self.shape);
-        allocator.free(self.raw);
+        if (self.page_backing) |backing| {
+            std.heap.page_allocator.free(backing);
+        } else {
+            allocator.free(self.raw);
+        }
     }
 };
 
@@ -311,6 +342,70 @@ fn prepareQ6_KLinearSlot(
     }
 
     return .{ .raw = raw, .shape = shape, .storage = storage, .bias = bias };
+}
+
+fn prepareQ8_0LinearSlot(
+    allocator: std.mem.Allocator,
+    provider: *metal_native_provider.MetalNativeProvider,
+    slot: usize,
+    in_dim: usize,
+    out_dim: usize,
+    stats: *ops.NativeQuantTimingStats,
+    mapped: bool,
+) !PreparedQuantSlot {
+    if (in_dim % 32 != 0) return error.InvalidArgument;
+    const row_blocks = in_dim / 32;
+    const row_bytes = row_blocks * 34;
+    const raw_len = out_dim * row_bytes;
+    const page_backing = if (mapped)
+        try std.heap.page_allocator.alloc(u8, std.mem.alignForward(usize, raw_len, std.heap.page_size_min))
+    else
+        null;
+    errdefer if (page_backing) |backing| std.heap.page_allocator.free(backing);
+    const raw = if (page_backing) |backing| backing[0..raw_len] else try allocator.alloc(u8, raw_len);
+    errdefer if (page_backing == null) allocator.free(raw);
+    const dense_row = try allocator.alloc(f32, in_dim);
+    defer allocator.free(dense_row);
+    fillQ8_0Weights(raw, dense_row, in_dim, out_dim);
+
+    const bias_data = try allocator.alloc(f32, out_dim);
+    defer allocator.free(bias_data);
+    @memset(bias_data, 0.0);
+    var bias = try MetalTensor.ownedCloneFrom(bias_data, &[_]i32{@intCast(out_dim)});
+    errdefer bias.deinit();
+
+    var dummy_weight_value = [_]f32{0.0};
+    const dummy_weight = MetalTensor.borrowed(dummy_weight_value[0..].ptr, 1, &[_]i32{0});
+    const shape = try allocator.alloc(i64, 2);
+    errdefer allocator.free(shape);
+    shape[0] = @intCast(out_dim);
+    shape[1] = @intCast(in_dim);
+    const storage = try allocator.create(QuantizedStorage);
+    errdefer allocator.destroy(storage);
+    storage.* = QuantizedStorage{
+        .tensor_type = .{ .known = .Q8_0 },
+        .raw_bytes = raw,
+        .shape = shape,
+        .raw_owned = false,
+        .raw_mmap_backed = mapped,
+        .allocator = allocator,
+    };
+
+    if (!(try metal_runtime.decoderRuntimePrepareLinear(provider, .{
+        .weight = dummy_weight,
+        .bias = bias,
+        .quantized_storage = @as(?*const QuantizedStorage, storage),
+        .slot = slot,
+        .in_dim = in_dim,
+        .out_dim = out_dim,
+        .retain_dense_fallback = false,
+    }, stats))) return error.LinearPrepareFailed;
+    if (provider.raw_linear_slot_dense_biases[slot]) |*prepared_bias| {
+        prepared_bias.deinit();
+        provider.raw_linear_slot_dense_biases[slot] = null;
+    }
+
+    return .{ .raw = raw, .page_backing = page_backing, .shape = shape, .storage = storage, .bias = bias };
 }
 
 fn nowNanos() u64 {
@@ -475,7 +570,7 @@ fn applyQkvOnce(
     errdefer for (outputs[0..produced]) |*output| output.deinit();
     while (produced < outputs.len) : (produced += 1) {
         outputs[produced] = switch (cfg.mode) {
-            .linear, .q6_linear, .q6_argmax, .head_rope, .pair, .ple => unreachable,
+            .linear, .q8_linear, .q8_mapped_linear, .q6_linear, .q6_argmax, .head_rope, .pair, .ple => unreachable,
             .qkv => qkv: {
                 const qkv = (try metal_runtime.tryApplyQuantizedRuntimeLinearQkv(
                     provider,
@@ -611,6 +706,15 @@ pub fn main(init: std.process.Init) !void {
 
     var stats: ops.NativeQuantTimingStats = .{};
     var slot0 = switch (cfg.mode) {
+        .q8_linear, .q8_mapped_linear => try prepareQ8_0LinearSlot(
+            allocator,
+            &provider,
+            0,
+            cfg.in_dim,
+            cfg.out_dim,
+            &stats,
+            cfg.mode == .q8_mapped_linear,
+        ),
         .q6_linear, .q6_argmax => try prepareQ6_KLinearSlot(allocator, &provider, 0, cfg.in_dim, cfg.out_dim, &stats),
         else => try prepareQ4_0LinearSlot(allocator, &provider, 0, cfg.in_dim, cfg.out_dim, &stats),
     };
@@ -619,10 +723,19 @@ pub fn main(init: std.process.Init) !void {
     defer for (&extra_weight_slots) |*maybe_slot| {
         if (maybe_slot.*) |*slot| slot.deinit(allocator);
     };
-    if (cfg.weight_slots > 1 and (cfg.mode == .linear or cfg.mode == .q6_linear)) {
+    if (cfg.weight_slots > 1 and (cfg.mode == .linear or cfg.mode == .q8_linear or cfg.mode == .q8_mapped_linear or cfg.mode == .q6_linear)) {
         var slot_index: usize = 1;
         while (slot_index < cfg.weight_slots) : (slot_index += 1) {
             extra_weight_slots[slot_index] = switch (cfg.mode) {
+                .q8_linear, .q8_mapped_linear => try prepareQ8_0LinearSlot(
+                    allocator,
+                    &provider,
+                    slot_index,
+                    cfg.in_dim,
+                    cfg.out_dim,
+                    &stats,
+                    cfg.mode == .q8_mapped_linear,
+                ),
                 .q6_linear => try prepareQ6_KLinearSlot(allocator, &provider, slot_index, cfg.in_dim, cfg.out_dim, &stats),
                 else => try prepareQ4_0LinearSlot(allocator, &provider, slot_index, cfg.in_dim, cfg.out_dim, &stats),
             };
@@ -633,7 +746,7 @@ pub fn main(init: std.process.Init) !void {
     var slot2: ?PreparedQuantSlot = null;
     defer if (slot2) |*slot| slot.deinit(allocator);
     switch (cfg.mode) {
-        .linear, .q6_linear, .q6_argmax => {},
+        .linear, .q8_linear, .q8_mapped_linear, .q6_linear, .q6_argmax => {},
         .head_rope => {
             const norm_weight_data = try allocator.alloc(f32, cfg.out_dim);
             defer allocator.free(norm_weight_data);
@@ -708,7 +821,7 @@ pub fn main(init: std.process.Init) !void {
     var warmup: usize = 0;
     while (warmup < cfg.warmup_iters) : (warmup += 1) {
         _ = switch (cfg.mode) {
-            .linear, .q6_linear => try applyOnce(&provider, runtime, input, cfg.in_dim, cfg.out_dim, cfg.weight_slots, frame_outputs),
+            .linear, .q8_linear, .q8_mapped_linear, .q6_linear => try applyOnce(&provider, runtime, input, cfg.in_dim, cfg.out_dim, cfg.weight_slots, frame_outputs),
             .q6_argmax => try applyLinearArgmaxOnce(&provider, runtime, input, cfg.in_dim, cfg.out_dim, frame_outputs),
             .head_rope => try applyHeadRopeOnce(&provider, runtime, input, cfg.in_dim, cfg.out_dim, cfg.kv_out_dim, frame_outputs),
             .pair => try applyPairOnce(&provider, runtime, input, cfg.in_dim, cfg.out_dim, pair_outputs),
@@ -723,7 +836,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(samples);
     for (samples) |*sample| {
         sample.* = switch (cfg.mode) {
-            .linear, .q6_linear => try applyOnce(&provider, runtime, input, cfg.in_dim, cfg.out_dim, cfg.weight_slots, frame_outputs),
+            .linear, .q8_linear, .q8_mapped_linear, .q6_linear => try applyOnce(&provider, runtime, input, cfg.in_dim, cfg.out_dim, cfg.weight_slots, frame_outputs),
             .q6_argmax => try applyLinearArgmaxOnce(&provider, runtime, input, cfg.in_dim, cfg.out_dim, frame_outputs),
             .head_rope => try applyHeadRopeOnce(&provider, runtime, input, cfg.in_dim, cfg.out_dim, cfg.kv_out_dim, frame_outputs),
             .pair => try applyPairOnce(&provider, runtime, input, cfg.in_dim, cfg.out_dim, pair_outputs),
@@ -756,8 +869,22 @@ pub fn main(init: std.process.Init) !void {
     const q4_ple_linear_f16_input = after.q4_0_ple_linear_reduce_f16_input - before.q4_0_ple_linear_reduce_f16_input;
     const q6_calls = after.q6_k_linear_reduce - before.q6_k_linear_reduce;
     const q6_f16_in = after.q6_k_linear_reduce_f16_input - before.q6_k_linear_reduce_f16_input;
+    var q8_mmv: u64 = 0;
+    for (0..after.q8_0_linear_family_dispatch_counts.len) |family| {
+        q8_mmv += after.q8_0_linear_family_dispatch_counts[family][1] -
+            before.q8_0_linear_family_dispatch_counts[family][1];
+    }
     const rms_norm_add_sumsq = after.rms_norm_add_sumsq - before.rms_norm_add_sumsq;
     const total_ops = cfg.measure_iters * cfg.ops_per_frame;
+    const q8_weight_bytes = if (cfg.mode == .q8_linear or cfg.mode == .q8_mapped_linear)
+        total_ops * cfg.out_dim * (cfg.in_dim / 32) * 34
+    else
+        0;
+    const q8_gb_per_s = if (q8_weight_bytes > 0 and mean_ns > 0)
+        @as(f64, @floatFromInt(q8_weight_bytes)) /
+            (@as(f64, @floatFromInt(mean_ns)) * @as(f64, @floatFromInt(cfg.measure_iters))) * 1_000_000_000.0 / 1_000_000_000.0
+    else
+        0.0;
 
     std.debug.print(
         "metal_q4_0_linear mode={s} in={d} out={d} kv_out={d} warmup={d} iters={d} ops_per_frame={d} median_frame_ms={d:.3} median_op_ms={d:.3} mean_frame_ms={d:.3} mean_op_ms={d:.3} min_frame_ms={d:.3} max_frame_ms={d:.3} total_ops={d}",
@@ -779,7 +906,7 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     std.debug.print(
-        " q4_0_linear_reduce={d} q4_0_linear_reduce_f16_input={d} q4_0_linear_reduce_f16_output={d} q4_0_linear_reduce_f16_input_f16_output={d} q4_0_linear_reduce_sumsq={d} q4_0_pair_reduce={d} q4_0_pair={d} q4_0_pair_activation_reduce={d} q4_0_pair_activation_reduce_f16_output={d} q4_0_activation_rhs_reduce={d} q4_0_activation_rhs_reduce_f16_output={d} q4_0_ple_activation_rhs_reduce_f16_output={d} q4_0_ple_linear_reduce_f16_input={d} q6_k_linear_reduce={d} q6_k_linear_reduce_f16_input={d} rms_norm_add_sumsq={d} last_gpu_ms={d:.3} last_compute_encoders={d} last_blit_encoders={d} last_ops={d}\n",
+        " q4_0_linear_reduce={d} q4_0_linear_reduce_f16_input={d} q4_0_linear_reduce_f16_output={d} q4_0_linear_reduce_f16_input_f16_output={d} q4_0_linear_reduce_sumsq={d} q4_0_pair_reduce={d} q4_0_pair={d} q4_0_pair_activation_reduce={d} q4_0_pair_activation_reduce_f16_output={d} q4_0_activation_rhs_reduce={d} q4_0_activation_rhs_reduce_f16_output={d} q4_0_ple_activation_rhs_reduce_f16_output={d} q4_0_ple_linear_reduce_f16_input={d} q6_k_linear_reduce={d} q6_k_linear_reduce_f16_input={d} q8_0_linear_mmv={d} q8_weight_gb_s={d:.3} rms_norm_add_sumsq={d} last_gpu_ms={d:.3} last_compute_encoders={d} last_blit_encoders={d} last_ops={d}\n",
         .{
             q4_calls,
             q4_f16_in,
@@ -796,6 +923,8 @@ pub fn main(init: std.process.Init) !void {
             q4_ple_linear_f16_input,
             q6_calls,
             q6_f16_in,
+            q8_mmv,
+            q8_gb_per_s,
             rms_norm_add_sumsq,
             @as(f64, @floatFromInt(metal_runtime.termite_metal_decode_runtime_last_frame_gpu_nanos(runtime))) / 1_000_000.0,
             after.last_frame_compute_encoder_count,

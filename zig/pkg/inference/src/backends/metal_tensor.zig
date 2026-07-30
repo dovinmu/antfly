@@ -46,6 +46,7 @@ const DeviceBufferRef = struct {
     ref_count: usize,
     released: bool,
     release_on_drop: bool,
+    scratch_pooled: bool,
 };
 
 pub const MemoryStats = struct {
@@ -138,6 +139,8 @@ extern fn termite_metal_buffer_alloc(
 ) ?*anyopaque;
 extern fn termite_metal_buffer_release(handle: *anyopaque) void;
 extern fn termite_metal_decode_runtime_release_buffer(runtime: *anyopaque, handle: *anyopaque) void;
+extern fn termite_metal_decode_runtime_acquire_scratch(runtime: *anyopaque, bytes: usize) ?*anyopaque;
+extern fn termite_metal_decode_runtime_release_scratch(runtime: *anyopaque, handle: *anyopaque) void;
 extern fn termite_metal_buffer_contents(handle: *anyopaque) ?*anyopaque;
 extern fn termite_metal_buffer_download(
     runtime: *anyopaque,
@@ -234,7 +237,7 @@ pub const MetalTensor = struct {
             .len = 0,
             .owned_by_c_allocator = false,
             .device = .{
-                .ref = createDeviceBufferRef(runtime, handle, true, byte_len),
+                .ref = createDeviceBufferRef(runtime, handle, true, false, byte_len),
                 .byte_offset = byte_offset,
                 .byte_len = byte_len,
             },
@@ -261,7 +264,7 @@ pub const MetalTensor = struct {
             .len = 0,
             .owned_by_c_allocator = false,
             .device = .{
-                .ref = createDeviceBufferRef(runtime, handle, false, byte_len),
+                .ref = createDeviceBufferRef(runtime, handle, false, false, byte_len),
                 .byte_offset = byte_offset,
                 .byte_len = byte_len,
             },
@@ -271,7 +274,7 @@ pub const MetalTensor = struct {
         return t;
     }
 
-    fn createDeviceBufferRef(runtime: *anyopaque, handle: *anyopaque, release_on_drop: bool, byte_len: usize) *DeviceBufferRef {
+    fn createDeviceBufferRef(runtime: *anyopaque, handle: *anyopaque, release_on_drop: bool, scratch_pooled: bool, byte_len: usize) *DeviceBufferRef {
         const ref = std.heap.c_allocator.create(DeviceBufferRef) catch @panic("Metal buffer ref alloc failed");
         ref.* = .{
             .handle = handle,
@@ -280,6 +283,7 @@ pub const MetalTensor = struct {
             .ref_count = 1,
             .released = false,
             .release_on_drop = release_on_drop,
+            .scratch_pooled = scratch_pooled,
         };
         return ref;
     }
@@ -295,7 +299,11 @@ pub const MetalTensor = struct {
         if (ref.ref_count == 0) return;
         ref.ref_count -= 1;
         if (ref.ref_count == 0 and ref.release_on_drop and !ref.released) {
-            termite_metal_decode_runtime_release_buffer(ref.runtime, ref.handle);
+            if (ref.scratch_pooled) {
+                termite_metal_decode_runtime_release_scratch(ref.runtime, ref.handle);
+            } else {
+                termite_metal_decode_runtime_release_buffer(ref.runtime, ref.handle);
+            }
             ref.released = true;
             noteDeviceOwnedRelease(ref.byte_len);
         }
@@ -312,11 +320,38 @@ pub const MetalTensor = struct {
         mode: StorageMode,
         dims: []const i32,
     ) !MetalTensor {
-        const handle = termite_metal_buffer_alloc(runtime, byte_len, @intFromEnum(mode)) orelse
-            return error.MetalBufferAllocFailed;
-        var tensor = deviceOwned(runtime, handle, 0, byte_len, dims);
+        var scratch_pooled = false;
+        const handle = if (mode == .private) blk: {
+            if (termite_metal_decode_runtime_acquire_scratch(runtime, byte_len)) |scratch| {
+                scratch_pooled = true;
+                break :blk scratch;
+            }
+            break :blk termite_metal_buffer_alloc(runtime, byte_len, @intFromEnum(mode));
+        } else termite_metal_buffer_alloc(runtime, byte_len, @intFromEnum(mode));
+        const resolved_handle = handle orelse return error.MetalBufferAllocFailed;
+        var tensor = if (scratch_pooled)
+            MetalTensor{
+                .shape_len = @intCast(dims.len),
+                .data = @ptrFromInt(@alignOf(f32)),
+                .len = 0,
+                .owned_by_c_allocator = false,
+                .device = .{
+                    .ref = createDeviceBufferRef(runtime, resolved_handle, true, true, byte_len),
+                    .byte_offset = 0,
+                    .byte_len = byte_len,
+                },
+            }
+        else
+            deviceOwned(runtime, resolved_handle, 0, byte_len, dims);
+        if (scratch_pooled) {
+            noteDeviceOwnedCreate(byte_len);
+            for (dims, 0..) |axis_dim, i| tensor.shape_buf[i] = axis_dim;
+        }
         errdefer tensor.deinit();
-        try tensor.retainForActiveFrame();
+        // Scratch-pool slots keep their MTLBuffer alive and remain unavailable
+        // until the active frame finishes, so they do not need a second retain
+        // in the frame resource array.
+        if (!scratch_pooled) try tensor.retainForActiveFrame();
         return tensor;
     }
 
@@ -618,6 +653,7 @@ test "MetalTensor retainedCopy reports stale device refs without aborting" {
         .ref_count = 0,
         .released = true,
         .release_on_drop = true,
+        .scratch_pooled = false,
     };
     const shape_arr = [_]i32{4};
     var stale = MetalTensor.deviceView(ref, 0, 4 * @sizeOf(f32), &shape_arr);

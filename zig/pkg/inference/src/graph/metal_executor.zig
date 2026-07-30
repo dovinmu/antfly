@@ -1675,6 +1675,13 @@ const RuntimeContext = struct {
     ) !?i64 {
         if (request.attention_mode != .paged_decode) return null;
         if (self.gpt_config.family != .gemma) return null;
+        if (!self.decoderRuntimeExecutorEnabled()) return null;
+        // The pipelined helper mutates KV bookkeeping before it asks the
+        // gated runtime to arm a frame. Unsupported Gemma variants (notably
+        // Gemma 4 MoE) would decline only after that mutation, then the
+        // ordinary fallback advanced KV a second time. Reject them before
+        // touching decoder state so the generic path remains position-correct.
+        if (!decoder_gated_runtime.supportsConfig(self.gpt_config)) return null;
         const configured_layer_count = self.decoderRuntimeConfiguredLayerCount();
         if (self.pipelined_decode_armed and self.pipelined_next_position != request.position) {
             self.drainPipelinedDecode();
