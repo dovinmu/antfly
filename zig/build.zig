@@ -5347,6 +5347,65 @@ pub fn build(b: *std.Build) void {
     api_transactions_docid_test_step.dependOn(&run_api_transactions_docid_tests.step);
     const api_table_writes_docid_test_step = b.step("api-table-writes-docid-test", "Run focused API table write tests");
     api_table_writes_docid_test_step.dependOn(&run_api_table_writes_docid_tests.step);
+    const distributed_txn_recovery_tests = b.addTest(.{
+        .root_module = api_table_writes_docid_test_mod,
+        .filters = &.{
+            "stable distributed transaction retry resumes a durable commit decision",
+            "distributed txn coordinator never restarts a transaction id on topology change",
+            "bound stable single-group transaction retry does not reapply transforms",
+        },
+        .test_runner = .{
+            .path = b.path("pkg/antfly/src/test_runner.zig"),
+            .mode = .simple,
+        },
+    });
+    const distributed_txn_session_recovery_tests = b.addTest(.{
+        .root_module = api_session_maintenance_test_mod,
+        .filters = &.{
+            "api http server retries stable terminal commits without replaying writes",
+        },
+        .test_runner = .{
+            .path = b.path("pkg/antfly/src/test_runner.zig"),
+            .mode = .simple,
+        },
+    });
+    const run_distributed_txn_recovery_tests = addFilteredTestRunArtifact(b, distributed_txn_recovery_tests);
+    const run_distributed_txn_session_recovery_tests = addFilteredTestRunArtifact(b, distributed_txn_session_recovery_tests);
+    const distributed_txn_recovery_test_step = b.step("distributed-txn-recovery-test", "Run focused distributed transaction recovery tests");
+    distributed_txn_recovery_test_step.dependOn(&run_distributed_txn_recovery_tests.step);
+    distributed_txn_recovery_test_step.dependOn(&run_distributed_txn_session_recovery_tests.step);
+    const index_lifecycle_trace_tests = b.addTest(.{
+        .root_module = lib_test_mod,
+        .filters = &.{
+            "db managed full text admission survives restart without in-place backfill",
+        },
+        .test_runner = .{
+            .path = b.path("pkg/antfly/src/test_runner.zig"),
+            .mode = .simple,
+        },
+    });
+    const run_index_lifecycle_trace_tests = addFilteredTestRunArtifact(b, index_lifecycle_trace_tests);
+    const index_lifecycle_trace_test_step = b.step("index-lifecycle-trace-test", "Run the complete managed index lifecycle trace scenario");
+    index_lifecycle_trace_test_step.dependOn(&run_index_lifecycle_trace_tests.step);
+    const protocol_trace_writer_test_mod = b.createModule(.{
+        .root_source_file = b.path("pkg/antfly/src/tracing_test_root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    antfly_imports.configure(b, protocol_trace_writer_test_mod, true, true);
+    const protocol_trace_writer_tests = b.addTest(.{
+        .root_module = protocol_trace_writer_test_mod,
+        .filters = &.{
+            "legacy and protocol writers share one trace file descriptor",
+        },
+        .test_runner = .{
+            .path = b.path("pkg/antfly/src/test_runner.zig"),
+            .mode = .simple,
+        },
+    });
+    const run_protocol_trace_writer_tests = addFilteredTestRunArtifact(b, protocol_trace_writer_tests);
+    const protocol_trace_writer_test_step = b.step("protocol-trace-writer-test", "Run protocol trace output contract tests");
+    protocol_trace_writer_test_step.dependOn(&run_protocol_trace_writer_tests.step);
     const api_table_writes_production_regression_tests = b.addTest(.{
         .root_module = api_table_writes_docid_test_mod,
         .filters = &.{
@@ -6231,6 +6290,19 @@ pub fn build(b: *std.Build) void {
 
     const docstore_test_step = b.step("docstore-test", "Run storage/docstore unit tests");
     docstore_test_step.dependOn(&run_docstore_unit_tests.step);
+    const docstore_replay_correspondence_tests = b.addTest(.{
+        .root_module = docstore_test_mod,
+        .filters = &.{
+            "docstore replay co-writes original hint lanes when record decode fails",
+        },
+        .test_runner = .{
+            .path = b.path("pkg/antfly/src/test_runner.zig"),
+            .mode = .simple,
+        },
+    });
+    const run_docstore_replay_correspondence_tests = addFilteredTestRunArtifact(b, docstore_replay_correspondence_tests);
+    const docstore_replay_correspondence_test_step = b.step("docstore-replay-correspondence-test", "Run focused docstore replay fallback correspondence test");
+    docstore_replay_correspondence_test_step.dependOn(&run_docstore_replay_correspondence_tests.step);
 
     const shard_test_mod = makeLmdbModule(b, "pkg/antfly/src/shard_test_root.zig", target, optimize, build_options, lmdb_engine_mod, platform_mod);
     shard_test_mod.addImport("bloom", bloom_mod);

@@ -2113,7 +2113,6 @@ pub const EnrichmentRuntime = if (builtin.os.tag == .freestanding) struct {
         saveRuntimeStatusWithRetry(self, scope_name, status) catch |save_err| {
             std.log.warn("failed to persist enrichment worker failure status: {s}", .{@errorName(save_err)});
         };
-        enrichment_trace.event(self, "FatalWorkerFailure", null, null, @errorName(err));
         self.notifyStatusHook();
     }
 
@@ -2136,7 +2135,6 @@ pub const EnrichmentRuntime = if (builtin.os.tag == .freestanding) struct {
         saveRuntimeStatusWithRetry(self, scope_name, status) catch |save_err| {
             std.log.warn("failed to persist enrichment retry status: {s}", .{@errorName(save_err)});
         };
-        enrichment_trace.event(self, "RetryTransient", null, null, @errorName(err));
         self.notifyStatusHook();
     }
 
@@ -2337,7 +2335,6 @@ fn recordIsolatedRequestError(runtime: *EnrichmentRuntime, window: ?*GeneratedRe
         runtime.worker_failed = false;
         for (indexes) |index_name| if (index_name.len > 0) markIsolatedFailedIndex(runtime, index_name);
     }
-    enrichment_trace.event(runtime, "IsolateRequestFailure", null, null, @errorName(err));
     runtime.notifyStatusHook();
 }
 
@@ -2748,7 +2745,6 @@ fn runForegroundCatchUpPassOwned(runtime: *EnrichmentRuntime, io: Io, target_seq
 
     const pending = try enrichment_worker.collectPendingDocumentGroups(runtime.alloc, runtime.replay_source, runtime.applied_sequence);
     defer enrichment_worker.freePendingDocumentGroups(runtime.alloc, pending);
-    enrichment_trace.event(runtime, "CollectPending", @intCast(pending.len), target_sequence, null);
 
     var processed_request_count: u64 = 0;
     var max_seen = runtime.applied_sequence;
@@ -6290,8 +6286,8 @@ fn flushGeneratedReplayWindow(
     var batch = try window.toOwnedBatch();
     defer derived_types.deinitDerivedBatch(runtime.alloc, &batch);
     defer freeKeyList(runtime.alloc, artifact_delete_keys);
-    enrichment_trace.event(runtime, "PublishGenerated", pending_items, null, null);
     const sequence = try appendGeneratedBatchWithRetry(runtime, batch, artifact_delete_keys);
+    enrichment_trace.event(runtime, "PublishGenerated", pending_items, sequence, null);
     try applyQueuedCoverageTransitionsAfterReplayAppend(runtime, window.coverage_transitions.items);
     clearQueuedCoverageTransitions(runtime.alloc, &window.coverage_transitions, &window.coverage_transition_keys);
     try rememberPublishedGeneratedBatch(runtime, batch);

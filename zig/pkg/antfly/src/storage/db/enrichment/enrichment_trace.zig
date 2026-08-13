@@ -25,6 +25,7 @@ pub fn event(
     reason: ?[]const u8,
 ) void {
     if (comptime !build_options.with_tla) return;
+    const writer = tracing.stderrProtocolTraceWriter("enrichment-lease") orelse return;
     const io_impl = runtime.io_impl orelse return;
     const io = io_impl.io();
     runtime.mutex.lockUncancelable(io);
@@ -40,7 +41,7 @@ pub fn event(
         &runtime.ownership,
         runtime.config.clock.nowRealtimeMs(),
     );
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    writer.traceEvent(&.{
         .family = "enrichment-lease",
         .trace_id = @intFromPtr(runtime),
         .name = name,

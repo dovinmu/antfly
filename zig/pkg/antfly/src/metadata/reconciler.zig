@@ -1530,18 +1530,11 @@ const StoreEvidenceIndex = struct {
         group_id: u64,
         status: MergedGroupStatus,
     ) bool {
-        const topology = self.placement_topology_by_group.get(group_id) orelse {
-            placement_trace.transitionAdmission(status, 0, false, false, "topology_missing");
-            return false;
-        };
-        if (!topology.initialized or topology.ambiguous or topology.member_count == 0) {
-            placement_trace.transitionAdmission(status, topology.member_count, false, false, "topology_unready");
-            return false;
-        }
+        const topology = self.placement_topology_by_group.get(group_id) orelse return false;
+        if (!topology.initialized or topology.ambiguous or topology.member_count == 0) return false;
         if (topology.voter_count != topology.member_count or
             topology.voter_count > std.math.maxInt(u16))
         {
-            placement_trace.transitionAdmission(status, topology.member_count, false, false, "topology_not_all_voters");
             return false;
         }
         const expected_count: u16 = @intCast(topology.voter_count);
@@ -1565,23 +1558,7 @@ const StoreEvidenceIndex = struct {
                 &status.voter_set_fingerprint,
                 &topology.voter_set_fingerprint,
             );
-        const reason: ?[]const u8 = if (stable)
-            null
-        else if (!status.leader_known)
-            "leader_unknown"
-        else if (!status.readiness_from_leader)
-            "readiness_not_from_leader"
-        else if (!status.voter_count_known)
-            "voter_count_unknown"
-        else if (!status.voter_set_known)
-            "voter_set_unknown"
-        else if (status.voter_count != expected_count)
-            "voter_count_mismatch"
-        else if (status.healthy_voter_reports != expected_count)
-            "healthy_report_count_mismatch"
-        else
-            "voter_fingerprint_mismatch";
-        placement_trace.transitionAdmission(status, expected_count, leader_placed, stable, reason);
+        if (stable) placement_trace.transitionAdmission(status, expected_count, leader_placed);
         return stable;
     }
 

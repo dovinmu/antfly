@@ -12,7 +12,8 @@ pub fn traceId(ptr: *anyopaque, hint: anytype) u128 {
 
 pub fn target(ptr: *anyopaque, hint: anytype, from_sequence: u64, target_sequence: u64) void {
     if (comptime !build_options.with_tla) return;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    const writer = tracing.stderrProtocolTraceWriter("derived-replay") orelse return;
+    writer.traceEvent(&.{
         .family = "derived-replay",
         .trace_id = traceId(ptr, hint),
         .name = "ObserveTarget",
@@ -26,7 +27,8 @@ pub fn target(ptr: *anyopaque, hint: anytype, from_sequence: u64, target_sequenc
 
 pub fn begin(ptr: *anyopaque, hint: anytype, from_sequence: u64, target_sequence: u64) void {
     if (comptime !build_options.with_tla) return;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    const writer = tracing.stderrProtocolTraceWriter("derived-replay") orelse return;
+    writer.traceEvent(&.{
         .family = "derived-replay",
         .trace_id = traceId(ptr, hint),
         .name = "BeginCatchUp",
@@ -47,7 +49,8 @@ pub fn scan(
     fallback_used: bool,
 ) void {
     if (comptime !build_options.with_tla) return;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    const writer = tracing.stderrProtocolTraceWriter("derived-replay") orelse return;
+    writer.traceEvent(&.{
         .family = "derived-replay",
         .trace_id = traceId(ptr, hint),
         .name = name,
@@ -71,7 +74,8 @@ pub fn finish(
     stats: anytype,
 ) void {
     if (comptime !build_options.with_tla) return;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    const writer = tracing.stderrProtocolTraceWriter("derived-replay") orelse return;
+    writer.traceEvent(&.{
         .family = "derived-replay",
         .trace_id = traceId(ptr, hint),
         .name = "FinishCatchUp",

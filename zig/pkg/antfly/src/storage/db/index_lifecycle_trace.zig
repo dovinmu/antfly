@@ -11,10 +11,10 @@ pub fn admission(
     index_name: []const u8,
     config_hash: u64,
     target_sequence: u64,
-    durable_work: bool,
 ) void {
     if (comptime !build_options.with_tla) return;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    const writer = tracing.stderrProtocolTraceWriter("index-lifecycle") orelse return;
+    writer.traceEvent(&.{
         .family = "index-lifecycle",
         .trace_id = trace_id,
         .name = "RequestGeneration",
@@ -22,7 +22,7 @@ pub fn admission(
             .index_name = index_name,
             .config_hash = config_hash,
             .target_sequence = target_sequence,
-            .durable_work = durable_work,
+            .durable_work = true,
             .phase = "admitted",
         },
     });
@@ -35,7 +35,8 @@ pub fn queued(
     target_sequence: u64,
 ) void {
     if (comptime !build_options.with_tla) return;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    const writer = tracing.stderrProtocolTraceWriter("index-lifecycle") orelse return;
+    writer.traceEvent(&.{
         .family = "index-lifecycle",
         .trace_id = trace_id,
         .name = "QueueDurableWork",
@@ -58,7 +59,8 @@ pub fn activation(
     target_sequence: u64,
 ) void {
     if (comptime !build_options.with_tla) return;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    const writer = tracing.stderrProtocolTraceWriter("index-lifecycle") orelse return;
+    writer.traceEvent(&.{
         .family = "index-lifecycle",
         .trace_id = trace_id,
         .name = "SwapGeneration",
@@ -82,7 +84,8 @@ pub fn intent(
     reason: ?[]const u8,
 ) void {
     if (comptime !build_options.with_tla) return;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    const writer = tracing.stderrProtocolTraceWriter("index-lifecycle") orelse return;
+    writer.traceEvent(&.{
         .family = "index-lifecycle",
         .trace_id = value.group_id,
         .name = event_name,

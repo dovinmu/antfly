@@ -9867,7 +9867,9 @@ pub const DB = struct {
         }
         entry.intent.updated_at_ms = currentTimeNs() / std.time.ns_per_ms;
         try index_repair_state.putEntryAt(alloc, location, state.identity, expected, entry);
-        index_lifecycle_trace.intent("PersistIntentPhase", entry.intent, null, entry.intent.last_error);
+        if (update.phase == .detected) {
+            index_lifecycle_trace.intent("PersistIntentPhase", entry.intent, null, entry.intent.last_error);
+        }
         if (indexRepairIntentBlocksService(entry.intent)) {
             try self.core.index_manager.markRepairUnavailable(entry.intent.index_name);
         } else {
@@ -10678,7 +10680,6 @@ pub const DB = struct {
         entry.intent.attempt_count = attempt_count;
         entry.intent.failure_streak = failure_streak;
         entry.intent.next_retry_at_ms = next_retry_at_ms;
-        index_lifecycle_trace.intent("FailBuild", entry.intent, false, err_name);
     }
 
     fn indexRepairFailureIsTerminal(err: anyerror) bool {
@@ -11265,7 +11266,6 @@ pub const DB = struct {
                 });
                 entry.intent.phase = retry_phase;
             } else {
-                index_lifecycle_trace.intent("WorkerDeferred", entry.intent, false, "terminal");
                 result.terminal = true;
                 return result;
             }
@@ -11285,20 +11285,17 @@ pub const DB = struct {
             return result;
         }
         if (entry.intent.automation == .paused) {
-            index_lifecycle_trace.intent("WorkerDeferred", entry.intent, false, "automation_paused");
             result.deferred = true;
             return result;
         }
         const now_ms = currentTimeNs() / std.time.ns_per_ms;
         if (entry.intent.next_retry_at_ms > now_ms) {
-            index_lifecycle_trace.intent("WorkerDeferred", entry.intent, false, "retry_deadline");
             result.deferred = true;
             result.next_retry_at_ms = entry.intent.next_retry_at_ms;
             return result;
         }
         checkArtifactRepairActivationOwner(options) catch |err| switch (err) {
             error.RepairOwnershipLost => {
-                index_lifecycle_trace.intent("WorkerDeferred", entry.intent, false, "ownership_lost");
                 result.deferred = true;
                 return result;
             },
@@ -15145,13 +15142,14 @@ pub const DB = struct {
             .managed_full_text => try self.core.addManagedIndex(cfg, admission_write),
         };
         catalog_committed = true;
-        index_lifecycle_trace.admission(
-            self.localRepairGroupId(),
-            cfg.name,
-            types.indexConfigHash(cfg),
-            self.core.nextDerivedSequence(),
-            disposition == .managed_rebuild,
-        );
+        if (disposition == .managed_rebuild) {
+            index_lifecycle_trace.admission(
+                self.localRepairGroupId(),
+                cfg.name,
+                types.indexConfigHash(cfg),
+                self.core.nextDerivedSequence(),
+            );
+        }
         // Publish outbox work only after the catalog/marker transaction is
         // durable. Any later failure leaves a generation that the scheduler
         // can drain without relying on the failed request to reach its tail.

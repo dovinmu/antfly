@@ -9,12 +9,13 @@ const tracing = @import("../tracing/mod.zig");
 
 pub fn observeReport(event_name: []const u8, store_id: u64, report: anytype) void {
     if (comptime !build_options.with_tla) return;
+    const writer = tracing.stderrProtocolTraceWriter("placement-readiness") orelse return;
     var fingerprint_buf: [64]u8 = undefined;
     const fingerprint = if (report.voter_set_known)
         std.fmt.bufPrint(&fingerprint_buf, "{x}", .{report.voter_set_fingerprint}) catch ""
     else
         null;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    writer.traceEvent(&.{
         .family = "placement-readiness",
         .trace_id = report.group_id,
         .name = event_name,
@@ -34,12 +35,13 @@ pub fn observeReport(event_name: []const u8, store_id: u64, report: anytype) voi
 
 pub fn recomputeEvidence(event_name: []const u8, status: anytype, ambiguous: bool) void {
     if (comptime !build_options.with_tla) return;
+    const writer = tracing.stderrProtocolTraceWriter("placement-readiness") orelse return;
     var fingerprint_buf: [64]u8 = undefined;
     const fingerprint = if (status.voter_set_known)
         std.fmt.bufPrint(&fingerprint_buf, "{x}", .{status.voter_set_fingerprint}) catch ""
     else
         null;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    writer.traceEvent(&.{
         .family = "placement-readiness",
         .trace_id = status.group_id,
         .name = event_name,
@@ -62,19 +64,18 @@ pub fn transitionAdmission(
     status: anytype,
     expected_voters: u64,
     leader_placed: bool,
-    stable: bool,
-    reason: ?[]const u8,
 ) void {
     if (comptime !build_options.with_tla) return;
+    const writer = tracing.stderrProtocolTraceWriter("placement-readiness") orelse return;
     var fingerprint_buf: [64]u8 = undefined;
     const fingerprint = if (status.voter_set_known)
         std.fmt.bufPrint(&fingerprint_buf, "{x}", .{status.voter_set_fingerprint}) catch ""
     else
         null;
-    tracing.stderrProtocolTraceWriter().traceEvent(&.{
+    writer.traceEvent(&.{
         .family = "placement-readiness",
         .trace_id = status.group_id,
-        .name = if (stable) "StartTransition" else "RejectTransition",
+        .name = "StartTransition",
         .facts = .{
             .group_id = status.group_id,
             .store_id = if (status.leader_known) status.leader_store_id else null,
@@ -88,8 +89,7 @@ pub fn transitionAdmission(
             .fingerprint = fingerprint,
             .ambiguous = status.voter_count_known and !status.voter_set_known,
             .joint_consensus = status.joint_consensus,
-            .stable_placement = stable,
-            .reason = reason,
+            .stable_placement = true,
         },
     });
 }
