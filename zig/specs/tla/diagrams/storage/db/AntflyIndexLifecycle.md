@@ -2,7 +2,7 @@
 
 # AntflyIndexLifecycle — structural diagrams
 
-Generated from [`AntflyIndexLifecycle.tla`](../../../storage/db/AntflyIndexLifecycle.tla). 11 state variables, 11 actions in `Next`.
+Generated from [`AntflyIndexLifecycle.tla`](../../../storage/db/AntflyIndexLifecycle.tla). 12 state variables, 13 actions in `Next`.
 
 ## Phase state machines
 
@@ -51,7 +51,9 @@ Domain: `stale`, `building`, `fresh`, `failed`. No statically extractable guard/
 | `BuildStep` | `state`, `applied`, `target`, `workerAdmitted` | `applied` |
 | `Swap` | `state`, `applied`, `target`, `requestedSchema` | `state`, `builtSchema`, `workerAdmitted` |
 | `FailBuild` | `state` | `state`, `wakeQueued`, `workerAdmitted` |
-| `RequestSecondSchema` | `state`, `target`, `requestedSchema`, `builtSchema` | `state`, `applied`, `requestedSchema`, `wakeQueued`, `workerAdmitted`, `competingWork`, `secondWakeLost` |
+| `RequestSecondSchema` | `state`, `target`, `requestedSchema`, `builtSchema` | `state`, `applied`, `requestedSchema`, `wakeQueued`, `workerAdmitted`, `competingWork`, `secondWakeLost`, `fallbackTicks` |
+| `FallbackScanTick` | `requestedSchema`, `builtSchema`, `wakeQueued`, `workerAdmitted`, `secondWakeLost`, `fallbackTicks` | `fallbackTicks` |
+| `FallbackRediscoverWake` | `requestedSchema`, `builtSchema`, `wakeQueued`, `workerAdmitted`, `secondWakeLost`, `fallbackTicks` | `wakeQueued`, `secondWakeLost` |
 | `PersistStatus` | `state`, `statusDurable` | `statusDurable` |
 | `CrashReopen` | `applied`, `target`, `statusDurable`, `requestedSchema`, `builtSchema`, `wakeQueued` | `state`, `wakeQueued`, `workerAdmitted` |
 | `Query` | `state`, `applied`, `target`, `servedFreshBehind` | `servedFreshBehind` |
@@ -71,9 +73,11 @@ flowchart LR
         a5[Swap]
         a6[FailBuild]
         a7[RequestSecondSchema]
-        a8[PersistStatus]
-        a9[CrashReopen]
-        a10[Query]
+        a8[FallbackScanTick]
+        a9[FallbackRediscoverWake]
+        a10[PersistStatus]
+        a11[CrashReopen]
+        a12[Query]
     end
     subgraph state["State variables"]
         v0([state])
@@ -85,8 +89,9 @@ flowchart LR
         v6([requestedSchema])
         v7([builtSchema])
         v8([secondWakeLost])
-        v9([statusDurable])
-        v10([servedFreshBehind])
+        v9([fallbackTicks])
+        v10([statusDurable])
+        v11([servedFreshBehind])
     end
     a0 --> v0
     a0 --> v1
@@ -118,20 +123,33 @@ flowchart LR
     a7 --> v3
     a7 --> v4
     a7 --> v8
+    a7 --> v9
     v1 -.-> a7
     v7 -.-> a7
     a8 --> v9
-    v0 -.-> a8
-    a9 --> v0
+    v6 -.-> a8
+    v7 -.-> a8
+    v2 -.-> a8
+    v3 -.-> a8
+    v8 -.-> a8
     a9 --> v2
-    a9 --> v3
-    v5 -.-> a9
-    v1 -.-> a9
-    v9 -.-> a9
+    a9 --> v8
     v6 -.-> a9
     v7 -.-> a9
+    v3 -.-> a9
+    v9 -.-> a9
     a10 --> v10
     v0 -.-> a10
-    v5 -.-> a10
-    v1 -.-> a10
+    a11 --> v0
+    a11 --> v2
+    a11 --> v3
+    v5 -.-> a11
+    v1 -.-> a11
+    v10 -.-> a11
+    v6 -.-> a11
+    v7 -.-> a11
+    a12 --> v11
+    v0 -.-> a12
+    v5 -.-> a12
+    v1 -.-> a12
 ```

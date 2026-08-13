@@ -2,7 +2,7 @@
 
 # AntflyRepairArtifactRecovery — structural diagrams
 
-Generated from [`AntflyRepairArtifactRecovery.tla`](../../../storage/db/AntflyRepairArtifactRecovery.tla). 7 state variables, 7 actions in `Next`.
+Generated from [`AntflyRepairArtifactRecovery.tla`](../../../storage/db/AntflyRepairArtifactRecovery.tla). 9 state variables, 9 actions in `Next`.
 
 ## Phase state machines
 
@@ -34,11 +34,13 @@ stateDiagram-v2
 | --- | --- | --- |
 | `ObserveCoverageFailure` | `candidateComplete`, `repairPhase` | `repairPhase` |
 | `QueueArtifactRecovery` | `artifactQueued`, `repairPhase` | `artifactQueued` |
-| `DrainArtifactRecoveryForeground` | `artifactQueued`, `artifactValid`, `repairPhase` | `artifactValid` |
+| `DrainArtifactRecoveryForeground` | `artifactQueued`, `artifactValid`, `repairPhase`, `workerArmed` | `artifactValid` |
 | `ResetCandidate` | `artifactValid`, `repairPhase` | `candidateExists`, `repairPhase` |
 | `RetryBuild` | `artifactValid`, `candidateExists`, `candidateComplete`, `repairPhase` | `candidateExists`, `candidateComplete`, `repairPhase` |
 | `Activate` | `candidateComplete`, `repairPhase` | `repairPhase` |
 | `CheckStartupPlanner` | `repairPhase`, `startupPlanChecked` | `startupPlanChecked`, `startupPlanClean` |
+| `Restart` | `repairPhase`, `processEpoch` | `workerArmed`, `processEpoch` |
+| `RearmStartupRecovery` | `workerArmed`, `processEpoch` | `workerArmed` |
 
 ## Write graph
 
@@ -54,15 +56,19 @@ flowchart LR
         a4[RetryBuild]
         a5[Activate]
         a6[CheckStartupPlanner]
+        a7[Restart]
+        a8[RearmStartupRecovery]
     end
     subgraph state["State variables"]
         v0([candidateComplete])
         v1([repairPhase])
         v2([artifactQueued])
         v3([artifactValid])
-        v4([candidateExists])
-        v5([startupPlanChecked])
-        v6([startupPlanClean])
+        v4([workerArmed])
+        v5([candidateExists])
+        v6([startupPlanChecked])
+        v7([startupPlanClean])
+        v8([processEpoch])
     end
     a0 --> v1
     v0 -.-> a0
@@ -71,16 +77,22 @@ flowchart LR
     a2 --> v3
     v2 -.-> a2
     v1 -.-> a2
-    a3 --> v4
+    v4 -.-> a2
+    a3 --> v5
     a3 --> v1
     v3 -.-> a3
-    a4 --> v4
+    a4 --> v5
     a4 --> v0
     a4 --> v1
     v3 -.-> a4
     a5 --> v1
     v0 -.-> a5
-    a6 --> v5
     a6 --> v6
+    a6 --> v7
     v1 -.-> a6
+    a7 --> v4
+    a7 --> v8
+    v1 -.-> a7
+    a8 --> v4
+    v8 -.-> a8
 ```

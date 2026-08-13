@@ -184,11 +184,10 @@
     ],
     "laneOrder": ["replica reports", "evidence merge", "transition admission", "metadata"],
     "milestones": ["^RecomputeEvidence", "^StartTransition"],
-    "faultPatterns": ["^RejectTransition$"],
     "categories": [
       {"label": "Observe", "patterns": ["^ObserveReport"]},
       {"label": "Resolve", "patterns": ["^RecomputeEvidence"]},
-      {"label": "Admit / block", "patterns": ["Transition$"]}
+      {"label": "Admission", "patterns": ["^StartTransition$"]}
     ]
   },
 
@@ -201,10 +200,9 @@
     "bandField": "facts.phase",
     "bandQuiet": ["admitted"],
     "milestones": ["^RequestGeneration$", "^SwapGeneration$", "^ObserveReady$"],
-    "faultPatterns": ["^FailBuild$", "^WorkerDeferred$"],
     "categories": [
       {"label": "Durable request", "patterns": ["RequestGeneration", "QueueDurableWork", "PersistIntent"]},
-      {"label": "Worker", "patterns": ["AdmitWorker", "WorkerDeferred", "FailBuild"]},
+      {"label": "Worker", "patterns": ["AdmitWorker"]},
       {"label": "Publication", "patterns": ["SwapGeneration", "ObserveReady"]}
     ],
     "scene": {
@@ -256,22 +254,19 @@
     "model": "storage/db/AntflyEnrichmentLease",
     "laneRules": [
       ["Lease", "durable lease"],
-      ["RetryTransient", "provider"],
-      ["CollectPending|PublishGenerated|AdvanceApplied", "enrichment worker"],
-      ["FatalWorkerFailure|IsolateRequestFailure", "failure isolation"],
+      ["PublishGenerated|AdvanceApplied", "enrichment worker"],
       [".*", "runtime"]
     ],
-    "laneOrder": ["durable lease", "enrichment worker", "provider", "failure isolation", "runtime"],
-    "milestones": ["^AcquireLease$", "^CollectPending$", "^AdvanceApplied$"],
-    "faultPatterns": ["^LeaseDenied$", "^RetryTransient$", "^FatalWorkerFailure$"],
+    "laneOrder": ["durable lease", "enrichment worker", "runtime"],
+    "milestones": ["^AcquireLease$", "^PublishGenerated$", "^AdvanceApplied$"],
+    "faultPatterns": ["^LeaseDenied$"],
     "categories": [
       {"label": "Ownership", "patterns": ["Lease"]},
-      {"label": "Work", "patterns": ["CollectPending", "PublishGenerated", "AdvanceApplied"]},
-      {"label": "Retry / isolate", "patterns": ["Retry", "Failure"]}
+      {"label": "Work", "patterns": ["PublishGenerated", "AdvanceApplied"]}
     ],
     "pairs": [
       {"send": "^LeaseDenied$", "recv": "^LeaseRetryReady$", "label": "bounded retry wait"},
-      {"send": "^CollectPending$", "recv": "^AdvanceApplied$", "label": "enrichment pass"}
+      {"send": "^PublishGenerated$", "recv": "^AdvanceApplied$", "label": "durable publication"}
     ]
   }
 }

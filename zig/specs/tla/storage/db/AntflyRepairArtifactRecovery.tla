@@ -25,19 +25,22 @@
   After activation, startup planning must use the same current-generation
   coverage count as shadow validation. Reusing the stale name-scoped counter
   rediscovers the repaired generation as surplus and makes startup churn.
+  The durable artifact request and repair intent survive restart; the bounded
+  foreground owner is explicitly rearmed from that debt before draining it.
 
-  The four mutant constants independently remove those obligations. Any
-  mutant leaves automatic repair unable to publish and retain a stable
-  complete generation.
+  The five mutant constants independently remove those obligations. Any mutant
+  leaves automatic repair unable to publish and retain a stable complete
+  generation.
 *)
 
-EXTENDS TLC
+EXTENDS Naturals, TLC
 
 CONSTANTS
     BuggySkipArtifactRecovery,
     BuggyLeaveRecoveryUndrained,
     BuggyReuseFailedCandidate,
-    BuggyPlannerUsesNameCounter
+    BuggyPlannerUsesNameCounter,
+    BuggyOmitStartupRearm
 
 VARIABLES
     artifactQueued,
@@ -46,11 +49,14 @@ VARIABLES
     candidateComplete,
     repairPhase,
     startupPlanChecked,
-    startupPlanClean
+    startupPlanClean,
+    workerArmed,
+    processEpoch
 
 vars ==
     <<artifactQueued, artifactValid, candidateExists, candidateComplete,
-      repairPhase, startupPlanChecked, startupPlanClean>>
+      repairPhase, startupPlanChecked, startupPlanClean, workerArmed,
+      processEpoch>>
 
 Init ==
     /\ artifactQueued = FALSE
@@ -60,6 +66,8 @@ Init ==
     /\ repairPhase = "building"
     /\ startupPlanChecked = FALSE
     /\ startupPlanClean = FALSE
+    /\ workerArmed = TRUE
+    /\ processEpoch = 0
 
 ObserveCoverageFailure ==
     /\ repairPhase = "building"
@@ -67,7 +75,7 @@ ObserveCoverageFailure ==
     /\ repairPhase' = "coverage_failed"
     /\ UNCHANGED
         <<artifactQueued, artifactValid, candidateExists, candidateComplete,
-          startupPlanChecked, startupPlanClean>>
+          startupPlanChecked, startupPlanClean, workerArmed, processEpoch>>
 
 QueueArtifactRecovery ==
     /\ repairPhase = "coverage_failed"
@@ -76,17 +84,18 @@ QueueArtifactRecovery ==
     /\ artifactQueued' = TRUE
     /\ UNCHANGED
         <<artifactValid, candidateExists, candidateComplete, repairPhase,
-          startupPlanChecked, startupPlanClean>>
+          startupPlanChecked, startupPlanClean, workerArmed, processEpoch>>
 
 DrainArtifactRecoveryForeground ==
     /\ repairPhase = "coverage_failed"
+    /\ workerArmed
     /\ artifactQueued
     /\ ~artifactValid
     /\ ~BuggyLeaveRecoveryUndrained
     /\ artifactValid' = TRUE
     /\ UNCHANGED
         <<artifactQueued, candidateExists, candidateComplete, repairPhase,
-          startupPlanChecked, startupPlanClean>>
+          startupPlanChecked, startupPlanClean, workerArmed, processEpoch>>
 
 ResetCandidate ==
     /\ repairPhase = "coverage_failed"
@@ -95,7 +104,7 @@ ResetCandidate ==
     /\ candidateExists' = IF BuggyReuseFailedCandidate THEN TRUE ELSE FALSE
     /\ UNCHANGED
         <<artifactQueued, artifactValid, candidateComplete,
-          startupPlanChecked, startupPlanClean>>
+          startupPlanChecked, startupPlanClean, workerArmed, processEpoch>>
 
 RetryBuild ==
     /\ repairPhase = "retry_wait"
@@ -104,7 +113,8 @@ RetryBuild ==
     /\ candidateComplete' =
         IF candidateExists THEN candidateComplete ELSE artifactValid
     /\ UNCHANGED
-        <<artifactQueued, artifactValid, startupPlanChecked, startupPlanClean>>
+        <<artifactQueued, artifactValid, startupPlanChecked, startupPlanClean,
+          workerArmed, processEpoch>>
 
 Activate ==
     /\ repairPhase = "building"
@@ -112,7 +122,7 @@ Activate ==
     /\ repairPhase' = "ready"
     /\ UNCHANGED
         <<artifactQueued, artifactValid, candidateExists, candidateComplete,
-          startupPlanChecked, startupPlanClean>>
+          startupPlanChecked, startupPlanClean, workerArmed, processEpoch>>
 
 CheckStartupPlanner ==
     /\ repairPhase = "ready"
@@ -121,7 +131,27 @@ CheckStartupPlanner ==
     /\ startupPlanClean' = ~BuggyPlannerUsesNameCounter
     /\ UNCHANGED
         <<artifactQueued, artifactValid, candidateExists, candidateComplete,
-          repairPhase>>
+          repairPhase, workerArmed, processEpoch>>
+
+\* Crash drops only volatile worker admission. The artifact request, repaired
+\* bytes, candidate phase, and planner debt are durable.
+Restart ==
+    /\ processEpoch = 0
+    /\ repairPhase # "ready"
+    /\ processEpoch' = 1
+    /\ workerArmed' = FALSE
+    /\ UNCHANGED
+        <<artifactQueued, artifactValid, candidateExists, candidateComplete,
+          repairPhase, startupPlanChecked, startupPlanClean>>
+
+RearmStartupRecovery ==
+    /\ processEpoch > 0
+    /\ ~workerArmed
+    /\ ~BuggyOmitStartupRearm
+    /\ workerArmed' = TRUE
+    /\ UNCHANGED
+        <<artifactQueued, artifactValid, candidateExists, candidateComplete,
+          repairPhase, startupPlanChecked, startupPlanClean, processEpoch>>
 
 Next ==
     \/ ObserveCoverageFailure
@@ -131,6 +161,8 @@ Next ==
     \/ RetryBuild
     \/ Activate
     \/ CheckStartupPlanner
+    \/ Restart
+    \/ RearmStartupRecovery
 
 Spec == Init /\ [][Next]_vars
 
@@ -143,6 +175,8 @@ FairSpec ==
     /\ WF_vars(RetryBuild)
     /\ WF_vars(Activate)
     /\ WF_vars(CheckStartupPlanner)
+    /\ WF_vars(Restart)
+    /\ WF_vars(RearmStartupRecovery)
 
 TypeOK ==
     /\ artifactQueued \in BOOLEAN
@@ -152,16 +186,23 @@ TypeOK ==
     /\ repairPhase \in {"building", "coverage_failed", "retry_wait", "ready"}
     /\ startupPlanChecked \in BOOLEAN
     /\ startupPlanClean \in BOOLEAN
+    /\ workerArmed \in BOOLEAN
+    /\ processEpoch \in 0..1
     /\ BuggySkipArtifactRecovery \in BOOLEAN
     /\ BuggyLeaveRecoveryUndrained \in BOOLEAN
     /\ BuggyReuseFailedCandidate \in BOOLEAN
     /\ BuggyPlannerUsesNameCounter \in BOOLEAN
+    /\ BuggyOmitStartupRearm \in BOOLEAN
 
 IncompleteCandidateNeverActivates ==
     repairPhase = "ready" => candidateComplete
 
 ReadyGenerationHasNoStartupDebt ==
     (repairPhase = "ready" /\ startupPlanChecked) => startupPlanClean
+
+RestartedDurableRecoveryEventuallyRearmed ==
+    (processEpoch > 0 /\ repairPhase = "coverage_failed" /\ ~artifactValid)
+        ~> workerArmed
 
 AutomaticRepairEventuallyStabilizes ==
     <> (repairPhase = "ready" /\ startupPlanChecked /\ startupPlanClean)

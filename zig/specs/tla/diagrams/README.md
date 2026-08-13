@@ -38,20 +38,21 @@ Auto-generated overviews of each protocol spec: phase state machines, action/sta
 - [AntflyBatcherCoalescing](storage/db/AntflyBatcherCoalescing.md) — 3 actions, 5 variables, 2 phase state machines
 - [AntflyDbSplitVisibility](storage/db/AntflyDbSplitVisibility.md) — 15 actions, 30 variables, 4 phase state machines
 - [AntflyDerivedReplay](storage/db/AntflyDerivedReplay.md) — 13 actions, 12 variables, 0 phase state machines
+- [AntflyDistributedTransactionRecovery](storage/db/AntflyDistributedTransactionRecovery.md) — 16 actions, 22 variables, 4 phase state machines
 - [AntflyDocumentIdentity](storage/db/AntflyDocumentIdentity.md) — 8 actions, 16 variables, 0 phase state machines
 - [AntflyDocumentIdentityRangeRepair](storage/db/AntflyDocumentIdentityRangeRepair.md) — 11 actions, 23 variables, 5 phase state machines
-- [AntflyEnrichmentLease](storage/db/AntflyEnrichmentLease.md) — 13 actions, 20 variables, 1 phase state machine
+- [AntflyEnrichmentLease](storage/db/AntflyEnrichmentLease.md) — 13 actions, 21 variables, 1 phase state machine
 - [AntflyEnrichmentLifecycleLockOrder](storage/db/AntflyEnrichmentLifecycleLockOrder.md) — 3 actions, 5 variables, 5 phase state machines
-- [AntflyIndexLifecycle](storage/db/AntflyIndexLifecycle.md) — 11 actions, 11 variables, 2 phase state machines
+- [AntflyIndexLifecycle](storage/db/AntflyIndexLifecycle.md) — 13 actions, 12 variables, 2 phase state machines
 - [AntflyLeaseRetryBackoff](storage/db/AntflyLeaseRetryBackoff.md) — 4 actions, 5 variables, 0 phase state machines
 - [AntflyLiveSourceCardinality](storage/db/AntflyLiveSourceCardinality.md) — 3 actions, 8 variables, 0 phase state machines
 - [AntflyPromotionOwnerHandoff](storage/db/AntflyPromotionOwnerHandoff.md) — 6 actions, 5 variables, 1 phase state machine
-- [AntflyRepairArtifactRecovery](storage/db/AntflyRepairArtifactRecovery.md) — 7 actions, 7 variables, 1 phase state machine
-- [AntflyRepairCoverageRetry](storage/db/AntflyRepairCoverageRetry.md) — 4 actions, 3 variables, 1 phase state machine
+- [AntflyRepairArtifactRecovery](storage/db/AntflyRepairArtifactRecovery.md) — 9 actions, 9 variables, 1 phase state machine
+- [AntflyRepairCoverageRetry](storage/db/AntflyRepairCoverageRetry.md) — 6 actions, 4 variables, 1 phase state machine
 - [AntflyReplayDeleteSupersession](storage/db/AntflyReplayDeleteSupersession.md) — 7 actions, 7 variables, 1 phase state machine
-- [AntflyReplayEnrichmentBridge](storage/db/AntflyReplayEnrichmentBridge.md) — 12 actions, 11 variables, 0 phase state machines
+- [AntflyReplayEnrichmentBridge](storage/db/AntflyReplayEnrichmentBridge.md) — 13 actions, 14 variables, 0 phase state machines
 - [AntflyTransaction](storage/db/AntflyTransaction.md) — 15 actions, 9 variables, 3 phase state machines
-- [AntflyTransactionSession](storage/db/AntflyTransactionSession.md) — 15 actions, 13 variables, 1 phase state machine
+- [AntflyTransactionSession](storage/db/AntflyTransactionSession.md) — 17 actions, 26 variables, 2 phase state machines
 
 ## storage/ha
 

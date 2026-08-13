@@ -30,7 +30,7 @@ Writes whose source state is not statically determined:
 | Action | Reads (incl. helper operators) | Writes |
 | --- | --- | --- |
 | `BeginFair` | `phase` | `phase` |
-| `CommitMembership` | `phase`, `admitted`, `raftConf` | `raftConf` |
+| `CommitMembership` | `phase`, `admitted`, `cloned`, `raftConf` | `raftConf` |
 | `CaptureSnapshotCandidate` | `raftConf`, `appliedConf`, `candidateIndex` | `candidateIndex`, `candidateConf` |
 | `BeginContinuation` | `phase`, `fairVisited`, `continuationQueued` | `phase` |
 | `FinishWithoutContinuation` | `phase`, `fairVisited`, `admitted`, `completed`, `continuationQueued` | `phase` |
@@ -63,16 +63,16 @@ flowchart LR
     subgraph state["State variables"]
         v0([phase])
         v1([admitted])
-        v2([raftConf])
-        v3([appliedConf])
-        v4([candidateIndex])
-        v5([candidateConf])
-        v6([fairVisited])
-        v7([continuationQueued])
-        v8([completed])
-        v9([duplicateFairVisit])
-        v10([deferredGroups])
-        v11([cloned])
+        v2([cloned])
+        v3([raftConf])
+        v4([appliedConf])
+        v5([candidateIndex])
+        v6([candidateConf])
+        v7([fairVisited])
+        v8([continuationQueued])
+        v9([completed])
+        v10([duplicateFairVisit])
+        v11([deferredGroups])
         v12([ownedMessages])
         v13([productiveGroups])
         v14([processedSteps])
@@ -82,51 +82,52 @@ flowchart LR
         v18([sentMessages])
     end
     a0 --> v0
-    a1 --> v2
+    a1 --> v3
     v0 -.-> a1
     v1 -.-> a1
-    a2 --> v4
+    v2 -.-> a1
     a2 --> v5
-    v2 -.-> a2
+    a2 --> v6
     v3 -.-> a2
+    v4 -.-> a2
     a3 --> v0
-    v6 -.-> a3
     v7 -.-> a3
+    v8 -.-> a3
     a4 --> v0
-    v6 -.-> a4
-    v1 -.-> a4
-    v8 -.-> a4
     v7 -.-> a4
+    v1 -.-> a4
+    v9 -.-> a4
+    v8 -.-> a4
     a5 --> v0
-    v7 -.-> a5
-    a6 --> v6
-    a6 --> v9
-    a6 --> v1
-    a6 --> v10
+    v8 -.-> a5
     a6 --> v7
+    a6 --> v10
+    a6 --> v1
+    a6 --> v11
+    a6 --> v8
     v0 -.-> a6
-    a7 --> v11
+    a7 --> v2
     a7 --> v12
     v0 -.-> a7
     v1 -.-> a7
-    a8 --> v8
+    a8 --> v9
     a8 --> v13
-    a8 --> v7
+    a8 --> v8
     a8 --> v14
     a8 --> v12
     a8 --> v15
-    a8 --> v3
+    a8 --> v4
     a8 --> v16
     a8 --> v17
     v0 -.-> a8
     v1 -.-> a8
-    v11 -.-> a8
-    v4 -.-> a8
+    v2 -.-> a8
+    v5 -.-> a8
     a9 --> v18
-    v11 -.-> a9
-    v8 -.-> a9
+    v2 -.-> a9
+    v9 -.-> a9
     v12 -.-> a9
-    a10 --> v7
+    a10 --> v8
     a10 --> v14
     v0 -.-> a10
 ```

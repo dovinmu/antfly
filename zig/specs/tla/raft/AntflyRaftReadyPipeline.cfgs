@@ -121,6 +121,7 @@ SPECIFICATION Spec
 INVARIANT DeniedReadyDoesNotOwnMessages
 
 ==== BadApplyBeforeOwnership
+\* Admission without cloned message ownership must not apply membership or Ready.
 CONSTANTS
     GroupCount = 3
     HotGroup = 1

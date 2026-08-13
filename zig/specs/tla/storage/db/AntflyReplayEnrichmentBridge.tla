@@ -17,16 +17,18 @@
   Bridge model for the durable replay journal and generated-enrichment worker.
 
   A fast derived consumer and generated enrichment share the replay journal.
-  Provider failures may leave enrichment work collected only in volatile
-  memory. Replay truncation therefore has to honor both durable consumer
-  watermarks. After restart, an empty scan must not advance the enrichment
-  watermark while durable source coverage debt remains.
+  Provider failures leave durable coverage debt plus a persisted bounded retry
+  count. Exhaustion publishes durable repair debt before terminal coverage;
+  replay truncation therefore has to honor the enrichment applied watermark.
+  Restart rearms unfinished work from persisted status rather than treating an
+  empty volatile scan as completion.
 *)
 
 EXTENDS Naturals, TLC
 
 CONSTANTS BuggyOmitEnrichmentFloor, BuggyAdvanceEmptyScan,
-          BuggyOmitRestartArm, BuggyRetryWithoutBoundary, MaxSeq, MaxEpoch
+          BuggyOmitRestartArm, BuggyRetryWithoutBoundary,
+          BuggyDropExhaustedRepairDebt, MaxSeq, MaxEpoch
 
 Seqs == 1..MaxSeq
 
@@ -41,11 +43,15 @@ VARIABLES
     providerUp,
     workerArmed,
     retryAttemptsSinceBoundary,
+    retryAttemptsTotal,
+    exhausted,
+    repairDebt,
     processEpoch
 
 vars == <<sourceSeq, journal, fastApplied, enrichmentApplied, coverageDebt,
           completed, volatileCollected, providerUp, workerArmed,
-          retryAttemptsSinceBoundary, processEpoch>>
+          retryAttemptsSinceBoundary, retryAttemptsTotal, exhausted,
+          repairDebt, processEpoch>>
 
 Init ==
     /\ sourceSeq = 0
@@ -58,6 +64,9 @@ Init ==
     /\ providerUp = TRUE
     /\ workerArmed = TRUE
     /\ retryAttemptsSinceBoundary = 0
+    /\ retryAttemptsTotal = 0
+    /\ exhausted = {}
+    /\ repairDebt = {}
     /\ processEpoch = 0
 
 AppendGeneratedSource ==
@@ -67,14 +76,16 @@ AppendGeneratedSource ==
     /\ coverageDebt' = coverageDebt \cup {sourceSeq + 1}
     /\ UNCHANGED <<fastApplied, enrichmentApplied, completed,
                   volatileCollected, providerUp, workerArmed,
-                  retryAttemptsSinceBoundary, processEpoch>>
+                  retryAttemptsSinceBoundary, retryAttemptsTotal, exhausted,
+                  repairDebt, processEpoch>>
 
 FastConsumerAdvance ==
     /\ fastApplied < sourceSeq
     /\ fastApplied' = fastApplied + 1
     /\ UNCHANGED <<sourceSeq, journal, enrichmentApplied, coverageDebt,
                   completed, volatileCollected, providerUp, workerArmed,
-                  retryAttemptsSinceBoundary, processEpoch>>
+                  retryAttemptsSinceBoundary, retryAttemptsTotal, exhausted,
+                  repairDebt, processEpoch>>
 
 CollectPending(s) ==
     /\ s \in coverageDebt
@@ -83,39 +94,46 @@ CollectPending(s) ==
     /\ volatileCollected' = volatileCollected \cup {s}
     /\ UNCHANGED <<sourceSeq, journal, fastApplied, enrichmentApplied,
                   coverageDebt, completed, providerUp, workerArmed,
-                  retryAttemptsSinceBoundary, processEpoch>>
+                  retryAttemptsSinceBoundary, retryAttemptsTotal, exhausted,
+                  repairDebt, processEpoch>>
 
 ProviderFails ==
     /\ providerUp
     /\ providerUp' = FALSE
     /\ UNCHANGED <<sourceSeq, journal, fastApplied, enrichmentApplied,
                   coverageDebt, completed, volatileCollected, workerArmed,
-                  retryAttemptsSinceBoundary, processEpoch>>
+                  retryAttemptsSinceBoundary, retryAttemptsTotal, exhausted,
+                  repairDebt, processEpoch>>
 
 ProviderRecovers ==
     /\ ~providerUp
     /\ providerUp' = TRUE
     /\ retryAttemptsSinceBoundary' = 0
+    /\ retryAttemptsTotal' = 0
     /\ UNCHANGED <<sourceSeq, journal, fastApplied, enrichmentApplied,
-                  coverageDebt, completed, volatileCollected, workerArmed, processEpoch>>
+                  coverageDebt, completed, volatileCollected, workerArmed,
+                  exhausted, repairDebt, processEpoch>>
 
 TransientProviderRetry ==
     /\ ~providerUp
     /\ workerArmed
     /\ coverageDebt /= {}
+    /\ retryAttemptsTotal < 2
     /\ retryAttemptsSinceBoundary < 2
-    /\ BuggyRetryWithoutBoundary \/ retryAttemptsSinceBoundary = 0
+    /\ (BuggyRetryWithoutBoundary \/ retryAttemptsSinceBoundary = 0)
     /\ retryAttemptsSinceBoundary' = retryAttemptsSinceBoundary + 1
+    /\ retryAttemptsTotal' = retryAttemptsTotal + 1
     /\ UNCHANGED <<sourceSeq, journal, fastApplied, enrichmentApplied,
                   coverageDebt, completed, volatileCollected, providerUp,
-                  workerArmed, processEpoch>>
+                  workerArmed, exhausted, repairDebt, processEpoch>>
 
 RetrySchedulerBoundary ==
     /\ retryAttemptsSinceBoundary = 1
     /\ retryAttemptsSinceBoundary' = 0
     /\ UNCHANGED <<sourceSeq, journal, fastApplied, enrichmentApplied,
                   coverageDebt, completed, volatileCollected, providerUp,
-                  workerArmed, processEpoch>>
+                  workerArmed, retryAttemptsTotal, exhausted, repairDebt,
+                  processEpoch>>
 
 CompleteEnrichment(s) ==
     /\ providerUp
@@ -125,8 +143,28 @@ CompleteEnrichment(s) ==
     /\ completed' = completed \cup {s}
     /\ coverageDebt' = coverageDebt \ {s}
     /\ volatileCollected' = volatileCollected \ {s}
+    /\ retryAttemptsSinceBoundary' = 0
+    /\ retryAttemptsTotal' = 0
     /\ UNCHANGED <<sourceSeq, journal, fastApplied, enrichmentApplied,
-                  providerUp, workerArmed, retryAttemptsSinceBoundary, processEpoch>>
+                  providerUp, workerArmed, exhausted, repairDebt, processEpoch>>
+
+\* The supervised request budget is finite. On exhaustion current-main first
+\* records repair debt under the failure fence, then publishes terminal
+\* coverage so unrelated work and the applied watermark can progress.
+ExhaustProviderRetry(s) ==
+    /\ ~providerUp
+    /\ workerArmed
+    /\ retryAttemptsTotal = 2
+    /\ s \in coverageDebt
+    /\ exhausted' = exhausted \cup {s}
+    /\ repairDebt' =
+        IF BuggyDropExhaustedRepairDebt THEN repairDebt ELSE repairDebt \cup {s}
+    /\ completed' = completed \cup {s}
+    /\ coverageDebt' = coverageDebt \ {s}
+    /\ volatileCollected' = volatileCollected \ {s}
+    /\ retryAttemptsSinceBoundary' = 0
+    /\ UNCHANGED <<sourceSeq, journal, fastApplied, enrichmentApplied,
+                  providerUp, workerArmed, retryAttemptsTotal, processEpoch>>
 
 AdvanceEnrichment ==
     /\ enrichmentApplied < sourceSeq
@@ -139,7 +177,8 @@ AdvanceEnrichment ==
     /\ enrichmentApplied' = enrichmentApplied + 1
     /\ UNCHANGED <<sourceSeq, journal, fastApplied, coverageDebt,
                   completed, volatileCollected, providerUp, workerArmed,
-                  retryAttemptsSinceBoundary, processEpoch>>
+                  retryAttemptsSinceBoundary, retryAttemptsTotal, exhausted,
+                  repairDebt, processEpoch>>
 
 TruncateReplay(s) ==
     /\ s \in journal
@@ -148,7 +187,8 @@ TruncateReplay(s) ==
     /\ journal' = journal \ {s}
     /\ UNCHANGED <<sourceSeq, fastApplied, enrichmentApplied, coverageDebt,
                   completed, volatileCollected, providerUp, workerArmed,
-                  retryAttemptsSinceBoundary, processEpoch>>
+                  retryAttemptsSinceBoundary, retryAttemptsTotal, exhausted,
+                  repairDebt, processEpoch>>
 
 Restart ==
     /\ processEpoch < MaxEpoch
@@ -157,7 +197,8 @@ Restart ==
     /\ workerArmed' = FALSE
     /\ retryAttemptsSinceBoundary' = 0
     /\ UNCHANGED <<sourceSeq, journal, fastApplied, enrichmentApplied,
-                  coverageDebt, completed, providerUp>>
+                  coverageDebt, completed, providerUp, retryAttemptsTotal,
+                  exhausted, repairDebt>>
 
 ArmStartupEnrichment ==
     /\ processEpoch > 0
@@ -166,7 +207,8 @@ ArmStartupEnrichment ==
     /\ workerArmed' = TRUE
     /\ UNCHANGED <<sourceSeq, journal, fastApplied, enrichmentApplied,
                   coverageDebt, completed, volatileCollected, providerUp,
-                  retryAttemptsSinceBoundary, processEpoch>>
+                  retryAttemptsSinceBoundary, retryAttemptsTotal, exhausted,
+                  repairDebt, processEpoch>>
 
 Next ==
     \/ AppendGeneratedSource
@@ -175,6 +217,7 @@ Next ==
     \/ ProviderRecovers
     \/ TransientProviderRetry
     \/ RetrySchedulerBoundary
+    \/ \E s \in Seqs: ExhaustProviderRetry(s)
     \/ AdvanceEnrichment
     \/ Restart
     \/ ArmStartupEnrichment
@@ -193,12 +236,14 @@ FairSpec ==
     /\ WF_vars(ArmStartupEnrichment)
     /\ WF_vars(AdvanceEnrichment)
     /\ \A s \in Seqs: SF_vars(CompleteEnrichment(s))
+    /\ \A e \in Seqs: SF_vars(ExhaustProviderRetry(e))
 
 TypeOK ==
     /\ BuggyOmitEnrichmentFloor \in BOOLEAN
     /\ BuggyAdvanceEmptyScan \in BOOLEAN
     /\ BuggyOmitRestartArm \in BOOLEAN
     /\ BuggyRetryWithoutBoundary \in BOOLEAN
+    /\ BuggyDropExhaustedRepairDebt \in BOOLEAN
     /\ MaxSeq \in 1..3
     /\ MaxEpoch \in 0..2
     /\ sourceSeq \in 0..MaxSeq
@@ -211,6 +256,9 @@ TypeOK ==
     /\ providerUp \in BOOLEAN
     /\ workerArmed \in BOOLEAN
     /\ retryAttemptsSinceBoundary \in 0..2
+    /\ retryAttemptsTotal \in 0..2
+    /\ exhausted \in SUBSET Seqs
+    /\ repairDebt \in SUBSET Seqs
     /\ processEpoch \in 0..MaxEpoch
 
 WatermarksOrdered ==
@@ -231,6 +279,9 @@ CompletedWorkWasDurable ==
 RetryRequiresSchedulerBoundary ==
     retryAttemptsSinceBoundary <= 1
 
+ExhaustedRetryHasDurableRepairDebt ==
+    exhausted \subseteq repairDebt
+
 Safety ==
     /\ TypeOK
     /\ WatermarksOrdered
@@ -238,6 +289,7 @@ Safety ==
     /\ NoAdvancePastCoverageDebt
     /\ CompletedWorkWasDurable
     /\ RetryRequiresSchedulerBoundary
+    /\ ExhaustedRetryHasDurableRepairDebt
 
 CoverageEventuallyDrains == <>[](coverageDebt = {})
 

@@ -14,58 +14,45 @@
 
 ----------------------------- MODULE AntflyTransaction -----------------------------
 (*
-  TLA+ Formal Specification of Antfly's Distributed Transaction Protocol.
+  TLA+ specification of Antfly's local Zig TxnManager contract.
 
-  Models the full 2PC + OCC + recovery + cleanup protocol as implemented in:
-    - src/metadata/transaction.go   (orchestrator: ExecuteTransaction)
-    - src/store/db/db.go            (storage: InitTransaction, WriteIntent,
-                                     ResolveIntents, transactionRecoveryLoop,
-                                     notifyPendingResolutions, checkVersionPredicates,
-                                     shouldWriteValue, hasConflictingIntentForKey)
-    - src/store/db/helpers.go       (finalizeTransaction)
+  Concrete implementation anchors:
+    - pkg/antfly/src/storage/transactions.zig
+      (TxnManager transaction records, OCC predicates, intent resolution,
+       stale-pending recovery, participant acknowledgement, and cleanup)
+    - pkg/antfly/src/storage/db/db.zig
+      (local transaction entry points and intent/data publication)
 
-  Previous model checking found three real bugs:
-    1. Orphaned intents from premature txn record cleanup
-    2. HLC timestamp collisions during concurrent commits
-    3. OCC lost update: two txns reading the same version could both commit
-       because checkVersionPredicates only checked committed versions, not
-       pending intents (fixed by hasConflictingIntentForKey in PR #381)
+  This module deliberately does not claim the API-level distributed
+  coordinator protocol. AntflyDistributedTransactionRecovery.tla models that
+  durable cross-group outcome and retry contract.
 
-  This spec models the OCC predicate check faithfully as two separate steps
-  with a window between them (CheckPredicates snapshots committed versions,
-  WriteIntentOnShard validates and writes). This structure is what allowed
-  the Piledriver spec to catch bug #3 -- the window between snapshot and
-  write is where concurrent transactions can interleave.
+  The local protocol modeled here is:
+    1. Create a pending TxnManager record with its participant set.
+    2. Snapshot committed versions for the OCC read set.
+    3. Validate the snapshot and reject conflicting pending intents before
+       writing local intents.
+    4. Persist a committed or aborted decision.
+    5. Resolve committed intents into visible values or discard aborted ones.
+    6. Recover stale pending records and finalized orphan intents.
+    7. Retain the transaction record until every prepared participant resolves.
 
-  Protocol summary:
-    Phase 1 (Prepare):
-      1. Orchestrator allocates HLC timestamp, creates txn record on coordinator
-         shard with status=Pending and participant list.
-      2. Orchestrator snapshots committed key versions (OCC read set).
-      3. Orchestrator writes intents to all participant shards in parallel.
-         Each shard validates OCC predicates (committed version unchanged AND
-         no conflicting intents from other txns) before accepting intents.
-      4. If any shard rejects (OCC conflict), orchestrator aborts.
-    Phase 2 (Commit/Abort):
-      5. Orchestrator atomically sets txn record to Committed (or Aborted).
-      6. Orchestrator notifies participants to resolve intents (apply or discard).
-      7. Each participant resolves intents and reports back.
-    Recovery:
-      8. Coordinator's recovery loop retries unresolved participants.
-      9. Txn record is only deleted when all participants have resolved.
+  The predicate check remains split into snapshot and intent-write actions.
+  That interleaving is the local lost-update boundary: checking committed
+  versions without checking pending intents would let two transactions that
+  read the same version both acquire conflicting intents.
 
   Safety properties:
-    - Atomicity:  Aborted txn writes never appear in the data store.
-    - No orphaned intents: Txn records not deleted while intents exist.
-    - OCC serialization: Conflicting OCC txns can't both have intents written.
-    - LWW consistency: Higher-timestamp writes win during intent resolution.
-    - Serializable reads: Two txns that read the same version of a key
-      cannot both commit (catches the lost update bug).
+    - Atomicity: aborted transaction writes never become visible.
+    - No orphaned intents: cleanup cannot delete a record while intents remain.
+    - OCC serialization: conflicting local OCC transactions cannot both hold
+      intents.
+    - LWW/read consistency: resolution respects commit versions and snapshots.
 
   Liveness properties (under weak fairness):
-    - Committed intents are eventually all resolved.
-    - Fully resolved txn records are eventually cleaned up.
-    - Every transaction eventually reaches a terminal decision.
+    - Committed local intents are eventually resolved.
+    - Fully resolved terminal records are eventually cleaned up.
+    - Stale pending local records eventually reach an abort/cleanup path.
 *)
 
 EXTENDS Naturals, FiniteSets, Sequences, TLC

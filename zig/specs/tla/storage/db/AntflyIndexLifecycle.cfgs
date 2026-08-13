@@ -55,14 +55,14 @@ INVARIANTS
     FreshImpliesCaughtUp
 
 ==== BadLoseSecondSchemaWakeup
-\* Expected-failure B5-shaped mutant: the generation-one worker completes,
-\* generation two is requested, but no durable rebuild wakeup is published.
-
-SPECIFICATION Spec
+\* Expected-failure B5-shaped mutant: generation two loses its exact durable
+\* wake and periodic fallback rediscovery is also disabled.
+SPECIFICATION FairSpec
 
 CONSTANTS
     BuggySwapIncompleteShadow = FALSE
     BuggyRecoverTrustsStaleStatus = FALSE
     BuggyLoseSecondSchemaWakeup = TRUE
 
-INVARIANT EveryRequestedGenerationHasDurableWork
+PROPERTIES
+    SecondSchemaEventuallyConverges

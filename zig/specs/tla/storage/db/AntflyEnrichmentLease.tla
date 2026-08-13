@@ -18,34 +18,39 @@
 
   Implementation correspondence:
   - targetSeq/appliedSeq/retrying/workerFailed abstract EnrichmentRuntime's
-    target_sequence, applied_sequence, retrying, and worker_failed fields.
-  - pendingRequired and visibleReplay abstract replay_source.collectPendingDocumentGroups:
+    persisted RuntimeStatus plus durable generated applied watermark.
+  - pendingRequired and visibleReplay abstract collectPendingDocumentGroups:
     a source replay row may require generated enrichment, and that work can only
     be collected after replay is visible.
-  - leaseOwner/leaseValid/leaseEpoch abstract ownership.ensureLease/release.
+  - leaseOwner/leaseValid/leaseEpoch abstract ownership.ensureLease and the
+    persisted-lease revalidation before publication/checkpoint progress.
   - collected/generated/publishedArtifacts abstract collection, generated replay
-    window building, and flushGeneratedReplayWindow.
-  - isolatedFailedIndexes/isolatedSeqs abstract recordIsolatedRequestError,
-    where one bad request/index is quarantined without failing the whole worker.
+    window building, appendGeneratedBatchWithRetry, and the applied checkpoint.
+  - isolatedFailedIndexes/isolatedSeqs abstract recordIsolatedRequestError:
+    terminal request failure publishes durable repair debt/terminal coverage
+    without setting the whole runtime's worker_failed state.
 
   Deliberate omissions:
-  - Embedding payloads, chunk text, sparse values, and asset bytes are reduced to
-    "this source sequence requires generated work".
-  - Window byte/item sizing and exact backoff timing are modeled as nondeterministic
-    retry/flush choices.
+  - Provider payloads, embedding/chunk/artifact bytes, exact retry delays, and
+    byte/item window limits are checked by deterministic Zig tests rather than
+    represented as TLC values.
+  - Bounded worker retry exhaustion and its durable repair-debt handoff are
+    modeled in AntflyReplayEnrichmentBridge; this module keeps one abstract
+    scheduler retry boundary.
   - The model uses ghost pendingRequired knowledge to express the intended safety
     contract: target advancement must not permanently skip hidden generated work.
 
   Bug classes:
   - stale owner publishes generated artifacts after lease loss;
   - empty pending replay scan advances applied through hidden generated work;
-  - retryable failures advance applied as if work completed;
-  - isolated request failure poisons unrelated worker progress.
+  - a terminal request failure poisons the whole worker instead of isolating
+    only its affected indexes.
 *)
 
 EXTENDS Naturals, TLC
 
-CONSTANTS BuggyStalePublish, BuggyEmptyPendingAdvance, MaxSeq
+CONSTANTS BuggyStalePublish, BuggyEmptyPendingAdvance,
+          BuggyTerminalFailurePoisonsWorker, MaxSeq
 
 Owners == {"none", "nodeA", "nodeB"}
 RealOwners == {"nodeA", "nodeB"}
@@ -73,12 +78,14 @@ VARIABLES
     workerFailed,
     isolatedFailedIndexes,
     isolatedSeqs,
+    terminalFailurePoisoned,
     lostLeaseCount
 
 vars == <<leaseOwner, leaseValid, leaseEpoch, sourceSeq, targetSeq, appliedSeq,
           visibleReplay, pendingRequired, collected, collectedEpoch, generated,
           generatedEpoch, publishedArtifacts, publishValid, retrying, retrySeq,
-          workerFailed, isolatedFailedIndexes, isolatedSeqs, lostLeaseCount>>
+          workerFailed, isolatedFailedIndexes, isolatedSeqs,
+          terminalFailurePoisoned, lostLeaseCount>>
 
 Range(lo, hi) == {s \in Seqs : lo < s /\ s <= hi}
 
@@ -114,6 +121,7 @@ Init ==
     /\ workerFailed = FALSE
     /\ isolatedFailedIndexes = {}
     /\ isolatedSeqs = {}
+    /\ terminalFailurePoisoned = FALSE
     /\ lostLeaseCount = 0
 
 \* DB.batch appends/commits a replay source record and notifySequence advances
@@ -125,14 +133,12 @@ AppendSource(needs) ==
     /\ targetSeq' = sourceSeq + 1
     /\ pendingRequired' =
         IF needs THEN pendingRequired \cup {sourceSeq + 1} ELSE pendingRequired
-    /\ retrying' = FALSE
-    /\ retrySeq' = 0
-    /\ workerFailed' = FALSE
     /\ isolatedFailedIndexes' = {}
     /\ UNCHANGED <<leaseOwner, leaseValid, leaseEpoch, appliedSeq,
                   visibleReplay, collected, collectedEpoch, generated,
                   generatedEpoch, publishedArtifacts, publishValid,
-                  isolatedSeqs, lostLeaseCount>>
+                  retrying, retrySeq, workerFailed, isolatedSeqs,
+                  terminalFailurePoisoned, lostLeaseCount>>
 
 PublishReplay(s) ==
     /\ s \in Seqs
@@ -144,7 +150,7 @@ PublishReplay(s) ==
                   appliedSeq, pendingRequired, collected, collectedEpoch,
                   generated, generatedEpoch, publishedArtifacts, publishValid,
                   retrying, retrySeq, workerFailed, isolatedFailedIndexes,
-                  isolatedSeqs, lostLeaseCount>>
+                  isolatedSeqs, terminalFailurePoisoned, lostLeaseCount>>
 
 AcquireLease(o) ==
     /\ o \in RealOwners
@@ -158,7 +164,7 @@ AcquireLease(o) ==
                   pendingRequired, collected, collectedEpoch, generated,
                   generatedEpoch, publishedArtifacts, publishValid, retrying,
                   retrySeq, workerFailed, isolatedFailedIndexes, isolatedSeqs,
-                  lostLeaseCount>>
+                  terminalFailurePoisoned, lostLeaseCount>>
 
 LoseLease ==
     /\ leaseValid
@@ -170,7 +176,8 @@ LoseLease ==
     /\ UNCHANGED <<leaseEpoch, sourceSeq, targetSeq, appliedSeq, visibleReplay,
                   pendingRequired, collected, collectedEpoch, generated,
                   generatedEpoch, publishedArtifacts, publishValid, retrying,
-                  retrySeq, workerFailed, isolatedFailedIndexes, isolatedSeqs>>
+                  retrySeq, workerFailed, isolatedFailedIndexes, isolatedSeqs,
+                  terminalFailurePoisoned>>
 
 CollectPending(s) ==
     /\ leaseValid
@@ -184,7 +191,7 @@ CollectPending(s) ==
                   appliedSeq, visibleReplay, pendingRequired, generated,
                   generatedEpoch, publishedArtifacts, publishValid, retrying,
                   retrySeq, workerFailed, isolatedFailedIndexes, isolatedSeqs,
-                  lostLeaseCount>>
+                  terminalFailurePoisoned, lostLeaseCount>>
 
 GenerateArtifact(s) ==
     /\ leaseValid
@@ -199,7 +206,7 @@ GenerateArtifact(s) ==
                   appliedSeq, visibleReplay, pendingRequired, collected,
                   collectedEpoch, publishedArtifacts, publishValid, retrying,
                   retrySeq, workerFailed, isolatedFailedIndexes, isolatedSeqs,
-                  lostLeaseCount>>
+                  terminalFailurePoisoned, lostLeaseCount>>
 
 PublishGenerated(s) ==
     /\ leaseValid
@@ -215,7 +222,7 @@ PublishGenerated(s) ==
                   appliedSeq, visibleReplay, pendingRequired, collected,
                   collectedEpoch, generated, generatedEpoch, retrying,
                   retrySeq, workerFailed, isolatedFailedIndexes, isolatedSeqs,
-                  lostLeaseCount>>
+                  terminalFailurePoisoned, lostLeaseCount>>
 
 BuggyPublishAfterLeaseLoss(s) ==
     /\ BuggyStalePublish
@@ -227,7 +234,7 @@ BuggyPublishAfterLeaseLoss(s) ==
                   appliedSeq, visibleReplay, pendingRequired, collected,
                   collectedEpoch, generated, generatedEpoch, publishValid,
                   retrying, retrySeq, workerFailed, isolatedFailedIndexes,
-                  isolatedSeqs, lostLeaseCount>>
+                  isolatedSeqs, terminalFailurePoisoned, lostLeaseCount>>
 
 RetryTransient(s) ==
     /\ leaseValid
@@ -242,7 +249,7 @@ RetryTransient(s) ==
                   appliedSeq, visibleReplay, pendingRequired, collected,
                   collectedEpoch, generated, generatedEpoch, publishedArtifacts,
                   publishValid, workerFailed, isolatedFailedIndexes,
-                  isolatedSeqs, lostLeaseCount>>
+                  isolatedSeqs, terminalFailurePoisoned, lostLeaseCount>>
 
 RetryLater ==
     /\ retrying
@@ -252,7 +259,7 @@ RetryLater ==
                   appliedSeq, visibleReplay, pendingRequired, collected,
                   collectedEpoch, generated, generatedEpoch, publishedArtifacts,
                   publishValid, workerFailed, isolatedFailedIndexes,
-                  isolatedSeqs, lostLeaseCount>>
+                  isolatedSeqs, terminalFailurePoisoned, lostLeaseCount>>
 
 IsolateRequestFailure(i, s) ==
     /\ i \in Indexes
@@ -262,7 +269,9 @@ IsolateRequestFailure(i, s) ==
     /\ s \notin publishedArtifacts
     /\ isolatedFailedIndexes' = isolatedFailedIndexes \cup {i}
     /\ isolatedSeqs' = isolatedSeqs \cup {s}
-    /\ workerFailed' = FALSE
+    /\ workerFailed' = BuggyTerminalFailurePoisonsWorker
+    /\ terminalFailurePoisoned' =
+        IF BuggyTerminalFailurePoisonsWorker THEN TRUE ELSE terminalFailurePoisoned
     /\ UNCHANGED <<leaseOwner, leaseValid, leaseEpoch, sourceSeq, targetSeq,
                   appliedSeq, visibleReplay, pendingRequired, collected,
                   collectedEpoch, generated, generatedEpoch, publishedArtifacts,
@@ -278,7 +287,7 @@ FatalWorkerFailure ==
                   appliedSeq, visibleReplay, pendingRequired, collected,
                   collectedEpoch, generated, generatedEpoch, publishedArtifacts,
                   publishValid, isolatedFailedIndexes, isolatedSeqs,
-                  lostLeaseCount>>
+                  terminalFailurePoisoned, lostLeaseCount>>
 
 AdvanceAppliedOne ==
     /\ leaseValid
@@ -291,7 +300,7 @@ AdvanceAppliedOne ==
                   visibleReplay, pendingRequired, collected, collectedEpoch,
                   generated, generatedEpoch, publishedArtifacts, publishValid,
                   retrying, retrySeq, workerFailed, isolatedFailedIndexes,
-                  isolatedSeqs, lostLeaseCount>>
+                  isolatedSeqs, terminalFailurePoisoned, lostLeaseCount>>
 
 AdvanceNoPendingToTarget ==
     /\ leaseValid
@@ -304,7 +313,7 @@ AdvanceNoPendingToTarget ==
                   visibleReplay, pendingRequired, collected, collectedEpoch,
                   generated, generatedEpoch, publishedArtifacts, publishValid,
                   retrying, retrySeq, workerFailed, isolatedFailedIndexes,
-                  isolatedSeqs, lostLeaseCount>>
+                  isolatedSeqs, terminalFailurePoisoned, lostLeaseCount>>
 
 BuggyAdvanceEmptyVisiblePendingToTarget ==
     /\ BuggyEmptyPendingAdvance
@@ -319,7 +328,7 @@ BuggyAdvanceEmptyVisiblePendingToTarget ==
                   visibleReplay, pendingRequired, collected, collectedEpoch,
                   generated, generatedEpoch, publishedArtifacts, publishValid,
                   retrying, retrySeq, workerFailed, isolatedFailedIndexes,
-                  isolatedSeqs, lostLeaseCount>>
+                  isolatedSeqs, terminalFailurePoisoned, lostLeaseCount>>
 
 Next ==
     \/ \E needs \in BOOLEAN: AppendSource(needs)
@@ -372,6 +381,7 @@ EnrichmentEventuallyDrains ==
 TypeOK ==
     /\ BuggyStalePublish \in BOOLEAN
     /\ BuggyEmptyPendingAdvance \in BOOLEAN
+    /\ BuggyTerminalFailurePoisonsWorker \in BOOLEAN
     /\ MaxSeq \in 1..3
     /\ leaseOwner \in Owners
     /\ leaseValid \in BOOLEAN
@@ -392,6 +402,7 @@ TypeOK ==
     /\ workerFailed \in BOOLEAN
     /\ isolatedFailedIndexes \subseteq Indexes
     /\ isolatedSeqs \subseteq Seqs
+    /\ terminalFailurePoisoned \in BOOLEAN
     /\ lostLeaseCount \in 0..MaxEpoch
 
 TargetsOrdered ==
@@ -428,6 +439,9 @@ RetryableFailureDoesNotAdvanceApplied ==
 IsolatedFailureRecorded ==
     isolatedFailedIndexes # {} => isolatedSeqs # {}
 
+TerminalRequestFailureIsIsolated ==
+    ~terminalFailurePoisoned
+
 WorkerFailureStatusStable ==
     workerFailed => ~retrying
 
@@ -440,6 +454,7 @@ Safety ==
     /\ AppliedDoesNotSkipGeneratedWork
     /\ RetryableFailureDoesNotAdvanceApplied
     /\ IsolatedFailureRecorded
+    /\ TerminalRequestFailureIsIsolated
     /\ WorkerFailureStatusStable
 
 =============================================================================

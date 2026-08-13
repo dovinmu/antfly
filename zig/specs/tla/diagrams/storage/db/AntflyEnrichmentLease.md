@@ -2,7 +2,7 @@
 
 # AntflyEnrichmentLease — structural diagrams
 
-Generated from [`AntflyEnrichmentLease.tla`](../../../storage/db/AntflyEnrichmentLease.tla). 20 state variables, 13 actions in `Next`. 2 expected-failure mutant action(s) (gated by `Buggy*` constants) omitted.
+Generated from [`AntflyEnrichmentLease.tla`](../../../storage/db/AntflyEnrichmentLease.tla). 21 state variables, 13 actions in `Next`. 2 expected-failure mutant action(s) (gated by `Buggy*` constants) omitted.
 
 ## Phase state machines
 
@@ -28,7 +28,7 @@ stateDiagram-v2
 
 | Action | Reads (incl. helper operators) | Writes |
 | --- | --- | --- |
-| `AppendSource` | `sourceSeq`, `pendingRequired` | `sourceSeq`, `targetSeq`, `pendingRequired`, `retrying`, `retrySeq`, `workerFailed`, `isolatedFailedIndexes` |
+| `AppendSource` | `sourceSeq`, `pendingRequired` | `sourceSeq`, `targetSeq`, `pendingRequired`, `isolatedFailedIndexes` |
 | `PublishReplay` | `sourceSeq`, `visibleReplay` | `visibleReplay` |
 | `CollectPending` | `leaseValid`, `leaseEpoch`, `targetSeq`, `appliedSeq`, `visibleReplay`, `pendingRequired`, `collected`, `collectedEpoch`, `retrying`, `workerFailed` | `collected`, `collectedEpoch` |
 | `GenerateArtifact` | `leaseValid`, `leaseEpoch`, `collected`, `collectedEpoch`, `generated`, `generatedEpoch`, `retrying`, `workerFailed` | `generated`, `generatedEpoch` |
@@ -40,7 +40,7 @@ stateDiagram-v2
 | `AdvanceAppliedOne` | `leaseValid`, `targetSeq`, `appliedSeq`, `visibleReplay`, `pendingRequired`, `publishedArtifacts`, `retrying`, `workerFailed`, `isolatedSeqs` | `appliedSeq` |
 | `AdvanceNoPendingToTarget` | `leaseValid`, `targetSeq`, `appliedSeq`, `pendingRequired`, `retrying`, `workerFailed` | `appliedSeq` |
 | `AcquireLease` | `leaseOwner`, `leaseValid`, `leaseEpoch` | `leaseOwner`, `leaseValid`, `leaseEpoch` |
-| `IsolateRequestFailure` | `leaseValid`, `targetSeq`, `appliedSeq`, `visibleReplay`, `pendingRequired`, `publishedArtifacts`, `retrying`, `isolatedFailedIndexes`, `isolatedSeqs` | `workerFailed`, `isolatedFailedIndexes`, `isolatedSeqs` |
+| `IsolateRequestFailure` | `leaseValid`, `targetSeq`, `appliedSeq`, `visibleReplay`, `pendingRequired`, `publishedArtifacts`, `retrying`, `isolatedFailedIndexes`, `isolatedSeqs`, `terminalFailurePoisoned` | `workerFailed`, `isolatedFailedIndexes`, `isolatedSeqs`, `terminalFailurePoisoned` |
 
 ## Write graph
 
@@ -67,94 +67,93 @@ flowchart LR
         v0([sourceSeq])
         v1([targetSeq])
         v2([pendingRequired])
-        v3([retrying])
-        v4([retrySeq])
-        v5([workerFailed])
-        v6([isolatedFailedIndexes])
-        v7([visibleReplay])
-        v8([leaseValid])
-        v9([leaseEpoch])
-        v10([appliedSeq])
-        v11([collected])
-        v12([collectedEpoch])
-        v13([generated])
-        v14([generatedEpoch])
-        v15([publishedArtifacts])
-        v16([publishValid])
+        v3([isolatedFailedIndexes])
+        v4([visibleReplay])
+        v5([leaseValid])
+        v6([leaseEpoch])
+        v7([appliedSeq])
+        v8([collected])
+        v9([collectedEpoch])
+        v10([retrying])
+        v11([workerFailed])
+        v12([generated])
+        v13([generatedEpoch])
+        v14([publishedArtifacts])
+        v15([publishValid])
+        v16([retrySeq])
         v17([isolatedSeqs])
         v18([leaseOwner])
         v19([lostLeaseCount])
+        v20([terminalFailurePoisoned])
     end
     a0 --> v0
     a0 --> v1
     a0 --> v2
     a0 --> v3
-    a0 --> v4
-    a0 --> v5
-    a0 --> v6
-    a1 --> v7
+    a1 --> v4
     v0 -.-> a1
-    a2 --> v11
-    a2 --> v12
-    v8 -.-> a2
-    v9 -.-> a2
-    v1 -.-> a2
-    v10 -.-> a2
-    v3 -.-> a2
+    a2 --> v8
+    a2 --> v9
     v5 -.-> a2
+    v6 -.-> a2
+    v1 -.-> a2
+    v7 -.-> a2
+    v10 -.-> a2
+    v11 -.-> a2
+    a3 --> v12
     a3 --> v13
-    a3 --> v14
+    v5 -.-> a3
+    v6 -.-> a3
     v8 -.-> a3
     v9 -.-> a3
+    v10 -.-> a3
     v11 -.-> a3
-    v12 -.-> a3
-    v3 -.-> a3
-    v5 -.-> a3
+    a4 --> v14
     a4 --> v15
-    a4 --> v16
-    v8 -.-> a4
-    v9 -.-> a4
-    v7 -.-> a4
-    v13 -.-> a4
-    v14 -.-> a4
-    v3 -.-> a4
     v5 -.-> a4
-    a5 --> v3
-    a5 --> v4
-    v8 -.-> a5
-    v1 -.-> a5
-    v10 -.-> a5
-    v15 -.-> a5
+    v6 -.-> a4
+    v4 -.-> a4
+    v12 -.-> a4
+    v13 -.-> a4
+    v10 -.-> a4
+    v11 -.-> a4
+    a5 --> v10
+    a5 --> v16
     v5 -.-> a5
+    v1 -.-> a5
+    v7 -.-> a5
+    v14 -.-> a5
+    v11 -.-> a5
     v17 -.-> a5
-    a6 --> v3
-    a6 --> v4
+    a6 --> v10
+    a6 --> v16
     a7 --> v18
-    a7 --> v8
+    a7 --> v5
     a7 --> v19
-    a8 --> v3
-    a8 --> v4
-    a8 --> v5
-    v8 -.-> a8
-    a9 --> v10
-    v8 -.-> a9
-    v1 -.-> a9
-    v3 -.-> a9
+    a8 --> v10
+    a8 --> v16
+    a8 --> v11
+    v5 -.-> a8
+    a9 --> v7
     v5 -.-> a9
-    a10 --> v10
-    v8 -.-> a10
-    v1 -.-> a10
-    v3 -.-> a10
+    v1 -.-> a9
+    v10 -.-> a9
+    v11 -.-> a9
+    a10 --> v7
     v5 -.-> a10
+    v1 -.-> a10
+    v10 -.-> a10
+    v11 -.-> a10
     a11 --> v18
-    a11 --> v8
-    a11 --> v9
-    a12 --> v5
-    a12 --> v6
+    a11 --> v5
+    a11 --> v6
+    a12 --> v11
+    a12 --> v3
     a12 --> v17
-    v8 -.-> a12
+    a12 --> v20
+    v5 -.-> a12
     v1 -.-> a12
+    v7 -.-> a12
+    v14 -.-> a12
     v10 -.-> a12
-    v15 -.-> a12
-    v3 -.-> a12
 ```

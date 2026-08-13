@@ -140,6 +140,7 @@ CloneReady(g) ==
 CommitMembership ==
     /\ phase = "fair"
     /\ HotGroup \in admitted
+    /\ IF BuggyApplyBeforeOwnership THEN TRUE ELSE HotGroup \in cloned
     /\ raftConf = "old"
     /\ raftConf' = "new"
     /\ UNCHANGED <<phase, fairVisited, duplicateFairVisit, admitted,
@@ -290,7 +291,8 @@ DeniedReadyDoesNotOwnMessages ==
         /\ sentMessages[g] = {}
 
 ConfigurationApplyRequiresOwnedMessages ==
-    ~appliedWithoutOwnership
+    /\ ~appliedWithoutOwnership
+    /\ (raftConf = "new" => HotGroup \in cloned)
 
 ReadyMessagesPreserved ==
     configApplied /\ HotGroup \in cloned =>

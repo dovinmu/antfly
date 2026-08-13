@@ -8,6 +8,7 @@ CONSTANTS
     BuggyLeaveRecoveryUndrained = FALSE
     BuggyReuseFailedCandidate = FALSE
     BuggyPlannerUsesNameCounter = FALSE
+    BuggyOmitStartupRearm = FALSE
 
 INVARIANTS
     TypeOK
@@ -16,6 +17,7 @@ INVARIANTS
 
 PROPERTIES
     AutomaticRepairEventuallyStabilizes
+    RestartedDurableRecoveryEventuallyRearmed
 
 ==== BadSkipArtifactRecovery
 \* Rebuilding cannot manufacture a corrupt/missing managed source artifact.
@@ -26,6 +28,7 @@ CONSTANTS
     BuggyLeaveRecoveryUndrained = FALSE
     BuggyReuseFailedCandidate = FALSE
     BuggyPlannerUsesNameCounter = FALSE
+    BuggyOmitStartupRearm = FALSE
 
 INVARIANTS
     TypeOK
@@ -44,6 +47,7 @@ CONSTANTS
     BuggyLeaveRecoveryUndrained = TRUE
     BuggyReuseFailedCandidate = FALSE
     BuggyPlannerUsesNameCounter = FALSE
+    BuggyOmitStartupRearm = FALSE
 
 INVARIANTS
     TypeOK
@@ -62,6 +66,7 @@ CONSTANTS
     BuggyLeaveRecoveryUndrained = FALSE
     BuggyReuseFailedCandidate = TRUE
     BuggyPlannerUsesNameCounter = FALSE
+    BuggyOmitStartupRearm = FALSE
 
 INVARIANTS
     TypeOK
@@ -80,6 +85,7 @@ CONSTANTS
     BuggyLeaveRecoveryUndrained = FALSE
     BuggyReuseFailedCandidate = FALSE
     BuggyPlannerUsesNameCounter = TRUE
+    BuggyOmitStartupRearm = FALSE
 
 INVARIANTS
     TypeOK
@@ -88,3 +94,17 @@ INVARIANTS
 
 PROPERTIES
     AutomaticRepairEventuallyStabilizes
+
+==== BadStartupRecoveryUnarmed
+\* Durable artifact and repair debt must rearm the bounded foreground owner.
+SPECIFICATION FairSpec
+
+CONSTANTS
+    BuggySkipArtifactRecovery = FALSE
+    BuggyLeaveRecoveryUndrained = FALSE
+    BuggyReuseFailedCandidate = FALSE
+    BuggyPlannerUsesNameCounter = FALSE
+    BuggyOmitStartupRearm = TRUE
+
+PROPERTIES
+    RestartedDurableRecoveryEventuallyRearmed

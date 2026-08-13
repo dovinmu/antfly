@@ -2,7 +2,7 @@
 
 # AntflyReplayEnrichmentBridge — structural diagrams
 
-Generated from [`AntflyReplayEnrichmentBridge.tla`](../../../storage/db/AntflyReplayEnrichmentBridge.tla). 11 state variables, 12 actions in `Next`.
+Generated from [`AntflyReplayEnrichmentBridge.tla`](../../../storage/db/AntflyReplayEnrichmentBridge.tla). 14 state variables, 13 actions in `Next`.
 
 ## Actions and the state they touch
 
@@ -11,14 +11,15 @@ Generated from [`AntflyReplayEnrichmentBridge.tla`](../../../storage/db/AntflyRe
 | `AppendGeneratedSource` | `sourceSeq`, `journal`, `coverageDebt` | `sourceSeq`, `journal`, `coverageDebt` |
 | `FastConsumerAdvance` | `sourceSeq`, `fastApplied` | `fastApplied` |
 | `ProviderFails` | `providerUp` | `providerUp` |
-| `ProviderRecovers` | `providerUp` | `providerUp`, `retryAttemptsSinceBoundary` |
-| `TransientProviderRetry` | `coverageDebt`, `providerUp`, `workerArmed`, `retryAttemptsSinceBoundary` | `retryAttemptsSinceBoundary` |
+| `ProviderRecovers` | `providerUp` | `providerUp`, `retryAttemptsSinceBoundary`, `retryAttemptsTotal` |
+| `TransientProviderRetry` | `coverageDebt`, `providerUp`, `workerArmed`, `retryAttemptsSinceBoundary`, `retryAttemptsTotal` | `retryAttemptsSinceBoundary`, `retryAttemptsTotal` |
 | `RetrySchedulerBoundary` | `retryAttemptsSinceBoundary` | `retryAttemptsSinceBoundary` |
+| `ExhaustProviderRetry` | `coverageDebt`, `completed`, `volatileCollected`, `providerUp`, `workerArmed`, `retryAttemptsTotal`, `exhausted`, `repairDebt` | `coverageDebt`, `completed`, `volatileCollected`, `retryAttemptsSinceBoundary`, `exhausted`, `repairDebt` |
 | `AdvanceEnrichment` | `sourceSeq`, `journal`, `enrichmentApplied`, `coverageDebt`, `volatileCollected` | `enrichmentApplied` |
 | `Restart` | `processEpoch` | `volatileCollected`, `workerArmed`, `retryAttemptsSinceBoundary`, `processEpoch` |
 | `ArmStartupEnrichment` | `workerArmed`, `processEpoch` | `workerArmed` |
 | `CollectPending` | `journal`, `coverageDebt`, `volatileCollected` | `volatileCollected` |
-| `CompleteEnrichment` | `journal`, `coverageDebt`, `completed`, `volatileCollected`, `providerUp`, `workerArmed` | `coverageDebt`, `completed`, `volatileCollected` |
+| `CompleteEnrichment` | `journal`, `coverageDebt`, `completed`, `volatileCollected`, `providerUp`, `workerArmed` | `coverageDebt`, `completed`, `volatileCollected`, `retryAttemptsSinceBoundary`, `retryAttemptsTotal` |
 | `TruncateReplay` | `journal`, `fastApplied`, `enrichmentApplied` | `journal` |
 
 ## Write graph
@@ -34,12 +35,13 @@ flowchart LR
         a3[ProviderRecovers]
         a4[TransientProviderRetry]
         a5[RetrySchedulerBoundary]
-        a6[AdvanceEnrichment]
-        a7[Restart]
-        a8[ArmStartupEnrichment]
-        a9[CollectPending]
-        a10[CompleteEnrichment]
-        a11[TruncateReplay]
+        a6[ExhaustProviderRetry]
+        a7[AdvanceEnrichment]
+        a8[Restart]
+        a9[ArmStartupEnrichment]
+        a10[CollectPending]
+        a11[CompleteEnrichment]
+        a12[TruncateReplay]
     end
     subgraph state["State variables"]
         v0([sourceSeq])
@@ -48,11 +50,14 @@ flowchart LR
         v3([fastApplied])
         v4([providerUp])
         v5([retryAttemptsSinceBoundary])
-        v6([workerArmed])
-        v7([enrichmentApplied])
-        v8([volatileCollected])
-        v9([processEpoch])
-        v10([completed])
+        v6([retryAttemptsTotal])
+        v7([workerArmed])
+        v8([completed])
+        v9([volatileCollected])
+        v10([exhausted])
+        v11([repairDebt])
+        v12([enrichmentApplied])
+        v13([processEpoch])
     end
     a0 --> v0
     a0 --> v1
@@ -62,32 +67,45 @@ flowchart LR
     a2 --> v4
     a3 --> v4
     a3 --> v5
+    a3 --> v6
     a4 --> v5
+    a4 --> v6
     v2 -.-> a4
     v4 -.-> a4
-    v6 -.-> a4
+    v7 -.-> a4
     a5 --> v5
-    a6 --> v7
-    v0 -.-> a6
-    v1 -.-> a6
-    v2 -.-> a6
-    v8 -.-> a6
-    a7 --> v8
-    a7 --> v6
-    a7 --> v5
-    a7 --> v9
-    a8 --> v6
-    v9 -.-> a8
-    a9 --> v8
-    v1 -.-> a9
-    v2 -.-> a9
-    a10 --> v2
-    a10 --> v10
-    a10 --> v8
+    a6 --> v2
+    a6 --> v8
+    a6 --> v9
+    a6 --> v5
+    a6 --> v10
+    a6 --> v11
+    v4 -.-> a6
+    v7 -.-> a6
+    v6 -.-> a6
+    a7 --> v12
+    v0 -.-> a7
+    v1 -.-> a7
+    v2 -.-> a7
+    v9 -.-> a7
+    a8 --> v9
+    a8 --> v7
+    a8 --> v5
+    a8 --> v13
+    a9 --> v7
+    v13 -.-> a9
+    a10 --> v9
     v1 -.-> a10
-    v4 -.-> a10
-    v6 -.-> a10
-    a11 --> v1
-    v3 -.-> a11
+    v2 -.-> a10
+    a11 --> v2
+    a11 --> v8
+    a11 --> v9
+    a11 --> v5
+    a11 --> v6
+    v1 -.-> a11
+    v4 -.-> a11
     v7 -.-> a11
+    a12 --> v1
+    v3 -.-> a12
+    v12 -.-> a12
 ```

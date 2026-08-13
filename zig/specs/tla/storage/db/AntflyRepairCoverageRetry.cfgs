@@ -3,12 +3,14 @@
 ==== positive tier=fast
 SPECIFICATION FairSpec
 
-CONSTANT
+CONSTANTS
     BuggyNameScopedCounter = FALSE
+    BuggyIgnoreRepairFence = FALSE
 
 INVARIANTS
     TypeOK
     IncompleteGenerationNeverActivates
+    ReadyGenerationUsesCurrentRepairFence
 
 PROPERTIES
     CoverageCatchUpEventuallyActivates
@@ -18,8 +20,9 @@ PROPERTIES
 \* current-generation outcome tuple during replacement activation.
 SPECIFICATION FairSpec
 
-CONSTANT
+CONSTANTS
     BuggyNameScopedCounter = TRUE
+    BuggyIgnoreRepairFence = FALSE
 
 INVARIANTS
     TypeOK
@@ -27,3 +30,14 @@ INVARIANTS
 
 PROPERTIES
     CoverageCatchUpEventuallyActivates
+
+==== BadRepairFence
+\* A stale repair attempt must not activate after a newer durable revision.
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggyNameScopedCounter = FALSE
+    BuggyIgnoreRepairFence = TRUE
+
+INVARIANTS
+    ReadyGenerationUsesCurrentRepairFence

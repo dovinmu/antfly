@@ -25,6 +25,10 @@ INVARIANTS
     ParticipantRecoveryDoesNotPublishAbortedData
     CleanupRequiresAllResolved
     IdleHasNoDanglingIntents
+    TerminalHandoffIsComplete
+    StableRetryPreservesIdentityAndWrites
+    TerminalOutcomeReflectsDebt
+    PendingPropagationRetainsTerminal
     Safety
 
 ==== BadCleanup

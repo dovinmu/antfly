@@ -2,7 +2,7 @@
 
 # AntflyRepairCoverageRetry — structural diagrams
 
-Generated from [`AntflyRepairCoverageRetry.tla`](../../../storage/db/AntflyRepairCoverageRetry.tla). 3 state variables, 4 actions in `Next`.
+Generated from [`AntflyRepairCoverageRetry.tla`](../../../storage/db/AntflyRepairCoverageRetry.tla). 4 state variables, 6 actions in `Next`.
 
 ## Phase state machines
 
@@ -32,10 +32,12 @@ stateDiagram-v2
 
 | Action | Reads (incl. helper operators) | Writes |
 | --- | --- | --- |
-| `ObserveIncomplete` | `coverageComplete`, `repairPhase` | `repairPhase` |
+| `ObserveIncomplete` | `coverageComplete`, `repairPhase`, `repairRevision` | `repairPhase`, `repairRevision` |
 | `CatchUpCoverage` | `coverageComplete` | `coverageComplete` |
-| `RetryRepair` | `repairPhase`, `attemptParity` | `repairPhase`, `attemptParity` |
-| `ActivateComplete` | `coverageComplete`, `repairPhase` | `repairPhase` |
+| `RetryRepair` | `repairPhase`, `repairRevision` | `repairPhase`, `attemptRevision` |
+| `AdvanceRepairFence` | `repairPhase`, `repairRevision` | `repairRevision` |
+| `RefreshRepairFence` | `repairPhase`, `repairRevision`, `attemptRevision` | `attemptRevision` |
+| `ActivateComplete` | `coverageComplete`, `repairPhase`, `repairRevision`, `attemptRevision` | `repairPhase` |
 
 ## Write graph
 
@@ -47,18 +49,30 @@ flowchart LR
         a0[ObserveIncomplete]
         a1[CatchUpCoverage]
         a2[RetryRepair]
-        a3[ActivateComplete]
+        a3[AdvanceRepairFence]
+        a4[RefreshRepairFence]
+        a5[ActivateComplete]
     end
     subgraph state["State variables"]
         v0([coverageComplete])
         v1([repairPhase])
-        v2([attemptParity])
+        v2([repairRevision])
+        v3([attemptRevision])
     end
     a0 --> v1
+    a0 --> v2
     v0 -.-> a0
     a1 --> v0
     a2 --> v1
-    a2 --> v2
-    a3 --> v1
-    v0 -.-> a3
+    a2 --> v3
+    v2 -.-> a2
+    a3 --> v2
+    v1 -.-> a3
+    a4 --> v3
+    v1 -.-> a4
+    v2 -.-> a4
+    a5 --> v1
+    v0 -.-> a5
+    v2 -.-> a5
+    v3 -.-> a5
 ```

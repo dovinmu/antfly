@@ -10,6 +10,7 @@ SPECIFICATION FairSpec
 CONSTANTS
     BuggyStalePublish = FALSE
     BuggyEmptyPendingAdvance = FALSE
+    BuggyTerminalFailurePoisonsWorker = FALSE
     MaxSeq = 2
 
 INVARIANTS
@@ -22,6 +23,7 @@ INVARIANTS
     RetryableFailureDoesNotAdvanceApplied
     IsolatedFailureRecorded
     WorkerFailureStatusStable
+    TerminalRequestFailureIsIsolated
     Safety
 
 PROPERTIES
@@ -36,6 +38,7 @@ SPECIFICATION Spec
 CONSTANTS
     BuggyStalePublish = FALSE
     BuggyEmptyPendingAdvance = TRUE
+    BuggyTerminalFailurePoisonsWorker = FALSE
     MaxSeq = 2
 
 INVARIANTS
@@ -50,7 +53,23 @@ SPECIFICATION Spec
 CONSTANTS
     BuggyStalePublish = TRUE
     BuggyEmptyPendingAdvance = FALSE
+    BuggyTerminalFailurePoisonsWorker = FALSE
     MaxSeq = 2
 
 INVARIANTS
     PublishedArtifactsSafe
+
+==== BadTerminalFailurePoisonsWorker
+\* A terminal request failure is index-scoped and must not fail the runtime.
+\* Pinned to the isolation invariant.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggyStalePublish = FALSE
+    BuggyEmptyPendingAdvance = FALSE
+    BuggyTerminalFailurePoisonsWorker = TRUE
+    MaxSeq = 2
+
+INVARIANTS
+    TerminalRequestFailureIsIsolated
