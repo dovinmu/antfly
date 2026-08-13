@@ -50,10 +50,6 @@ ResumePersistedIntent ==
     /\ queued' = queued \cup {generation}
     /\ UNCHANGED <<admitted, completed>>
 
-PersistIntent ==
-    /\ event.name = "PersistIntentPhase"
-    /\ generation \in requested
-    /\ UNCHANGED <<requested, queued, admitted, completed>>
 
 AdmitWorker ==
     /\ event.name = "AdmitWorker"
@@ -62,10 +58,6 @@ AdmitWorker ==
     /\ admitted' = admitted \cup {generation}
     /\ UNCHANGED <<requested, queued, completed>>
 
-WorkerDeferred ==
-    /\ event.name \in {"WorkerDeferred", "FailBuild"}
-    /\ generation \in queued
-    /\ UNCHANGED <<requested, queued, admitted, completed>>
 
 SwapGeneration ==
     /\ event.name = "SwapGeneration"
@@ -83,9 +75,7 @@ TraceNext ==
     /\ \/ RequestGeneration
        \/ QueueDurableWork
        \/ ResumePersistedIntent
-       \/ PersistIntent
        \/ AdmitWorker
-       \/ WorkerDeferred
        \/ SwapGeneration
        \/ ObserveReady
     /\ l' = l + 1

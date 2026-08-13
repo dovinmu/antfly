@@ -4,5 +4,6 @@ CHECK_DEADLOCK FALSE
 INVARIANTS
     TypeOK
     WatermarksOrdered
+    SuccessfulPublicationObserved
 PROPERTIES
     TraceMatched

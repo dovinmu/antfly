@@ -14,23 +14,11 @@
 
 --------------------- MODULE TraceAntflyTransactionSession ---------------------
 (*
-  Trace refinement spec for the focused transaction/session model.
-
-  The checked-in fixtures under specs/tla/traces/txn_session_*.ndjson mirror
-  concrete storage/transactions.zig scenarios:
-
-    - rollback-to-savepoint discards staged writes without publishing them;
-    - committed finalized orphan recovery publishes document and identity rows;
-    - aborted finalized orphan recovery publishes neither;
-    - stale pending recovery auto-aborts without publishing;
-    - cleanup is gated on all prepared participants being resolved.
-
-  This is fixture-backed rather than live instrumentation today. To make those
-  fixtures useful, each event can include an `after` record that must match the
-  post-action abstract state, not just the action name.
-
-  Each trace line is ndjson:
-    {"tag":"txn-session-trace","event":{"name":"...","after":{...}}}
+  Fixture-backed trace refinement for AntflyTransactionSession. In addition to
+  savepoint, orphan-recovery, and stale-pending facts, each committed-session
+  fixture carries the durable handoff coordinates, exact terminal outcome,
+  stable transaction identity, write/transform application counts, and
+  propagation-gated cleanup state.
 *)
 
 EXTENDS AntflyTransactionSession, Json, IOUtils, Naturals, Sequences, TLC
@@ -92,6 +80,19 @@ AfterMatches ==
     /\ IF AfterField("stalePending") THEN stalePending' = event.after.stalePending ELSE TRUE
     /\ IF AfterField("rollbackDiscarded") THEN rollbackDiscarded' = event.after.rollbackDiscarded ELSE TRUE
     /\ IF AfterField("cleanedWithUnresolved") THEN cleanedWithUnresolved' = event.after.cleanedWithUnresolved ELSE TRUE
+    /\ IF AfterField("txnId") THEN txnId' = event.after.txnId ELSE TRUE
+    /\ IF AfterField("writeApplications") THEN writeApplications' = event.after.writeApplications ELSE TRUE
+    /\ IF AfterField("transformApplications") THEN transformApplications' = event.after.transformApplications ELSE TRUE
+    /\ IF AfterField("coordinatorGroupId") THEN coordinatorGroup' = event.after.coordinatorGroupId ELSE TRUE
+    /\ IF AfterField("coordinatorTableName") THEN coordinatorTable' = event.after.coordinatorTableName ELSE TRUE
+    /\ IF AfterField("terminalOutcome") THEN terminalOutcome' = event.after.terminalOutcome ELSE TRUE
+    /\ IF AfterField("propagationPending") THEN propagationPending' = event.after.propagationPending ELSE TRUE
+    /\ IF AfterField("visibilityPending") THEN visibilityPending' = event.after.visibilityPending ELSE TRUE
+    /\ IF AfterField("terminalRetained") THEN terminalRetained' = event.after.terminalRetained ELSE TRUE
+    /\ IF AfterField("terminalTxnId") THEN terminalTxnId' = event.after.terminalTxnId ELSE TRUE
+    /\ IF AfterField("terminalWriteApplications") THEN terminalWriteApplications' = event.after.terminalWriteApplications ELSE TRUE
+    /\ IF AfterField("terminalTransformApplications") THEN terminalTransformApplications' = event.after.terminalTransformApplications ELSE TRUE
+    /\ IF AfterField("retryCount") THEN retryCount' = event.after.retryCount ELSE TRUE
     /\ IF AfterField("prepared")
        THEN {p \in Participants : participantPrepared'[p]} = SeqToSet(event.after.prepared)
        ELSE TRUE
@@ -124,6 +125,10 @@ SessionActionFromTrace ==
        /\ CrashFinalizeAbortedOrphan
     \/ /\ LoglineIsEvent("RecoverFinalizedIntents")
        /\ RecoverFinalizedIntents
+    \/ /\ LoglineIsEvent("ReachVisibility")
+       /\ ReachVisibility
+    \/ /\ LoglineIsEvent("StableRetry")
+       /\ StableRetry
     \/ /\ LoglineIsEvent("Cleanup")
        /\ Cleanup
     \/ \E p \in Participants:

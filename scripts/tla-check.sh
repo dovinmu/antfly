@@ -2,7 +2,8 @@
 # The TLA+ check runner. Everything TLA-related that is not TLC itself lives
 # here; the Makefile only provides names (tla-check, tla-trace, tla-clean).
 #
-#   tla-check.sh gate               audit + smoke + core + fast + all mutants
+#   tla-check.sh gate               audit + smoke + core + fast + checked-in
+#                                   positive traces + all mutants/negative traces
 #   tla-check.sh tier <name>        run every positive check in a tier
 #                                   (core | fast | heavy | manual)
 #   tla-check.sh run <check-id>     run one check by id
@@ -123,6 +124,22 @@ run_expect_fail() { # $1 = check-id
     fi
 }
 
+run_trace_expect_fail() { # $1 = trace model; $2 = fixture
+    local model="$1" fixture="$2" out status=0
+    resolve_paths "$model" "$model" "$model" || return 1
+    echo "==> Validating expected-failure trace fixture ${fixture}..."
+    out="$(bash "${SCRIPT_DIR}/tla-validate-trace.sh" -S -p 1 \
+        -s "$TLC_SPEC" -c "$TLC_CFG" "$fixture" 2>&1)" || status=$?
+    echo "$out"
+    if [ "$status" -eq 0 ]; then
+        echo "ERROR: expected ${fixture} to fail validation, but it passed"; return 1
+    elif echo "$out" | grep -qE "Invariant .* is violated|Temporal property .* (is |was )?violated"; then
+        echo "OK: ${fixture} failed as expected"
+    else
+        echo "ERROR: ${fixture} failed, but not on an invariant/property violation (trace, spec, or config error?)"; return 1
+    fi
+}
+
 run_tier() { # $1 = tier
     local ids
     ids="$(enumerate | awk -F'\t' -v t="$1" '$4 == t {print $1}')"
@@ -130,7 +147,29 @@ run_tier() { # $1 = tier
     for id in $ids; do run_positive "$id" || return 1; done
 }
 
-# Negative trace fixtures: trace-model + fixture that must FAIL validation.
+# Checked-in positive trace fixtures. These replay through the default gate;
+# implementation-emitted raft and transaction capture remains a separate run.
+POSITIVE_TRACE_FIXTURES=(
+    "txn-session ${SPEC_ROOT}/traces/txn_session_savepoint.ndjson ${SPEC_ROOT}/traces/txn_session_orphan_recovery.ndjson ${SPEC_ROOT}/traces/txn_session_stale_pending.ndjson"
+    "ha ${SPEC_ROOT}/traces/ha_sync_apply.ndjson ${SPEC_ROOT}/traces/ha_timeline_switch.ndjson ${SPEC_ROOT}/traces/ha_rejoin.ndjson"
+    "split-bridge ${SPEC_ROOT}/traces/split_bridge_cutover.ndjson ${SPEC_ROOT}/traces/split_bridge_rollback.ndjson"
+    "doc-identity-range-repair ${SPEC_ROOT}/traces/doc_identity_restore_namespace_reject.ndjson ${SPEC_ROOT}/traces/doc_identity_restore_repair_order.ndjson"
+    "placement-readiness ${SPEC_ROOT}/traces/placement_readiness_b1_recovery.ndjson"
+    "index-lifecycle ${SPEC_ROOT}/traces/index_lifecycle_two_generations.ndjson"
+    "derived-replay ${SPEC_ROOT}/traces/derived_replay_hint_fallback.ndjson"
+    "enrichment-lease ${SPEC_ROOT}/traces/enrichment_lease_publish.ndjson"
+)
+
+run_positive_traces() {
+    local entry family fixtures
+    for entry in "${POSITIVE_TRACE_FIXTURES[@]}"; do
+        read -r family fixtures <<<"$entry"
+        TRACE_FILES="$fixtures" run_trace "$family" || return 1
+    done
+}
+
+# Negative trace fixtures: trace-model + fixture that must fail on a semantic
+# invariant or temporal-property violation.
 NEG_TRACE_FIXTURES=(
     "TraceAntflyTransactionSession ${SPEC_ROOT}/traces/negative/txn_session_bad_cleanup.ndjson"
     "TraceAntflySplitRefinementBridge ${SPEC_ROOT}/traces/negative/split_bridge_route_before_db_serving.ndjson"
@@ -139,25 +178,20 @@ NEG_TRACE_FIXTURES=(
     "TraceAntflyPlacementReadiness ${SPEC_ROOT}/traces/negative/placement_readiness_unknown_latches_ambiguity.ndjson"
     "TraceAntflyIndexLifecycle ${SPEC_ROOT}/traces/negative/index_lifecycle_lost_second_wakeup.ndjson"
     "TraceAntflyDerivedReplay ${SPEC_ROOT}/traces/negative/derived_replay_advance_beyond_target.ndjson"
+    "TraceAntflyDerivedReplay ${SPEC_ROOT}/traces/negative/derived_replay_unfinished_catchup.ndjson"
     "TraceAntflyEnrichmentLease ${SPEC_ROOT}/traces/negative/enrichment_stale_owner_publish.ndjson"
     "TraceAntflyEnrichmentLease ${SPEC_ROOT}/traces/negative/enrichment_lease_immediate_retry.ndjson"
+    "TraceAntflyEnrichmentLease ${SPEC_ROOT}/traces/negative/enrichment_publish_without_sequence.ndjson"
 )
 
 run_negative() {
     for id in $(enumerate | awk -F'\t' '$4 == "negative" {print $1}'); do
         run_expect_fail "$id" || return 1
     done
-    local model fixture
+    local entry model fixture
     for entry in "${NEG_TRACE_FIXTURES[@]}"; do
         read -r model fixture <<<"$entry"
-        resolve_paths "$model" "$model" "$model" || return 1
-        echo "==> Validating expected-failure trace fixture ${fixture}..."
-        if bash "${SCRIPT_DIR}/tla-validate-trace.sh" -S -p 1 \
-            -s "$TLC_SPEC" -c "$TLC_CFG" "$fixture"; then
-            echo "ERROR: expected ${fixture} to fail validation, but it passed"; return 1
-        else
-            echo "OK: ${fixture} failed as expected"
-        fi
+        run_trace_expect_fail "$model" "$fixture" || return 1
     done
 }
 
@@ -190,7 +224,12 @@ run_trace() { # $1 = family; TRACE_FILES env required
         local validated=0 filtered segdir segments
         for f in $TRACE_FILES; do
             filtered="$(mktemp)"
-            python3 "${SCRIPT_DIR}/tla-filter-txn-trace.py" < "$f" > "$filtered" || { rm -f "$filtered"; return 1; }
+            if python3 "${SCRIPT_DIR}/tla-filter-txn-trace.py" < "$f" > "$filtered"; then
+                :
+            elif [ "$?" -ne 3 ]; then
+                rm -f "$filtered"
+                return 1
+            fi
             if [ -s "$filtered" ]; then
                 segdir="$(mktemp -d)"
                 python3 "${SCRIPT_DIR}/tla-segment-txn-trace.py" "$filtered" "$segdir" || { rm -f "$filtered"; rm -rf "$segdir"; return 1; }
@@ -311,8 +350,8 @@ run_audit() {
 
 case "${1:-}" in
 gate)
-    run_audit && run_smoke && run_tier core && run_tier fast && run_negative && \
-        echo "== tla-check gate: OK"
+    run_audit && run_smoke && run_tier core && run_tier fast && \
+        run_positive_traces && run_negative && echo "== tla-check gate: OK"
     ;;
 tier)  run_tier "${2:?usage: tla-check.sh tier <core|fast|heavy|manual>}" ;;
 run)

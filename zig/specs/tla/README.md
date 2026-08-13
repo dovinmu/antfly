@@ -32,21 +32,27 @@ artifact already exists (e.g. the generated-OpenAPI freshness checks), prefer
 it over a model of the artifact. Routed-away work is tracked in
 `INVENTORY.md` so it is not forgotten.
 
-## Keeping Models Current
+## Evidence Layers
 
-Three layers, in decreasing order of automation:
+The suite keeps four kinds of evidence distinct:
 
-1. **Zig correspondence tests** (in the normal test suite) anchor the
-   models' load-bearing assumptions; they fail on real drift, including
-   after toolchain updates.
-2. **CI** runs the full gate whenever specs or the TLA scripts change, and
-   validates implementation-emitted raft/transaction traces whenever the
-   traced code changes (`zig-tests.yml` `tla-verify`).
-3. **Review discipline**: `INVENTORY.md` maps code files to models. A PR
-   touching an anchored file should re-run that model and its mutants
-   (`make tla-check CHECK=<id>`) and update the model if the contract
-   changed. Useful/Sketch-tier models have no executable tripwire; review
-   is the only guard there.
+1. **Bounded TLC models** exhaust the state spaces declared by their configs.
+   They prove properties only within those abstractions and bounds.
+2. **Checked-in fixture replay** runs representative positive traces through
+   trace modules in the default gate; negative fixtures must fail on a named
+   invariant or temporal-property violation.
+3. **Implementation correspondence** combines Zig tests with the pre-existing
+   live raft and local-transaction trace generation runs. Live generation is
+   intentionally limited to those two families.
+4. **Manual protocol capture** is an opt-in incident/reproducer tool for
+   placement readiness, index lifecycle, derived replay, and enrichment lease.
+   It is not part of ordinary server operation.
+
+`INVENTORY.md` maps implementation anchors to models. A change to an anchored
+ordering contract should rerun the corresponding check and mutants with
+`make tla-check CHECK=<id>`, and update the model when that contract changes.
+Useful/Sketch-tier models have no executable tripwire and remain a review
+obligation.
 
 
 ## Layout
@@ -68,11 +74,12 @@ checks as named sections in verbatim TLC config syntax:
     SPECIFICATION Spec
     ...
 
-The build extracts sections into `specs/tla/.generated/` at run time
-(`scripts/tla-check.sh`); section names match the make-target check ids
-(`positive`, `Bad*` mutants, `heavy-*`/`safety` variants). To hand-run one
-check: `bash ../scripts/tla-check.sh <CheckId> <Model>` prints the generated
-config path and the spec path to pass to TLC.
+The dispatcher extracts sections into `specs/tla/.generated/` at run time.
+Section names map to check ids (`positive`, `Bad*` mutants, and
+`heavy-*`/`safety` variants). From `zig/`, use
+`bash ../scripts/tla-check.sh run <check-id>` for one check,
+`bash ../scripts/tla-check.sh tier <core|fast|heavy|manual>` for one tier, or
+the Make targets below.
 
 ## Model Header Template
 
@@ -95,9 +102,13 @@ config header comment.
 
 ### Transaction Protocol
 
-Formal verification of the distributed 2PC + OCC + recovery + cleanup protocol.
+Formal verification separates the local `TxnManager` OCC, intent-resolution,
+stale-pending recovery, and cleanup contract from distributed coordinator
+outcome recovery.
 
-- `AntflyTransaction.tla` -- Main specification (11 actions, 6 safety invariants, 3 liveness properties)
+- `AntflyTransaction.tla` -- Local OCC and intent lifecycle specification
+- `AntflyDistributedTransactionRecovery.tla` -- Durable distributed
+  coordinator decision, retry, propagation, visibility, and cleanup contract
 - `MC.tla` -- Model checking module with concrete constants for a small model
 - `AntflyTransaction.cfgs` -- TLC configuration
 - `AntflyTransactionBadSkipIntentConflict` -- Expected-failure pending-intent conflict mutant used by `bash ../scripts/tla-check.sh negative`
@@ -242,9 +253,10 @@ These specs are bounded around cohesive protocols and lifecycles, not individual
 - `AntflyDocumentIdentityRangeRepairBadRestoreNamespace` -- Expected-failure strict deferred restore accepts a mismatched doc identity namespace mutant used by `bash ../scripts/tla-check.sh negative`.
 - `AntflyDocumentIdentityRangeRepairBadRestoreEarlyClear` -- Expected-failure restore intent clears before import recovery and runtime repair complete mutant used by `bash ../scripts/tla-check.sh negative`.
 - `TraceAntflyDocumentIdentityRangeRepair.tla` -- Trace fixture validator for document identity range/restore repair sequences, including strict deferred restore namespace rejection and import recovery before runtime repair/intent clear.
-- `TraceAntflyDocumentIdentityRangeRepair.cfgs` -- Trace validation config used by `make tla-trace-doc-identity-range-repair`.
+- `TraceAntflyDocumentIdentityRangeRepair.cfgs` -- Trace validation config
+  selected by `make tla-trace TRACE=doc-identity-range-repair`
 - `traces/doc_identity_restore_namespace_reject.ndjson` and `traces/doc_identity_restore_repair_order.ndjson` -- Checked-in positive restore repair fixtures.
-- `traces/negative/doc_identity_restore_accept_mismatch.ndjson` and `traces/negative/doc_identity_restore_early_clear.ndjson` -- Expected-failure restore repair fixtures used by trace-negative targets.
+- `traces/negative/doc_identity_restore_accept_mismatch.ndjson` and `traces/negative/doc_identity_restore_early_clear.ndjson` -- Expected-failure restore repair fixtures used by the negative gate.
 - `AntflyTransactionSession.tla` -- Session savepoints over distributed transaction prepare/commit/abort/recovery/resolve/cleanup, with committed-base visibility separated from staged writes, crash-finalized orphan intent recovery, identity-row side effects, and participant cleanup gating.
 - `AntflyTransactionSessionBadRollback` -- Expected-failure rollback leakage mutant used by `bash ../scripts/tla-check.sh negative`.
 - `AntflyTransactionSessionBadRecoveryDecision` -- Expected-failure aborted-orphan wrong recovery decision mutant used by `bash ../scripts/tla-check.sh negative`.
@@ -297,11 +309,16 @@ Validates that the zig raft implementation (`../raft/`) conforms to `etcdraft.tl
 
 ### Transaction Trace Validation
 
-Validates that the distributed transaction implementation conforms to `AntflyTransaction.tla` by replaying ndjson traces. Constants (transactions, shards, keys) are derived from the trace file -- no MC module needed.
+Replays implementation-emitted local `TxnManager` OCC lifecycle traces through
+`AntflyTransaction.tla`. Recovery-only and distributed-coordinator outcomes are
+excluded rather than treated as model correspondence; the filter reports every
+excluded transaction id and its first unsupported event on stderr. Constants
+(transactions, shards, and keys) are derived from the accepted trace.
 
 - `TraceAntflyTransaction.tla` -- Trace refinement spec
-- `TraceAntflyTransaction.cfgs` -- TLC configuration (checks `TraceMatched` and 5 safety invariants)
-- `../../scripts/tla-filter-txn-trace.py` -- Filters transaction traces for spec compatibility
+- `TraceAntflyTransaction.cfgs` -- TLC configuration
+- `../../scripts/tla-filter-txn-trace.py` -- Compatibility filter; validation
+  fails if no spec-compatible transaction remains
 
 ### Transaction Session Trace Fixture Validation
 
@@ -334,67 +351,103 @@ Validates checked-in split bridge fixtures against `AntflySplitRefinementBridge.
 - `traces/split_bridge_rollback.ndjson` -- Positive rollback fixture covering no child exposure after rollback
 - `traces/negative/split_bridge_route_before_db_serving.ndjson` -- Expected-failure fixture where metadata routes to the child before DB serving is published
 
-### Loading-Path Live Trace Validation
+### Protocol Trace Fixtures and Manual Capture
 
-With `-Dwith_tla=true`, metadata aggregation and managed index repair emit
-implementation observations for the July-25 B1 and B5 contracts. Ordinary
-builds compile the emitters out. `../../scripts/extract-protocol-traces.py`
-extracts per-group behaviors from mixed process logs before TLC replay.
+The default gate replays every checked-in positive fixture before it runs the
+negative model and trace checks:
 
-- `TraceAntflyPlacementReadiness.tla` checks qualified voter-set evidence,
-  unknown fallback reports, conflicting fingerprints, and exact stable
-  transition admission.
-- `TraceAntflyIndexLifecycle.tla` checks that every committed managed
-  generation publishes durable work, worker admission follows that work, and
-  replacement publication remains tied to the requested config generation.
-- `TraceAntflyDerivedReplay.tla` checks hint-lane and replay-all fallback scan
-  accounting plus catch-up watermark ordering.
-- `TraceAntflyEnrichmentLease.tla` checks the durable lease record—not only the
-  worker's cached ownership bit—at generated publication and checkpoint
-  advancement.
-- `traces/placement_readiness_b1_recovery.ndjson` and
-  `traces/index_lifecycle_two_generations.ndjson`,
-  `traces/derived_replay_hint_fallback.ndjson`, and
-  `traces/enrichment_lease_publish.ndjson` are positive fixtures.
-- `traces/negative/placement_readiness_unknown_latches_ambiguity.ndjson` and
-  `traces/negative/index_lifecycle_lost_second_wakeup.ndjson`,
-  `traces/negative/derived_replay_advance_beyond_target.ndjson`, and
-  `traces/negative/enrichment_stale_owner_publish.ndjson` prove that the
-  validators reject the corresponding failure shapes.
+- transaction session: `txn_session_savepoint.ndjson`,
+  `txn_session_orphan_recovery.ndjson`, `txn_session_stale_pending.ndjson`;
+- HA: `ha_sync_apply.ndjson`, `ha_timeline_switch.ndjson`, `ha_rejoin.ndjson`;
+- split bridge: `split_bridge_cutover.ndjson`, `split_bridge_rollback.ndjson`;
+- document identity range repair: `doc_identity_restore_namespace_reject.ndjson`,
+  `doc_identity_restore_repair_order.ndjson`;
+- one fixture each for placement readiness
+  (`placement_readiness_b1_recovery.ndjson`), index lifecycle
+  (`index_lifecycle_two_generations.ndjson`), derived replay
+  (`derived_replay_hint_fallback.ndjson`), and enrichment lease
+  (`enrichment_lease_publish.ndjson`).
+
+The matching trace modules validate bounded protocol facts. Negative fixtures
+must be rejected by a semantic invariant or temporal property; a malformed
+trace, missing tool, or generic nonzero validator exit does not count.
+
+`derived_replay_unfinished_catchup.ndjson` pins trace-end catch-up closure, and
+`enrichment_publish_without_sequence.ndjson` pins successful-publication
+evidence. They reject the old incomplete/pre-append trace boundaries.
+
+The last four families also support sparse implementation capture for an
+incident or focused reproducer. Capture is doubly opt-in: build the focused
+target with `-Dwith_tla=true`, set `ANTFLY_TRACE_FILE` to a nonempty path, and
+list each exact comma-separated family token in `ANTFLY_TRACE_FAMILIES`; there
+is no implicit `all`. Ordinary builds and missing/empty variables emit no
+protocol trace. This is not an always-on server feature.
+
+Bound raw captures externally per node to **24 hours or 100 MiB, whichever
+comes first**, then remove them after the incident/reproducer. For example,
+GNU `timeout` supplies the time boundary and the subshell file-size limit
+supplies the byte boundary:
 
 ```bash
-python3 ../scripts/extract-protocol-traces.py placement-readiness /tmp/placement /tmp/antfly.log
-python3 ../scripts/extract-protocol-traces.py index-lifecycle /tmp/index /tmp/antfly.log
-python3 ../scripts/extract-protocol-traces.py derived-replay /tmp/replay /tmp/antfly.log
-python3 ../scripts/extract-protocol-traces.py enrichment-lease /tmp/lease /tmp/antfly.log
-make tla-trace TRACE=placement-readiness TRACE_FILES="/tmp/placement/*.ndjson"
-make tla-trace TRACE=index-lifecycle TRACE_FILES="/tmp/index/*.ndjson"
-make tla-trace TRACE=derived-replay TRACE_FILES="/tmp/replay/*.ndjson"
-make tla-trace TRACE=enrichment-lease TRACE_FILES="/tmp/lease/*.ndjson"
+(
+  ulimit -f 102400
+  timeout --signal=TERM 24h env \
+    ANTFLY_TRACE_FILE=/tmp/derived-replay.ndjson \
+    ANTFLY_TRACE_FAMILIES=derived-replay \
+    zig build lib-db-enrichment-replay-test -Dwith_tla=true -j2 -- \
+      --test-filter "replay source primary store falls back to all lane when hint lane is missing"
+)
+python3 ../scripts/extract-protocol-traces.py \
+  derived-replay /tmp/derived-replay-segments /tmp/derived-replay.ndjson
+make tla-trace TRACE=derived-replay \
+  TRACE_FILES="/tmp/derived-replay-segments/*.ndjson"
 ```
+
+Use the same procedure with `placement-readiness`, `index-lifecycle`, or
+`enrichment-lease`. The capture contains protocol facts, not provider
+payloads, artifact bytes, or general application logging. There is no server
+rotation, sampling, or production-retention facility.
 
 ## Makefile Targets
 
-Four verification targets (everything else is a subcommand of
-scripts/tla-check.sh), plus three visualization targets (see Visualizations).
+The generic verification interface has exactly four targets:
 
 ```bash
-make tla-check                  # full gate: audit + parse + core + fast + all mutants
-make tla-check TIER=heavy       # heavy tier (large state spaces; also: core, fast, manual)
-make tla-check CHECK=<id>       # one check, e.g. CHECK=AntflyIndexLifecycleBadSwapIncomplete
+make tla-tools                  # acquire/check the TLA+ toolchain
+make tla-check                  # audit, parse, core/fast, fixtures, negatives
+make tla-check TIER=heavy       # one tier: core, fast, heavy, or manual
+make tla-check CHECK=<id>       # one positive or expected-failure check
 make tla-trace TRACE=<family> TRACE_FILES=...   # NDJSON trace validation
 make tla-clean                  # remove TLC runtime artifacts
-
-make tla-viz                    # regenerate structural diagrams (specs/tla/diagrams/)
-make tla-viz-check              # fail if committed diagrams are stale
-make tla-viz-trace JSON=<file>  # render one NDJSON trace to an HTML timeline
-
-# Direct runner subcommands (from zig/):
-bash ../scripts/tla-check.sh list       # every check with its tier
-bash ../scripts/tla-check.sh audit      # static hygiene audit
-bash ../scripts/tla-check.sh smoke      # SANY-parse only
-bash ../scripts/tla-check.sh negative   # all expected-failure checks
 ```
+
+All visualization targets are separate, optional debugging/readability tools;
+their output is not model-correctness evidence:
+
+```bash
+make tla-viz                    # regenerate structural diagrams
+make tla-viz-check              # check committed structural diagrams
+make tla-viz-trace JSON=<file>  # render selected trace files to HTML
+make tla-viz-traces             # render all checked-in fixtures to one HTML
+```
+
+Current dispatcher syntax from `zig/`:
+
+```bash
+bash ../scripts/tla-check.sh gate
+bash ../scripts/tla-check.sh tier <core|fast|heavy|manual>
+bash ../scripts/tla-check.sh run <check-id>
+bash ../scripts/tla-check.sh negative
+bash ../scripts/tla-check.sh smoke
+bash ../scripts/tla-check.sh audit
+bash ../scripts/tla-check.sh list
+TRACE_FILES="..." bash ../scripts/tla-check.sh trace <family>
+```
+
+The recorded deferred work remains out of this gate: 21
+Safety-conjunction-pinned mutants, nine liveness-mutant items, and the
+documented small-bound expansion backlog. `INVENTORY.md` is authoritative for
+those lists; this rebase does not pull them into the default tier.
 
 ## Visualizations
 
@@ -490,9 +543,8 @@ Checked-in fixtures can validate the restore repair boundary without invoking
 the broad DB test suite:
 
 ```bash
-make tla-trace-doc-identity-range-repair TRACE_FILES="specs/tla/traces/doc_identity_restore_*.ndjson"
-make tla-trace TRACE=doc-identity-range-repair TRACE_FILES="specs/tla/traces/doc_identity_restore_*.ndjson"
-bash ../scripts/tla-check.sh negative
+make tla-trace TRACE=doc-identity-range-repair \
+  TRACE_FILES="specs/tla/traces/doc_identity_restore_*.ndjson"
 bash ../scripts/tla-check.sh negative
 ```
 
@@ -509,8 +561,8 @@ Build the zig raft tests with tracing enabled, then validate the trace:
 # 1. Build and run raft tests, capturing trace to stderr
 ~/bin/zig build -Dwith_tla=true raft-test 2>/tmp/zig-raft-trace.ndjson
 
-# 2. Segment + validate (the Makefile target does both)
-make tla-trace-raft TRACE_FILES=/tmp/zig-raft-trace.ndjson
+# 2. Segment + validate (the generic target does both)
+make tla-trace TRACE=raft TRACE_FILES=/tmp/zig-raft-trace.ndjson
 ```
 
 The pipeline:
@@ -754,16 +806,7 @@ The model in `SnapshotTransferMC.tla` uses:
 ### Running
 
 ```bash
-make tla-check-lsm
-```
-
-or directly:
-
-```bash
-cd zig/specs/tla
-java -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC \
-    AntflyLsmLifecycle.tla \
-    -config AntflyLsmLifecycle.cfgs -workers auto -deadlock
+make tla-check CHECK=AntflyLsmLifecycle
 ```
 
 ### What it Verifies

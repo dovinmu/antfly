@@ -13,19 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Filter antfly-trace ndjson to keep only transactions with TLA+ spec-compatible lifecycles.
+"""Keep transactions whose lifecycle is compatible with AntflyTransaction.
 
-The AntflyTransaction TLA+ spec models these txnStatus transitions:
+The model covers the local TxnManager OCC lifecycle:
   idle → preparing (InitTransaction)
   preparing → predicatesChecked (CheckPredicates)
-  predicatesChecked → predicatesChecked (WriteIntentOnShard, no status change)
+  predicatesChecked → predicatesChecked (WriteIntentOnShard)
   predicatesChecked → aborting (WriteIntentFails)
   predicatesChecked → committed (CommitTransaction)
   aborting → aborted (AbortTransaction)
   committed/aborted → (ResolveIntentsOnShard, CleanupTxnRecord)
 
-Events from recovery tests, retries, or external aborts don't match the spec
-and are dropped. Incomplete-but-valid prefixes are kept (CHECK_DEADLOCK FALSE).
+Recovery, distributed-coordinator, retry, and external-abort events outside
+that lifecycle exclude the transaction. Each exclusion reports its transaction
+id and first unsupported event to stderr. Incomplete valid prefixes remain
+eligible (`CHECK_DEADLOCK FALSE`).
 
 Usage:
   python3 tla-filter-txn-trace.py < trace.ndjson > filtered.ndjson
@@ -82,20 +84,30 @@ def main():
     valid_txns = set()
     for txn_id, events in events_by_txn.items():
         state = "idle"
-        valid = True
+        first_unsupported = None
         for _, obj in events:
             name = obj["event"]["name"]
-            # RecoveryResolve/RecoveryAutoAbort are recovery-only events
-            if name in ("RecoveryResolve",):
-                valid = False
-                break
-            allowed = VALID_TRANSITIONS.get(state, set())
-            if name not in allowed:
-                valid = False
+            # RecoveryResolve is outside the local OCC lifecycle modeled by
+            # AntflyTransaction, as is any event not enabled in this state.
+            if (
+                name == "RecoveryResolve"
+                or name not in VALID_TRANSITIONS.get(state, set())
+            ):
+                first_unsupported = name
                 break
             state = NEXT_STATE.get(name, state)
-        if valid:
+        if first_unsupported is None:
             valid_txns.add(txn_id)
+        else:
+            print(
+                f"excluded transaction {txn_id}: first unsupported event "
+                f"{first_unsupported}",
+                file=sys.stderr,
+            )
+    if not valid_txns:
+        print("no spec-compatible transactions remain", file=sys.stderr)
+        return 3
+
 
     # Output events for valid transactions in original order
     for _, obj in all_events:
@@ -104,4 +116,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -6,3 +6,4 @@ INVARIANTS
     WatermarksOrdered
 PROPERTIES
     TraceMatched
+    CatchUpClosedAtTraceEnd

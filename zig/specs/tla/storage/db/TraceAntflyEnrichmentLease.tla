@@ -22,13 +22,11 @@ facts == event.facts
 
 ObserveWorker ==
     /\ event.name \in {
-        "AcquireLease", "CollectPending", "PublishGenerated",
-        "AdvanceApplied", "RetryTransient", "FatalWorkerFailure",
-        "IsolateRequestFailure"
+        "AcquireLease", "PublishGenerated", "AdvanceApplied"
        }
     /\ event.name = "AcquireLease" => ~denialCooling
     /\ facts.appliedSequence <= facts.targetSequence
-    /\ event.name \in {"PublishGenerated", "AdvanceApplied"} => facts.leaseValid
+    /\ event.name = "AdvanceApplied" => facts.leaseValid
     /\ applied' = facts.appliedSequence
     /\ target' = facts.targetSequence
     /\ UNCHANGED denialCooling
@@ -57,5 +55,8 @@ Spec == Init /\ [][TraceNext]_vars
 TypeOK == /\ l \in Nat /\ applied \in Nat /\ target \in Nat /\ denialCooling \in BOOLEAN
 WatermarksOrdered == applied <= target
 TraceMatched == [](l <= Len(TraceLog) => [](TLCGet("queue") = 1 \/ l > Len(TraceLog)))
+SuccessfulPublicationObserved ==
+    l <= Len(TraceLog) /\ event.name = "PublishGenerated" =>
+        facts.lastSequence > 0 /\ facts.leaseValid
 
 =============================================================================

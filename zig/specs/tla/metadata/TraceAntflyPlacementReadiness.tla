@@ -87,18 +87,16 @@ Recompute ==
     /\ knownFingerprints' = {}
 
 TransitionDecision ==
-    /\ event.name \in {"StartTransition", "RejectTransition"}
-    /\ IF event.name = "StartTransition"
-       THEN /\ facts.stablePlacement
-            /\ facts.leaderKnown
-            /\ facts.leaderPlaced
-            /\ facts.voterCountKnown
-            /\ facts.voterSetKnown
-            /\ ~facts.ambiguous
-            /\ ~facts.jointConsensus
-            /\ facts.voterCount = facts.expectedVoters
-            /\ facts.healthyVoterReports = facts.expectedVoters
-       ELSE ~facts.stablePlacement
+    /\ event.name = "StartTransition"
+    /\ facts.stablePlacement
+    /\ facts.leaderKnown
+    /\ facts.leaderPlaced
+    /\ facts.voterCountKnown
+    /\ facts.voterSetKnown
+    /\ ~facts.ambiguous
+    /\ ~facts.jointConsensus
+    /\ facts.voterCount = facts.expectedVoters
+    /\ facts.healthyVoterReports = facts.expectedVoters
     /\ UNCHANGED <<fallbackIndex, fallbackCounts,
                    knownIndex, knownCounts, knownFingerprints>>
 

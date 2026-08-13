@@ -66,5 +66,6 @@ Spec == Init /\ [][TraceNext]_vars
 TypeOK == /\ l \in Nat /\ active \in BOOLEAN /\ applied \in Nat /\ target \in Nat
 WatermarksOrdered == target = 0 \/ applied <= target
 TraceMatched == [](l <= Len(TraceLog) => [](TLCGet("queue") = 1 \/ l > Len(TraceLog)))
+CatchUpClosedAtTraceEnd == [](l > Len(TraceLog) => ~active)
 
 =============================================================================
