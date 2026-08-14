@@ -17,6 +17,7 @@ const group_ids = @import("../common/group_ids.zig");
 const placement_planner = @import("placement_planner.zig");
 const raft_reconciler = @import("../raft/reconciler.zig");
 const table_manager = @import("table_manager.zig");
+const placement_trace = @import("placement_trace.zig");
 const platform_clock = @import("antfly_platform").clock;
 const platform_time = @import("antfly_platform").time;
 const reallocation_request = @import("reallocation_request.zig");
@@ -1537,7 +1538,16 @@ const StoreEvidenceIndex = struct {
             return false;
         }
         const expected_count: u16 = @intCast(topology.voter_count);
-        return status.leader_known and
+        // The merged leader identity is a store id while topology is keyed by
+        // node id. Exact voter-set fingerprint equality below is the placement
+        // proof available at this boundary; do not compare unlike ids.
+        const leader_placed = status.leader_known and
+            std.mem.eql(
+                u8,
+                &status.voter_set_fingerprint,
+                &topology.voter_set_fingerprint,
+            );
+        const stable = status.leader_known and
             status.readiness_from_leader and
             status.voter_count_known and
             status.voter_set_known and
@@ -1548,6 +1558,8 @@ const StoreEvidenceIndex = struct {
                 &status.voter_set_fingerprint,
                 &topology.voter_set_fingerprint,
             );
+        if (stable) placement_trace.transitionAdmission(status, expected_count, leader_placed);
+        return stable;
     }
 
     fn relocationSource(self: *const StoreEvidenceIndex, group_id: u64) ?raft_reconciler.PlacementIntent {
@@ -2835,6 +2847,7 @@ fn mergeHealthyGroupStatusFallback(
                 healthy_voter_reports +|= 1;
                 counted_voter_for_store = true;
             }
+            placement_trace.observeReport("ObserveReportReconciler", store.store_id, status);
             leader_evidence.observe(store.store_id, status);
             voter_set_evidence.observe(status);
             transition_pending = transition_pending or status.transition_pending;
@@ -2887,6 +2900,12 @@ fn mergeHealthyGroupStatusFallback(
         merged.cutover_ready = leader.report.cutover_ready;
         merged.reads_ready_after_cutover = leader.report.reads_ready_after_cutover;
     }
+    placement_trace.recomputeEvidence(
+        "RecomputeEvidenceReconciler",
+        merged,
+        voter_set_evidence.ambiguous_known_voter_set or
+            voter_set_evidence.ambiguous_fallback_voter_count,
+    );
     return merged;
 }
 

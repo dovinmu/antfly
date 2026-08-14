@@ -1,0 +1,82 @@
+\* All TLC check configs for AntflySplitRefinementBridge.tla, one section per check.
+\* Sections are verbatim TLC config syntax; the build extracts them
+\* (scripts/tla-cfg.sh). Section names match the make-target check ids.
+
+==== positive tier=fast
+\* TLC config for AntflySplitRefinementBridge.tla
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggyRouteBeforeDbServing = FALSE
+    BuggyDbServeBeforeShardCutover = FALSE
+    BuggyCompleteWithStaleFence = FALSE
+    BuggyBootstrapWithoutStablePlacement = FALSE
+
+INVARIANTS
+    TypeOK
+    ReplayNeverExceedsDelta
+    ShardCutoverRequiresCurrentReplay
+    DestinationBootstrapRequiresStablePlacement
+    DbServingRequiresShardCutoverAndIndexes
+    MetadataChildRouteRequiresBothLayersReady
+    ParentAndChildDoNotBothAcceptRight
+    RollbackDoesNotExposeChild
+    Safety
+
+==== BadDbServeBeforeShardCutover
+\* Expected-failure mutant: DB child serving becomes visible before shard-level cutover readiness.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggyRouteBeforeDbServing = FALSE
+    BuggyDbServeBeforeShardCutover = TRUE
+    BuggyCompleteWithStaleFence = FALSE
+    BuggyBootstrapWithoutStablePlacement = FALSE
+
+INVARIANTS
+    Safety
+
+==== BadRouteBeforeDbServing
+\* Expected-failure mutant: metadata routes right range to child before DB child serving is published.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggyRouteBeforeDbServing = TRUE
+    BuggyDbServeBeforeShardCutover = FALSE
+    BuggyCompleteWithStaleFence = FALSE
+    BuggyBootstrapWithoutStablePlacement = FALSE
+
+INVARIANTS
+    Safety
+
+==== BadStaleFenceCutover
+\* Expected-failure mutant: shard cutover completes using a stale fence after newer split deltas arrive.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggyRouteBeforeDbServing = FALSE
+    BuggyDbServeBeforeShardCutover = FALSE
+    BuggyCompleteWithStaleFence = TRUE
+    BuggyBootstrapWithoutStablePlacement = FALSE
+
+INVARIANTS
+    Safety
+
+==== BadBootstrapWithoutStablePlacement
+\* Expected-failure mutant: a known destination leader is treated as
+\* sufficient even though the placement-status protocol has not established
+\* a known exact voter set.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggyRouteBeforeDbServing = FALSE
+    BuggyDbServeBeforeShardCutover = FALSE
+    BuggyCompleteWithStaleFence = FALSE
+    BuggyBootstrapWithoutStablePlacement = TRUE
+
+INVARIANT DestinationBootstrapRequiresStablePlacement

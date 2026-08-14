@@ -1,0 +1,153 @@
+\* All TLC check configs for AntflyDistributedTransactionRecovery.tla.
+
+==== positive tier=fast
+SPECIFICATION Spec
+
+CONSTANTS
+    Participants = {p1, p2}
+    Coordinator = p1
+    MaxEpoch = 2
+    MaxRetry = 2
+    BuggyCommitWithoutPrepare = FALSE
+    BuggyCommitStaleEpoch = FALSE
+    BuggyAbortAfterCommit = FALSE
+    BuggyPreparedFollowerAbort = FALSE
+    BuggyRetryNewTransaction = FALSE
+    BuggyCleanupPendingPropagation = FALSE
+    BuggyEarlySuccess = FALSE
+
+INVARIANTS
+    TypeOK
+    DecisionNeverReverses
+    CommitRequiresAllPrepared
+    CommitUsesCurrentTopology
+    PreparedFollowerDoesNotPresumeAbort
+    StableRetryPreservesIdentityAndWrites
+    CleanupRequiresRecoveryComplete
+    SuccessReflectsPropagationAndVisibility
+
+==== BadCommitWithoutPrepare
+SPECIFICATION Spec
+
+CONSTANTS
+    Participants = {p1, p2}
+    Coordinator = p1
+    MaxEpoch = 2
+    MaxRetry = 2
+    BuggyCommitWithoutPrepare = TRUE
+    BuggyCommitStaleEpoch = FALSE
+    BuggyAbortAfterCommit = FALSE
+    BuggyPreparedFollowerAbort = FALSE
+    BuggyRetryNewTransaction = FALSE
+    BuggyCleanupPendingPropagation = FALSE
+    BuggyEarlySuccess = FALSE
+
+INVARIANT CommitRequiresAllPrepared
+
+==== BadCommitStaleEpoch
+SPECIFICATION Spec
+
+CONSTANTS
+    Participants = {p1, p2}
+    Coordinator = p1
+    MaxEpoch = 2
+    MaxRetry = 2
+    BuggyCommitWithoutPrepare = FALSE
+    BuggyCommitStaleEpoch = TRUE
+    BuggyAbortAfterCommit = FALSE
+    BuggyPreparedFollowerAbort = FALSE
+    BuggyRetryNewTransaction = FALSE
+    BuggyCleanupPendingPropagation = FALSE
+    BuggyEarlySuccess = FALSE
+
+INVARIANT CommitUsesCurrentTopology
+
+==== BadAbortAfterCommit
+SPECIFICATION Spec
+
+CONSTANTS
+    Participants = {p1, p2}
+    Coordinator = p1
+    MaxEpoch = 2
+    MaxRetry = 2
+    BuggyCommitWithoutPrepare = FALSE
+    BuggyCommitStaleEpoch = FALSE
+    BuggyAbortAfterCommit = TRUE
+    BuggyPreparedFollowerAbort = FALSE
+    BuggyRetryNewTransaction = FALSE
+    BuggyCleanupPendingPropagation = FALSE
+    BuggyEarlySuccess = FALSE
+
+INVARIANT DecisionNeverReverses
+
+==== BadPreparedFollowerAbort
+SPECIFICATION Spec
+
+CONSTANTS
+    Participants = {p1, p2}
+    Coordinator = p1
+    MaxEpoch = 2
+    MaxRetry = 2
+    BuggyCommitWithoutPrepare = FALSE
+    BuggyCommitStaleEpoch = FALSE
+    BuggyAbortAfterCommit = FALSE
+    BuggyPreparedFollowerAbort = TRUE
+    BuggyRetryNewTransaction = FALSE
+    BuggyCleanupPendingPropagation = FALSE
+    BuggyEarlySuccess = FALSE
+
+INVARIANT PreparedFollowerDoesNotPresumeAbort
+
+==== BadRetryNewTransaction
+SPECIFICATION Spec
+
+CONSTANTS
+    Participants = {p1, p2}
+    Coordinator = p1
+    MaxEpoch = 2
+    MaxRetry = 2
+    BuggyCommitWithoutPrepare = FALSE
+    BuggyCommitStaleEpoch = FALSE
+    BuggyAbortAfterCommit = FALSE
+    BuggyPreparedFollowerAbort = FALSE
+    BuggyRetryNewTransaction = TRUE
+    BuggyCleanupPendingPropagation = FALSE
+    BuggyEarlySuccess = FALSE
+
+INVARIANT StableRetryPreservesIdentityAndWrites
+
+==== BadCleanupPendingPropagation
+SPECIFICATION Spec
+
+CONSTANTS
+    Participants = {p1, p2}
+    Coordinator = p1
+    MaxEpoch = 2
+    MaxRetry = 2
+    BuggyCommitWithoutPrepare = FALSE
+    BuggyCommitStaleEpoch = FALSE
+    BuggyAbortAfterCommit = FALSE
+    BuggyPreparedFollowerAbort = FALSE
+    BuggyRetryNewTransaction = FALSE
+    BuggyCleanupPendingPropagation = TRUE
+    BuggyEarlySuccess = FALSE
+
+INVARIANT CleanupRequiresRecoveryComplete
+
+==== BadEarlySuccess
+SPECIFICATION Spec
+
+CONSTANTS
+    Participants = {p1, p2}
+    Coordinator = p1
+    MaxEpoch = 2
+    MaxRetry = 2
+    BuggyCommitWithoutPrepare = FALSE
+    BuggyCommitStaleEpoch = FALSE
+    BuggyAbortAfterCommit = FALSE
+    BuggyPreparedFollowerAbort = FALSE
+    BuggyRetryNewTransaction = FALSE
+    BuggyCleanupPendingPropagation = FALSE
+    BuggyEarlySuccess = TRUE
+
+INVARIANT SuccessReflectsPropagationAndVisibility

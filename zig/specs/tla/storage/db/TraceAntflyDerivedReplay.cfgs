@@ -1,0 +1,9 @@
+==== positive
+SPECIFICATION Spec
+CHECK_DEADLOCK FALSE
+INVARIANTS
+    TypeOK
+    WatermarksOrdered
+PROPERTIES
+    TraceMatched
+    CatchUpClosedAtTraceEnd

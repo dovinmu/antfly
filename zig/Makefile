@@ -57,7 +57,7 @@ inference-e2e-models: ## Prefetch the curated inference E2E model set with `antf
 # TLA+ Verification Commands
 # ====================================================================================
 
-.PHONY: generate generated-check openapi-generate openapi-check snowball-generate snowball-check cabi-header-generate cabi-header-check license-headers license-check tla-tools tla-check tla-check-txn tla-check-split tla-check-snap tla-check-lsm tla-trace-raft tla-trace-txn
+.PHONY: generate generated-check openapi-generate openapi-check snowball-generate snowball-check cabi-header-generate cabi-header-check license-headers license-check tla-tools tla-check tla-trace tla-clean tla-viz tla-viz-check tla-viz-trace tla-viz-traces
 
 generate: openapi-generate snowball-generate cabi-header-generate ## Regenerate checked-in generated sources.
 
@@ -90,92 +90,56 @@ license-headers: ## Add license headers to first-party source files.
 license-check: ## Check first-party source files have license headers.
 	$(SCRIPTS_PY) ../scripts/license_headers.py --check
 
+# ---- TLA+ model checking -----------------------------------------------------
+# Checks are discovered from specs/tla/**/<Model>.cfgs section files; see
+# specs/tla/README.md (Layout) and scripts/tla-check.sh. Tiers (core, fast,
+# heavy, manual) are annotated on positive sections; Bad* sections are the
+# expected-failure mutants and need no wiring here.
+
+# ---- TLA+ model checking -----------------------------------------------------
+# All logic lives in scripts/tla-check.sh; checks are discovered from
+# specs/tla/**/<Model>.cfgs section files. See specs/tla/README.md.
+
 tla-tools:
 	@bash ../scripts/tla-tools.sh
 
-tla-check: tla-check-txn tla-check-split tla-check-snap tla-check-lsm
-
-tla-check-txn: tla-tools
-	@echo "==> Model checking transaction spec..."
-	source ../scripts/tla-tools.sh && \
-	"$$TLA_JAVA" -XX:+UseParallelGC -cp "$$TLA2TOOLS" tlc2.TLC \
-	  -config specs/tla/AntflyTransaction.cfg specs/tla/MC.tla \
-	  -workers auto -deadlock
-
-tla-check-split: tla-tools
-	@echo "==> Model checking shard split spec..."
-	source ../scripts/tla-tools.sh && \
-	"$$TLA_JAVA" -XX:+UseParallelGC -cp "$$TLA2TOOLS" tlc2.TLC \
-	  -config specs/tla/AntflyShardSplit.cfg specs/tla/ShardSplitMC.tla \
-	  -workers auto -deadlock
-
-tla-check-snap: tla-tools
-	@echo "==> Model checking snapshot transfer spec (safety only, ~90s)..."
-	source ../scripts/tla-tools.sh && \
-	"$$TLA_JAVA" -XX:+UseParallelGC -cp "$$TLA2TOOLS" tlc2.TLC \
-	  -config specs/tla/AntflySnapshotTransfer-safety.cfg specs/tla/SnapshotTransferMC.tla \
-	  -workers auto -deadlock
-
-tla-check-lsm: tla-tools
-	@echo "==> Model checking LSM lifecycle OOM safety..."
-	source ../scripts/tla-tools.sh && \
-	"$$TLA_JAVA" -XX:+UseParallelGC -cp "$$TLA2TOOLS" tlc2.TLC \
-	  -config specs/tla/AntflyLsmLifecycle.cfg specs/tla/AntflyLsmLifecycle.tla \
-	  -workers auto -deadlock
-
-tla-trace-raft: tla-tools
-ifndef TRACE_FILES
-	$(error TRACE_FILES is required. Example: make tla-trace-raft TRACE_FILES=/tmp/raft-trace.ndjson)
+tla-check: tla-tools ## Full gate (audit+parse+core+fast+mutants). TIER=heavy|manual|core|fast for one tier; CHECK=<id> for one check.
+ifdef CHECK
+	@bash ../scripts/tla-check.sh run $(CHECK)
+else ifdef TIER
+	@bash ../scripts/tla-check.sh tier $(TIER)
+else
+	@bash ../scripts/tla-check.sh gate
 endif
-	@set -e; \
-	segdir=$$(mktemp -d); \
-	trap 'rm -rf "$$segdir"' EXIT; \
-	for f in $(TRACE_FILES); do \
-	  python3 ../scripts/tla-segment-raft-trace.py "$$f" "$$segdir"; \
-	done; \
-	segments=$$(find "$$segdir" -name '*.ndjson' -size +0c | sort); \
-	if [ -n "$$segments" ]; then \
-	  bash ../scripts/tla-validate-trace.sh -S \
-	    -s specs/tla/Traceetcdraft.tla \
-	    -c specs/tla/Traceetcdraft.cfg \
-	    $$segments; \
-	else \
-	  echo "No non-empty trace segments found"; \
-	  exit 1; \
-	fi
 
-tla-trace-txn: tla-tools
-ifndef TRACE_FILES
-	$(error TRACE_FILES is required. Example: make tla-trace-txn TRACE_FILES=/tmp/txn-trace.ndjson)
+tla-trace: tla-tools ## Validate NDJSON traces: TRACE=<raft|txn|txn-session|ha|split-bridge|doc-identity-range-repair|placement-readiness|index-lifecycle|derived-replay|enrichment-lease> TRACE_FILES=...
+ifndef TRACE
+	$(error TRACE is required, e.g. make tla-trace TRACE=ha TRACE_FILES="specs/tla/traces/ha_*.ndjson")
 endif
-	@set -e; \
-	validated=0; \
-	tmpfiles=""; tmpdirs=""; \
-	trap 'rm -f $$tmpfiles; rm -rf $$tmpdirs' EXIT; \
-	for f in $(TRACE_FILES); do \
-	  filtered=$$(mktemp); \
-	  tmpfiles="$$tmpfiles $$filtered"; \
-	  python3 ../scripts/tla-filter-txn-trace.py < "$$f" > "$$filtered"; \
-	  if [ -s "$$filtered" ]; then \
-	    segdir=$$(mktemp -d); \
-	    tmpdirs="$$tmpdirs $$segdir"; \
-	    python3 ../scripts/tla-segment-txn-trace.py "$$filtered" "$$segdir"; \
-	    segments=$$(find "$$segdir" -name '*.ndjson' -size +0c | sort); \
-	    if [ -n "$$segments" ]; then \
-	      bash ../scripts/tla-validate-trace.sh -S \
-	        -s specs/tla/TraceAntflyTransaction.tla \
-	        -c specs/tla/TraceAntflyTransaction.cfg \
-	        $$segments; \
-	      validated=$$((validated + 1)); \
-	    else \
-	      echo "SKIP $$f (no non-empty transaction trace segments)"; \
-	    fi; \
-	  else \
-	    echo "SKIP $$f (no spec-compatible transactions after filtering)"; \
-	  fi; \
-	  rm -f "$$filtered"; \
-	done; \
-	if [ "$$validated" -eq 0 ]; then \
-	  echo "No spec-compatible transactions found after filtering"; \
-	  exit 1; \
-	fi
+	@TRACE_FILES="$(TRACE_FILES)" bash ../scripts/tla-check.sh trace $(TRACE)
+
+tla-clean: ## Remove TLA+ model checker runtime artifacts.
+	rm -rf specs/tla/states specs/tla/.generated states
+	find specs/tla \( -name '*_TTrace_*.tla' -o -name '*_TTrace_*.bin' \) -delete
+	find specs/tla -type d -name states -prune -exec rm -rf {} +
+
+# ---- TLA+ visualizations -------------------------------------------------------
+# Pedagogical views of the specs; see specs/tla/README.md (Visualizations).
+
+tla-viz: ## Regenerate structural Mermaid diagrams (specs/tla/diagrams/).
+	$(SCRIPTS_PY) ../scripts/tla-viz/gen_structural.py --specs-dir specs/tla --out-dir specs/tla/diagrams
+
+tla-viz-check: ## Check the committed structural diagrams are up to date.
+	$(SCRIPTS_PY) ../scripts/tla-viz/gen_structural.py --check --specs-dir specs/tla --out-dir specs/tla/diagrams
+
+tla-viz-trace: ## Render NDJSON trace(s) to a self-contained HTML artifact: JSON="<files/dirs>" [OUT=<file.html>] [BINDING=<overlay.json>] [TLC=1]
+ifndef JSON
+	$(error JSON is required, e.g. make tla-viz-trace JSON=specs/tla/traces/ha_rejoin.ndjson)
+endif
+	$(SCRIPTS_PY) ../scripts/tla-viz/render_trace.py $(JSON) $(if $(OUT),-o $(OUT),) \
+	  $(if $(BINDING),--binding $(BINDING),) $(if $(TLC),--tlc,)
+
+tla-viz-traces: ## Render every checked-in trace fixture into one browsable HTML file: [OUT=<file.html>] [BINDING=<overlay.json>] [TLC=1]
+	$(SCRIPTS_PY) ../scripts/tla-viz/render_trace.py specs/tla/example.ndjson specs/tla/traces \
+	  $(if $(BINDING),--binding $(BINDING),) $(if $(TLC),--tlc,) \
+	  -o $(if $(OUT),$(OUT),specs/tla/traces/all-traces.html)

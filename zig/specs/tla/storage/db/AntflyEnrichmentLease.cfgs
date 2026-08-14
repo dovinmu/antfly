@@ -1,0 +1,75 @@
+\* All TLC check configs for AntflyEnrichmentLease.tla, one section per check.
+\* Sections are verbatim TLC config syntax; the build extracts them
+\* (scripts/tla-cfg.sh). Section names match the make-target check ids.
+
+==== positive tier=fast
+\* TLC config for AntflyEnrichmentLease.tla
+
+SPECIFICATION FairSpec
+
+CONSTANTS
+    BuggyStalePublish = FALSE
+    BuggyEmptyPendingAdvance = FALSE
+    BuggyTerminalFailurePoisonsWorker = FALSE
+    MaxSeq = 2
+
+INVARIANTS
+    TypeOK
+    TargetsOrdered
+    OwnerMatchesLease
+    CollectedAndGeneratedUnderLease
+    PublishedArtifactsSafe
+    AppliedDoesNotSkipGeneratedWork
+    RetryableFailureDoesNotAdvanceApplied
+    IsolatedFailureRecorded
+    WorkerFailureStatusStable
+    TerminalRequestFailureIsIsolated
+    Safety
+
+PROPERTIES
+    EnrichmentEventuallyDrains
+
+==== BadEmptyPending
+\* Expected-failure config for empty pending scans advancing through hidden work.
+\* Pinned to the specific semantic invariant this mutant must violate.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggyStalePublish = FALSE
+    BuggyEmptyPendingAdvance = TRUE
+    BuggyTerminalFailurePoisonsWorker = FALSE
+    MaxSeq = 2
+
+INVARIANTS
+    AppliedDoesNotSkipGeneratedWork
+
+==== BadStalePublish
+\* Expected-failure config for stale generated-artifact publication after lease loss.
+\* Pinned to the specific semantic invariant this mutant must violate.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggyStalePublish = TRUE
+    BuggyEmptyPendingAdvance = FALSE
+    BuggyTerminalFailurePoisonsWorker = FALSE
+    MaxSeq = 2
+
+INVARIANTS
+    PublishedArtifactsSafe
+
+==== BadTerminalFailurePoisonsWorker
+\* A terminal request failure is index-scoped and must not fail the runtime.
+\* Pinned to the isolation invariant.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggyStalePublish = FALSE
+    BuggyEmptyPendingAdvance = FALSE
+    BuggyTerminalFailurePoisonsWorker = TRUE
+    MaxSeq = 2
+
+INVARIANTS
+    TerminalRequestFailureIsIsolated

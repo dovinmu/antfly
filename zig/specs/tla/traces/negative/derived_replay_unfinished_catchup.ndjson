@@ -1,0 +1,1 @@
+{"tag":"derived-replay-trace","family":"derived-replay","traceId":"1","seq":1,"event":{"name":"BeginCatchUp","facts":{"indexName":"dense_vector","appliedSequence":1,"targetSequence":3}}}

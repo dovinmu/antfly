@@ -32,6 +32,7 @@ const enrichment_artifact_codec = @import("artifact_codec.zig");
 const enrichment_worker = @import("enrichment_worker.zig");
 const enrichment_lease = @import("enrichment_lease.zig");
 const enrichment_state = @import("enrichment_state.zig");
+const enrichment_trace = @import("enrichment_trace.zig");
 const embedder_mod = @import("embedder.zig");
 const asset_producer_mod = @import("asset_producer.zig");
 const document_extraction_mod = @import("document_extraction.zig");
@@ -2728,6 +2729,7 @@ fn runForegroundCatchUpPassOwned(runtime: *EnrichmentRuntime, io: Io, target_seq
     };
     runtime.mutex.unlock(io);
     if (!acquired) {
+        enrichment_trace.event(runtime, "LeaseDenied", null, target_sequence, null);
         // A live lease held by another owner can remain valid for the full
         // 30-second TTL. Pace denial retries so failover does not monopolize a
         // core or hammer the durable lease record while still reacting quickly
@@ -2736,8 +2738,10 @@ fn runForegroundCatchUpPassOwned(runtime: *EnrichmentRuntime, io: Io, target_seq
             Io.Duration.fromMilliseconds(@intCast(lease_denied_retry_sleep_ns / std.time.ns_per_ms)),
             .awake,
         ) catch {};
+        enrichment_trace.event(runtime, "LeaseRetryReady", null, target_sequence, null);
         return;
     }
+    enrichment_trace.event(runtime, "AcquireLease", null, target_sequence, null);
 
     const pending = try enrichment_worker.collectPendingDocumentGroups(runtime.alloc, runtime.replay_source, runtime.applied_sequence);
     defer enrichment_worker.freePendingDocumentGroups(runtime.alloc, pending);
@@ -2823,6 +2827,7 @@ fn runForegroundCatchUpPassOwned(runtime: *EnrichmentRuntime, io: Io, target_seq
         runtime.mutex.unlock(io);
         try saveRuntimeStatusWithRetry(runtime, scope_name, status);
         runtime.notifyStatusHook();
+        enrichment_trace.event(runtime, "AdvanceApplied", @intCast(pending.len), max_seen, null);
     } else if (pending.len == 0) {
         var status: enrichment_state.RuntimeStatus = .{};
         runtime.mutex.lockUncancelable(io);
@@ -6275,12 +6280,14 @@ fn flushGeneratedReplayWindow(
         return;
     }
 
+    const pending_items: u64 = @intCast(window.itemCount());
     const artifact_delete_keys = try window.artifact_delete_keys.toOwnedSlice(runtime.alloc);
     errdefer freeKeyList(runtime.alloc, artifact_delete_keys);
     var batch = try window.toOwnedBatch();
     defer derived_types.deinitDerivedBatch(runtime.alloc, &batch);
     defer freeKeyList(runtime.alloc, artifact_delete_keys);
     const sequence = try appendGeneratedBatchWithRetry(runtime, batch, artifact_delete_keys);
+    enrichment_trace.event(runtime, "PublishGenerated", pending_items, sequence, null);
     try applyQueuedCoverageTransitionsAfterReplayAppend(runtime, window.coverage_transitions.items);
     clearQueuedCoverageTransitions(runtime.alloc, &window.coverage_transitions, &window.coverage_transition_keys);
     try rememberPublishedGeneratedBatch(runtime, batch);

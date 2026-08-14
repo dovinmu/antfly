@@ -1,0 +1,272 @@
+{
+  "_comment": "Trace-family -> visualization archetype bindings for scripts/tla-viz/render_trace.py. Schema reference and agent workflow: scripts/tla-viz/BINDINGS.md. Archetypes: consensus (node lanes + role bands + message arrows), dialogue (lanes from event-name rules + declarative causal pairs), narrative (single actor replayed as a scene of stores/actors/lamps with per-step state diffs). bandField values get tenure washes; model+phaseVar link band colors to the spec's phase domain so diagrams and timelines share hues. traceFamily names the scripts/tla-check.sh trace family for the optional --tlc verdict overlay. Unknown tags fall back to narrative; bind them at render time with --binding <overlay.json>.",
+
+  "trace": {
+    "label": "raft",
+    "archetype": "consensus",
+    "traceFamily": "raft",
+    "laneField": "nid",
+    "lanePrefix": "node ",
+    "segmented": true,
+    "msgArrows": true,
+    "bandField": "role",
+    "bandQuiet": ["StateFollower"],
+    "bandColors": {
+      "StateLeader": ["#2a78d6", "#3987e5"],
+      "StateCandidate": ["#eb6834", "#d95926"],
+      "StatePreCandidate": ["#eda100", "#c98500"]
+    },
+    "categories": [
+      {"label": "Replication", "patterns": ["AppendEntries", "Snapshot", "Heartbeat"]},
+      {"label": "Election", "patterns": ["Vote", "Become", "Timeout", "Campaign"]},
+      {"label": "Commit / apply", "patterns": ["Commit", "Replicate", "Ready", "ConfChange", "ChangeConf", "Apply"]}
+    ],
+    "milestones": ["^Become", "^InitState"]
+  },
+
+  "antfly-trace": {
+    "label": "transaction",
+    "archetype": "narrative",
+    "traceFamily": "txn",
+    "laneField": "shardId",
+    "lanePrefix": "shard ",
+    "categories": [
+      {"label": "Writes / intents", "patterns": ["Write", "Intent"]},
+      {"label": "Commit / abort", "patterns": ["Commit", "Abort", "Resolve"]},
+      {"label": "Lifecycle", "patterns": ["Init", "Begin", "Recovery", "Cleanup", "Clock"]}
+    ],
+    "scene": {
+      "stores": [
+        {"id": "writes", "label": "write intents", "listField": "state.writeKeys", "style": "durable"},
+        {"id": "deletes", "label": "delete intents", "listField": "state.deleteKeys", "style": "durable"},
+        {"id": "txn", "label": "transaction", "valueField": "txnId", "style": "record"}
+      ],
+      "flows": [
+        {"on": "WriteIntent", "from": "txn", "to": "writes", "label": "stage write intent"},
+        {"on": "Resolve", "from": "writes", "to": "txn", "label": "resolve intents"}
+      ]
+    }
+  },
+
+  "ha-trace": {
+    "label": "HA replication",
+    "archetype": "dialogue",
+    "traceFamily": "ha",
+    "laneRules": [
+      ["^Primary", "primary"],
+      ["^(Standby|StatusAck)", "standby"],
+      ["^(Assess|Execute)", "rejoining node"],
+      [".*", "cluster"]
+    ],
+    "laneOrder": ["primary", "standby", "rejoining node", "cluster"],
+    "bandField": "timelineState",
+    "model": "storage/ha/AntflyHARejoin",
+    "phaseVar": "timelineState",
+    "pairs": [
+      {"from": "PrimaryAppend", "to": "StandbyReceive", "keys": ["timeline", "lsn"]},
+      {"from": "StandbyReceive", "to": "StandbyApplySuccess", "keys": ["timeline", "lsn"]}
+    ],
+    "faultPatterns": ["Failure"],
+    "categories": [
+      {"label": "Append / apply", "patterns": ["Append", "Receive", "Apply", "StatusAck"]},
+      {"label": "Timeline / failover", "patterns": ["TimelineSwitch", "Freeze", "Reject", "Promote", "Fence"]},
+      {"label": "Rejoin", "patterns": ["Assess", "Rewind", "Reseed", "Rejoin"]}
+    ]
+  },
+
+  "split-bridge-trace": {
+    "label": "shard split bridge",
+    "archetype": "dialogue",
+    "traceFamily": "split-bridge",
+    "laneRules": [
+      ["^Parent", "parent shard"],
+      ["^(Bootstrap|Replay|Build|PublishDb|ObserveDestination)", "child shard"],
+      [".*", "metadata"]
+    ],
+    "laneOrder": ["metadata", "parent shard", "child shard"],
+    "bandField": "phase",
+    "bandGlobal": true,
+    "bandQuiet": ["single"],
+    "model": "metadata/AntflySplitRefinementBridge",
+    "phaseVar": "phase",
+    "pairs": [
+      {"from": "ParentRightWrite", "to": "ReplayDelta",
+       "fromKeys": ["dbDeltaSeq"], "toKeys": ["dbReplaySeq"]}
+    ],
+    "categories": [
+      {"label": "Writes / replay", "patterns": ["Write", "Replay"]},
+      {"label": "Build / publish", "patterns": ["Build", "Publish", "Bootstrap", "Observe"]},
+      {"label": "Cutover / routing", "patterns": ["Cutover", "Route", "Fence", "BeginSplit", "Rollback"]}
+    ]
+  },
+
+  "txn-session-trace": {
+    "label": "transaction session",
+    "archetype": "narrative",
+    "traceFamily": "txn-session",
+    "lane": "session",
+    "bandField": "status",
+    "bandQuiet": ["idle"],
+    "model": "storage/db/AntflyTransactionSession",
+    "phaseVar": "status",
+    "categories": [
+      {"label": "Writes", "patterns": ["Stage"]},
+      {"label": "2PC", "patterns": ["Prepare", "Resolve", "Commit", "Abort", "Finalize"]},
+      {"label": "Lifecycle", "patterns": ["Begin", "Cleanup", "Savepoint", "Release", "Rollback"]}
+    ],
+    "scene": {
+      "stores": [
+        {"id": "staged", "label": "staged buffer", "countField": "staged", "style": "buffer"},
+        {"id": "intents", "label": "intent store (durable, invisible)", "countField": "intentCount", "style": "durable"},
+        {"id": "visible", "label": "visible store", "countField": "visible", "style": "public"},
+        {"id": "identity", "label": "identity rows", "countField": "identityRows", "style": "public"},
+        {"id": "record", "label": "txn record (decision)", "valueField": "status", "style": "record"}
+      ],
+      "actors": [
+        {"id": "local", "label": "local shard", "memberOf": {"prepared": "prepared", "resolved": "resolved"}},
+        {"id": "remote", "label": "remote shard", "memberOf": {"prepared": "prepared", "resolved": "resolved"}}
+      ],
+      "flows": [
+        {"on": "^BeginSession$", "from": "record", "to": "staged", "label": "session opens; snapshot baseVisible"},
+        {"on": "^StageWrite$", "from": "staged", "to": "intents", "label": "write intent: durable, not visible"},
+        {"on": "^PrepareParticipant$", "fromField": "participant", "to": "record", "label": "participant prepared"},
+        {"on": "^RecoverFinalizedIntents$", "from": "intents", "to": "visible", "when": {"status": "committed"}, "label": "recovery publishes docs + identity rows"},
+        {"on": "^RecoverFinalizedIntents$", "from": "intents", "to": "void", "when": {"status": "aborted"}, "label": "recovery discards intents"},
+        {"on": "^ResolveParticipant$", "from": "record", "toField": "participant", "label": "outcome delivered"},
+        {"on": "^Cleanup$", "from": "record", "to": "void", "label": "txn record cleaned"}
+      ]
+    },
+    "invariants": [
+      {"id": "IdentityLockstep", "expr": "identityRows == visible"},
+      {"id": "VisibleFromBase", "expr": "visible >= baseVisible"},
+      {"id": "NoNegativeIntents", "expr": "intentCount >= 0"}
+    ]
+  },
+
+  "doc-identity-range-repair-trace": {
+    "label": "doc identity range repair",
+    "archetype": "narrative",
+    "traceFamily": "doc-identity-range-repair",
+    "lane": "restore",
+    "categories": [
+      {"label": "Restore intent", "patterns": ["Intent"]},
+      {"label": "Repair / recovery", "patterns": ["Repair", "Recover"]},
+      {"label": "Restore", "patterns": ["Restore", "Import"]}
+    ],
+    "scene": {
+      "stores": [
+        {"id": "src", "label": "restore source ns", "valueField": "restoreSourceNamespace", "style": "record"},
+        {"id": "dst", "label": "restore target ns", "valueField": "restoreTargetNamespace", "style": "record"}
+      ],
+      "lamps": [
+        {"field": "strictRestoreAccepted", "label": "strict restore accepted"},
+        {"field": "importRecovered", "label": "import recovered"},
+        {"field": "runtimeRepairNeeded", "label": "repair needed"},
+        {"field": "runtimeRepairComplete", "label": "repair complete"},
+        {"field": "restoreIntentCleared", "label": "restore intent cleared"}
+      ]
+    },
+    "invariants": [
+      {"id": "RepairBeforeIntentClear", "expr": "!restoreIntentCleared || runtimeRepairComplete"},
+      {"id": "StrictNamespaceMatch", "expr": "!strictRestoreAccepted || restoreSourceNamespace == restoreTargetNamespace"}
+    ]
+  },
+
+  "placement-readiness-trace": {
+    "label": "placement readiness",
+    "archetype": "dialogue",
+    "traceFamily": "placement-readiness",
+    "laneRules": [
+      ["^ObserveReport", "replica reports"],
+      ["^RecomputeEvidence", "evidence merge"],
+      ["Transition$", "transition admission"],
+      [".*", "metadata"]
+    ],
+    "laneOrder": ["replica reports", "evidence merge", "transition admission", "metadata"],
+    "milestones": ["^RecomputeEvidence", "^StartTransition"],
+    "categories": [
+      {"label": "Observe", "patterns": ["^ObserveReport"]},
+      {"label": "Resolve", "patterns": ["^RecomputeEvidence"]},
+      {"label": "Admission", "patterns": ["^StartTransition$"]}
+    ]
+  },
+
+  "index-lifecycle-trace": {
+    "label": "index generation lifecycle",
+    "archetype": "narrative",
+    "traceFamily": "index-lifecycle",
+    "laneField": "facts.indexName",
+    "lanePrefix": "index ",
+    "bandField": "facts.phase",
+    "bandQuiet": ["admitted"],
+    "milestones": ["^RequestGeneration$", "^SwapGeneration$", "^ObserveReady$"],
+    "categories": [
+      {"label": "Durable request", "patterns": ["RequestGeneration", "QueueDurableWork", "PersistIntent"]},
+      {"label": "Worker", "patterns": ["AdmitWorker"]},
+      {"label": "Publication", "patterns": ["SwapGeneration", "ObserveReady"]}
+    ],
+    "scene": {
+      "stores": [
+        {"id": "generation", "label": "config generation", "valueField": "facts.configHash", "style": "record"},
+        {"id": "intent", "label": "durable repair intent", "valueField": "facts.phase", "style": "durable"}
+      ],
+      "lamps": [
+        {"field": "facts.durableWork", "label": "durable work"},
+        {"field": "facts.workerAdmitted", "label": "worker admitted"}
+      ],
+      "flows": [
+        {"on": "^QueueDurableWork$", "from": "generation", "to": "intent", "label": "publish durable wakeup"},
+        {"on": "^AdmitWorker$", "from": "intent", "to": "generation", "label": "admit rebuild"},
+        {"on": "^SwapGeneration$", "from": "generation", "to": "intent", "label": "activate replacement"}
+      ]
+    }
+  },
+
+  "derived-replay-trace": {
+    "label": "derived replay and fallback",
+    "archetype": "dialogue",
+    "traceFamily": "derived-replay",
+    "model": "storage/db/AntflyDerivedReplay",
+    "laneRules": [
+      ["^ObserveTarget$", "target watermark"],
+      ["^BeginCatchUp$|^FinishCatchUp$", "derived worker"],
+      ["^HintLaneScan$", "hint lane"],
+      ["^FallbackScan$", "replay-all fallback"],
+      [".*", "replay"]
+    ],
+    "laneOrder": ["target watermark", "derived worker", "hint lane", "replay-all fallback", "replay"],
+    "milestones": ["^ObserveTarget$", "^BeginCatchUp$", "^FinishCatchUp$"],
+    "faultPatterns": ["^FallbackScan$"],
+    "categories": [
+      {"label": "Target", "patterns": ["Target"]},
+      {"label": "Scan", "patterns": ["Scan"]},
+      {"label": "Apply", "patterns": ["CatchUp"]}
+    ],
+    "pairs": [
+      {"send": "^BeginCatchUp$", "recv": "^FinishCatchUp$", "label": "catch-up window"}
+    ]
+  },
+
+  "enrichment-lease-trace": {
+    "label": "enrichment lease and provider recovery",
+    "archetype": "dialogue",
+    "traceFamily": "enrichment-lease",
+    "model": "storage/db/AntflyEnrichmentLease",
+    "laneRules": [
+      ["Lease", "durable lease"],
+      ["PublishGenerated|AdvanceApplied", "enrichment worker"],
+      [".*", "runtime"]
+    ],
+    "laneOrder": ["durable lease", "enrichment worker", "runtime"],
+    "milestones": ["^AcquireLease$", "^PublishGenerated$", "^AdvanceApplied$"],
+    "faultPatterns": ["^LeaseDenied$"],
+    "categories": [
+      {"label": "Ownership", "patterns": ["Lease"]},
+      {"label": "Work", "patterns": ["PublishGenerated", "AdvanceApplied"]}
+    ],
+    "pairs": [
+      {"send": "^LeaseDenied$", "recv": "^LeaseRetryReady$", "label": "bounded retry wait"},
+      {"send": "^PublishGenerated$", "recv": "^AdvanceApplied$", "label": "durable publication"}
+    ]
+  }
+}

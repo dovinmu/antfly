@@ -1,0 +1,89 @@
+\* All TLC check configs for AntflyIndexLifecycle.tla, one section per check.
+\* Sections are verbatim TLC config syntax; the build extracts them
+\* (scripts/tla-cfg.sh). Section names match the make-target check ids.
+
+==== positive tier=fast
+\* TLC config for AntflyIndexLifecycle.tla.
+
+SPECIFICATION FairSpec
+
+CONSTANTS
+    BuggySwapIncompleteShadow = FALSE
+    BuggyRecoverTrustsStaleStatus = FALSE
+    BuggyLoseSecondSchemaWakeup = FALSE
+    BuggyDropAcceptedWrite = FALSE
+
+INVARIANTS
+    TypeOK
+    FreshImpliesCaughtUp
+    PublishedGenerationCoversAcceptedWrites
+    NoFreshServeBehind
+    EveryRequestedGenerationHasDurableWork
+    Safety
+
+PROPERTIES
+    BuildEventuallyConverges
+    SecondSchemaEventuallyConverges
+
+==== BadRecoverTrustsStatus
+\* Expected-failure config: crash recovery trusts a stale durable "fresh"
+\* status snapshot without re-validating the watermarks, and a query is then
+\* served fresh results from a behind index. Pinned to the query-facing
+\* invariant.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggySwapIncompleteShadow = FALSE
+    BuggyRecoverTrustsStaleStatus = TRUE
+    BuggyLoseSecondSchemaWakeup = FALSE
+    BuggyDropAcceptedWrite = FALSE
+
+INVARIANTS
+    NoFreshServeBehind
+
+==== BadSwapIncomplete
+\* Expected-failure config: the shadow index swaps in while its applied
+\* watermark is still behind the write target. Pinned to the freshness
+\* contract.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggySwapIncompleteShadow = TRUE
+    BuggyRecoverTrustsStaleStatus = FALSE
+    BuggyLoseSecondSchemaWakeup = FALSE
+    BuggyDropAcceptedWrite = FALSE
+
+INVARIANTS
+    FreshImpliesCaughtUp
+
+==== BadLoseSecondSchemaWakeup
+\* Expected-failure B5-shaped mutant: generation two loses its exact durable
+\* wake and periodic fallback rediscovery is also disabled.
+SPECIFICATION FairSpec
+
+CONSTANTS
+    BuggySwapIncompleteShadow = FALSE
+    BuggyRecoverTrustsStaleStatus = FALSE
+    BuggyLoseSecondSchemaWakeup = TRUE
+    BuggyDropAcceptedWrite = FALSE
+
+PROPERTIES
+    SecondSchemaEventuallyConverges
+
+==== BadDropAcceptedWrite
+\* Expected-failure config: an accepted write fails to enter snapshot or
+\* replay debt, allowing publication without that write. Pinned to the
+\* accepted-write publication contract.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggySwapIncompleteShadow = FALSE
+    BuggyRecoverTrustsStaleStatus = FALSE
+    BuggyLoseSecondSchemaWakeup = FALSE
+    BuggyDropAcceptedWrite = TRUE
+
+INVARIANTS
+    PublishedGenerationCoversAcceptedWrites

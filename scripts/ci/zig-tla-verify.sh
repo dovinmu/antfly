@@ -48,7 +48,7 @@ extract_raft_trace() {
 }
 
 validate_raft_trace() {
-  make -C zig tla-trace-raft TRACE_FILES=/tmp/raft-trace.ndjson
+  make -C zig tla-trace TRACE=raft TRACE_FILES=/tmp/raft-trace.ndjson
 }
 
 extract_txn_trace() {
@@ -61,7 +61,7 @@ extract_txn_trace() {
 }
 
 validate_txn_trace() {
-  make -C zig tla-trace-txn TRACE_FILES=/tmp/txn-trace.ndjson
+  make -C zig tla-trace TRACE=txn TRACE_FILES=/tmp/txn-trace.ndjson
 }
 
 if [[ "$run_model_check" == "true" ]]; then
