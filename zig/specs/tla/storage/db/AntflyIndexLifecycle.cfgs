@@ -11,10 +11,12 @@ CONSTANTS
     BuggySwapIncompleteShadow = FALSE
     BuggyRecoverTrustsStaleStatus = FALSE
     BuggyLoseSecondSchemaWakeup = FALSE
+    BuggyDropAcceptedWrite = FALSE
 
 INVARIANTS
     TypeOK
     FreshImpliesCaughtUp
+    PublishedGenerationCoversAcceptedWrites
     NoFreshServeBehind
     EveryRequestedGenerationHasDurableWork
     Safety
@@ -35,6 +37,7 @@ CONSTANTS
     BuggySwapIncompleteShadow = FALSE
     BuggyRecoverTrustsStaleStatus = TRUE
     BuggyLoseSecondSchemaWakeup = FALSE
+    BuggyDropAcceptedWrite = FALSE
 
 INVARIANTS
     NoFreshServeBehind
@@ -50,6 +53,7 @@ CONSTANTS
     BuggySwapIncompleteShadow = TRUE
     BuggyRecoverTrustsStaleStatus = FALSE
     BuggyLoseSecondSchemaWakeup = FALSE
+    BuggyDropAcceptedWrite = FALSE
 
 INVARIANTS
     FreshImpliesCaughtUp
@@ -63,6 +67,23 @@ CONSTANTS
     BuggySwapIncompleteShadow = FALSE
     BuggyRecoverTrustsStaleStatus = FALSE
     BuggyLoseSecondSchemaWakeup = TRUE
+    BuggyDropAcceptedWrite = FALSE
 
 PROPERTIES
     SecondSchemaEventuallyConverges
+
+==== BadDropAcceptedWrite
+\* Expected-failure config: an accepted write fails to enter snapshot or
+\* replay debt, allowing publication without that write. Pinned to the
+\* accepted-write publication contract.
+
+SPECIFICATION Spec
+
+CONSTANTS
+    BuggySwapIncompleteShadow = FALSE
+    BuggyRecoverTrustsStaleStatus = FALSE
+    BuggyLoseSecondSchemaWakeup = FALSE
+    BuggyDropAcceptedWrite = TRUE
+
+INVARIANTS
+    PublishedGenerationCoversAcceptedWrites

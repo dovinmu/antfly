@@ -181,8 +181,8 @@ Init ==
 (*
   Action 1: InitTransaction(t)
   Orchestrator allocates HLC timestamp and creates txn record on coordinator.
-  Maps to: metadata/transaction.go:217 (initTransaction) +
-           store/db/db.go:3883 (InitTransaction)
+  Maps to: storage/transactions.zig
+           TxnManager.initTransactionWithParticipants.
 *)
 InitTransaction(t) ==
     /\ txnStatus[t] = "idle"
@@ -220,7 +220,8 @@ CheckPredicates(t) ==
   Checks BOTH committed version predicates AND conflicting intents.
   This models the FIXED code (post-PR #381) which includes
   hasConflictingIntentForKey() in checkVersionPredicates().
-  Maps to: store/db/db.go:3942 (WriteIntent) with both predicate checks.
+  Maps to: storage/transactions.zig TxnManager.writeIntents and
+           TxnManager.checkVersionPredicates.
 *)
 WriteIntentOnShard(t, s) ==
     /\ txnStatus[t] = "predicatesChecked"
@@ -237,7 +238,7 @@ WriteIntentOnShard(t, s) ==
   Action 4: WriteIntentFails(t, s)
   OCC predicate check fails on shard s; txn transitions to aborting.
   Fails if committed version changed OR a conflicting intent exists.
-  Maps to: store/db/db.go:3962-3967 (ErrVersionConflict or ErrIntentConflict)
+  Maps to: storage/transactions.zig TxnManager.writeIntents predicate failure.
 *)
 WriteIntentFails(t, s) ==
     /\ txnStatus[t] = "predicatesChecked"
@@ -252,7 +253,7 @@ WriteIntentFails(t, s) ==
   Action 5: CommitTransaction(t)
   All intents written on all shards; orchestrator commits on coordinator.
   This is the atomic commit point.
-  Maps to: store/db/helpers.go:148 (finalizeTransaction with status=1)
+  Maps to: api/distributed_txn.zig ParticipantWorker.resolveGroup(.committed).
 *)
 CommitTransaction(t) ==
     /\ txnStatus[t] = "predicatesChecked"
@@ -265,7 +266,7 @@ CommitTransaction(t) ==
 (*
   Action 6: AbortTransaction(t)
   Orchestrator aborts on coordinator (either from OCC failure or crash).
-  Maps to: store/db/helpers.go:148 (finalizeTransaction with status=2)
+  Maps to: api/distributed_txn.zig ParticipantWorker.resolveGroup(.aborted).
 *)
 AbortTransaction(t) ==
     /\ txnStatus[t] = "aborting"
@@ -297,7 +298,7 @@ DirectAbort(t) ==
   discards if aborted. Updates resolved_participants on coordinator.
   Also handles no-op resolution when intents were never written (the
   recovery loop sends ResolveIntents to all participants regardless).
-  Maps to: store/db/db.go:4039 (ResolveIntents)
+  Maps to: storage/transactions.zig TxnManager.resolveIntents.
 *)
 ResolveIntentsOnShard(t, s) ==
     /\ intents[t, s] \in {"written", "none"}
@@ -344,8 +345,8 @@ OrchestratorCrash(t) ==
 (*
   Action 10: RecoveryResolve(t, s)
   Recovery loop on coordinator retries resolving intents on shard s.
-  Maps to: store/db/db.go:661 (transactionRecoveryLoop) ->
-           db.go:679 (notifyPendingResolutions)
+  Maps to: storage/db/maintenance/transaction_runtime.zig
+           runRecoveryWithConfig.
 *)
 RecoveryResolve(t, s) ==
     /\ intents[t, s] \in {"written", "none"}
@@ -369,7 +370,7 @@ RecoveryResolve(t, s) ==
 (*
   Action 11: CleanupTxnRecord(t)
   Recovery loop deletes the txn record only when ALL participants have resolved.
-  Maps to: store/db/db.go:724-743 (allResolved check in notifyPendingResolutions)
+  Maps to: storage/transactions.zig TxnManager.recoverTransactions cleanup.
 *)
 CleanupTxnRecord(t) ==
     /\ txnRecords[t] \in {"committed", "aborted"}
@@ -400,7 +401,7 @@ TickClock ==
   This models the bug: commitTransaction/abortTransaction fails (network
   error, context timeout) and the orchestrator gives up, but the txn record
   stays Pending forever because the recovery loop only processes status != 0.
-  Maps to: metadata/transaction.go:54 (abort fails silently after intent write error)
+  Maps to: api/distributed_txn.zig error exits before a durable decision.
 *)
 OrchestratorCrashPrepare(t) ==
     /\ txnStatus[t] \in {"preparing", "predicatesChecked"}
@@ -415,8 +416,8 @@ OrchestratorCrashPrepare(t) ==
   (created_at older than StalePendingThreshold) and auto-aborts it.
   After this, the existing RecoveryResolve and CleanupTxnRecord actions
   handle intent resolution and cleanup since they accept txnRecords = "aborted".
-  Maps to: store/db/db.go notifyPendingResolutions (new code that checks
-           status=0 && created_at < cutoff and proposes AbortTransaction)
+  Maps to: storage/transactions.zig TxnManager.recoverTransactions
+           stale-pending auto-abort.
 *)
 RecoveryAutoAbort(t) ==
     /\ txnRecords[t] = "pending"

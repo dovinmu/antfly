@@ -18,31 +18,34 @@
     caught up (db/catalog/index_manager.zig); a failed build parks the index
     as status-only with a load failure (index_manager.zig:1627 loadFailure).
   - The safety boundary: an index must never be SERVED as fresh while its
-    applied watermark is behind the write target — that is a silent
-    missing-results class, worse than staleness honestly reported.
+    applied watermark is behind accepted writes. The target watermark records
+    the durable snapshot or replay debt through which the generation must build.
+  - Managed index admission must route every subsequently accepted write into
+    snapshot or replay debt before the generation can publish. The model keeps
+    this as a protocol contract rather than modeling writer installation,
+    queues, or any particular index kind.
 
   Current-main also has a bounded lost-wakeup recovery path:
-  db.zig indexRepairScanDue periodically rediscovers durable repair intents,
-  while indexRepairSchedulerBackoffBlocks lets an exact dirty wake bypass the
-  fallback cadence. The model therefore permits an immediate generation wake
-  to be lost, but bounds fallback rediscovery before rearming the same durable
-  debt. BuggyLoseSecondSchemaWakeup disables both routes.
+  data/runtime.zig indexRepairScanDue periodically rediscovers durable repair
+  intents, while indexRepairSchedulerBackoffBlocks lets an exact dirty wake
+  bypass the fallback cadence. The model therefore permits an immediate
+  generation wake to get lost, but bounds fallback rediscovery before rearming
+  the same durable debt. BuggyLoseSecondSchemaWakeup disables both routes.
 
   Deliberate omissions: per-segment build structure, index bytes/merge policy,
   the exact freshness-source taxonomy (live-writer vs background refresh),
   and query routing between index kinds. One index, two schema generations,
   bounded writes and bounded competing work.
 
-  Make targets: tla-check-index-lifecycle (positive);
-  tla-check-index-lifecycle-negative-{swap-incomplete,
-  recover-trusts-status}. Correspondence: hand-modeled from the cited
-  anchors.
+  Checks: AntflyIndexLifecycle plus pinned Bad* sections for incomplete swap,
+  stale recovery, lost wakeup, and accepted-write loss. Correspondence:
+  hand-modeled from the cited anchors.
 *)
 
 EXTENDS Naturals, TLC
 
 CONSTANTS BuggySwapIncompleteShadow, BuggyRecoverTrustsStaleStatus,
-          BuggyLoseSecondSchemaWakeup
+          BuggyLoseSecondSchemaWakeup, BuggyDropAcceptedWrite
 
 MaxSeq == 2
 MaxSchema == 2
@@ -53,9 +56,10 @@ States == {"stale", "building", "fresh", "failed"}
 VARIABLES
     state,          \* runtime lifecycle state
     applied,        \* durable index build watermark
-    target,         \* durable write watermark the index must reach
+    accepted,       \* watermark of writes accepted after generation admission
+    target,         \* accepted writes captured in snapshot or replay debt
     statusDurable,  \* last persisted status snapshot
-    servedFreshBehind, \* ghost: a query was served fresh with applied < target
+    servedFreshBehind, \* ghost: a query was served fresh with applied < accepted
     requestedSchema, \* schema generation requested by metadata
     builtSchema,     \* generation whose shadow index was successfully swapped
     wakeQueued,      \* exact durable wake visible to the scheduler
@@ -65,13 +69,14 @@ VARIABLES
     fallbackTicks    \* bounded periodic scans since the exact wake was lost
 
 vars ==
-    <<state, applied, target, statusDurable, servedFreshBehind,
+    <<state, applied, accepted, target, statusDurable, servedFreshBehind,
       requestedSchema, builtSchema, wakeQueued, workerAdmitted,
       competingWork, secondWakeLost, fallbackTicks>>
 
 Init ==
     /\ state = "stale"
     /\ applied = 0
+    /\ accepted = 0
     /\ target = 0
     /\ statusDurable = "stale"
     /\ servedFreshBehind = FALSE
@@ -83,11 +88,15 @@ Init ==
     /\ secondWakeLost = FALSE
     /\ fallbackTicks = 0
 
-\* A write advances the target; a fresh index has new debt and degrades to
-\* building (derived indexes re-enter catch-up when notified).
+\* A write advances the accepted watermark. The good path also records durable
+\* snapshot or replay debt. A fresh index with new debt degrades to building.
 Write ==
-    /\ target < MaxSeq
-    /\ target' = target + 1
+    /\ accepted < MaxSeq
+    /\ accepted' = accepted + 1
+    /\ target' =
+        IF BuggyDropAcceptedWrite
+        THEN target
+        ELSE target + 1
     /\ state' = IF state = "fresh" THEN "building" ELSE state
     /\ wakeQueued' = (wakeQueued \/ (state = "fresh"))
     /\ workerAdmitted' =
@@ -101,7 +110,7 @@ Write ==
 RunCompetingWork ==
     /\ competingWork > 0
     /\ competingWork' = competingWork - 1
-    /\ UNCHANGED <<state, applied, target, statusDurable,
+    /\ UNCHANGED <<state, applied, accepted, target, statusDurable,
                   servedFreshBehind, requestedSchema, builtSchema,
                   wakeQueued, workerAdmitted, secondWakeLost, fallbackTicks>>
 
@@ -111,7 +120,7 @@ AdmitIndexWorker ==
     /\ competingWork = 0
     /\ workerAdmitted' = TRUE
     /\ wakeQueued' = FALSE
-    /\ UNCHANGED <<state, applied, target, statusDurable,
+    /\ UNCHANGED <<state, applied, accepted, target, statusDurable,
                   servedFreshBehind, requestedSchema, builtSchema,
                   competingWork, secondWakeLost, fallbackTicks>>
 
@@ -119,8 +128,8 @@ StartBuild ==
     /\ state \in {"stale", "failed"}
     /\ workerAdmitted
     /\ state' = "building"
-    /\ UNCHANGED <<applied, target, statusDurable, servedFreshBehind,
-                  requestedSchema, builtSchema, wakeQueued,
+    /\ UNCHANGED <<applied, accepted, target, statusDurable,
+                  servedFreshBehind, requestedSchema, builtSchema, wakeQueued,
                   workerAdmitted, competingWork, secondWakeLost, fallbackTicks>>
 
 BuildStep ==
@@ -128,7 +137,7 @@ BuildStep ==
     /\ workerAdmitted
     /\ applied < target
     /\ applied' = applied + 1
-    /\ UNCHANGED <<state, target, statusDurable, servedFreshBehind,
+    /\ UNCHANGED <<state, accepted, target, statusDurable, servedFreshBehind,
                   requestedSchema, builtSchema, wakeQueued,
                   workerAdmitted, competingWork, secondWakeLost, fallbackTicks>>
 
@@ -142,18 +151,18 @@ Swap ==
     /\ state' = "fresh"
     /\ builtSchema' = requestedSchema
     /\ workerAdmitted' = FALSE
-    /\ UNCHANGED <<applied, target, statusDurable, servedFreshBehind,
-                  requestedSchema, wakeQueued, competingWork, secondWakeLost,
-                  fallbackTicks>>
+    /\ UNCHANGED <<applied, accepted, target, statusDurable,
+                  servedFreshBehind, requestedSchema, wakeQueued,
+                  competingWork, secondWakeLost, fallbackTicks>>
 
 FailBuild ==
     /\ state = "building"
     /\ state' = "failed"
     /\ workerAdmitted' = FALSE
     /\ wakeQueued' = TRUE
-    /\ UNCHANGED <<applied, target, statusDurable, servedFreshBehind,
-                  requestedSchema, builtSchema, competingWork,
-                  secondWakeLost, fallbackTicks>>
+    /\ UNCHANGED <<applied, accepted, target, statusDurable,
+                  servedFreshBehind, requestedSchema, builtSchema,
+                  competingWork, secondWakeLost, fallbackTicks>>
 
 \* A second generation always leaves durable repair debt. Its exact wake can
 \* be lost at the scheduler boundary; current-main's periodic scan must then
@@ -177,7 +186,8 @@ RequestSecondSchema ==
                   /\ secondWakeLost' = FALSE
              \/ /\ wakeQueued' = FALSE
                   /\ secondWakeLost' = TRUE
-    /\ UNCHANGED <<target, statusDurable, servedFreshBehind, builtSchema>>
+    /\ UNCHANGED <<accepted, target, statusDurable, servedFreshBehind,
+                  builtSchema>>
 
 FallbackScanTick ==
     /\ builtSchema < requestedSchema
@@ -186,9 +196,9 @@ FallbackScanTick ==
     /\ ~workerAdmitted
     /\ fallbackTicks < MaxFallbackTicks
     /\ fallbackTicks' = fallbackTicks + 1
-    /\ UNCHANGED <<state, applied, target, statusDurable, servedFreshBehind,
-                  requestedSchema, builtSchema, wakeQueued, workerAdmitted,
-                  competingWork, secondWakeLost>>
+    /\ UNCHANGED <<state, applied, accepted, target, statusDurable,
+                  servedFreshBehind, requestedSchema, builtSchema, wakeQueued,
+                  workerAdmitted, competingWork, secondWakeLost>>
 
 FallbackRediscoverWake ==
     /\ ~BuggyLoseSecondSchemaWakeup
@@ -199,16 +209,16 @@ FallbackRediscoverWake ==
     /\ fallbackTicks = MaxFallbackTicks
     /\ wakeQueued' = TRUE
     /\ secondWakeLost' = FALSE
-    /\ UNCHANGED <<state, applied, target, statusDurable, servedFreshBehind,
-                  requestedSchema, builtSchema, workerAdmitted, competingWork,
-                  fallbackTicks>>
+    /\ UNCHANGED <<state, applied, accepted, target, statusDurable,
+                  servedFreshBehind, requestedSchema, builtSchema,
+                  workerAdmitted, competingWork, fallbackTicks>>
 
 \* Status snapshots persist asynchronously and can lag the live state.
 PersistStatus ==
     /\ statusDurable # state
     /\ state # "failed"
     /\ statusDurable' = state
-    /\ UNCHANGED <<state, applied, target, servedFreshBehind,
+    /\ UNCHANGED <<state, applied, accepted, target, servedFreshBehind,
                   requestedSchema, builtSchema, wakeQueued,
                   workerAdmitted, competingWork, secondWakeLost, fallbackTicks>>
 
@@ -232,16 +242,16 @@ CrashReopen ==
             \/ applied < target)
         THEN TRUE
         ELSE wakeQueued
-    /\ UNCHANGED <<applied, target, statusDurable, servedFreshBehind,
-                  requestedSchema, builtSchema, competingWork,
-                  secondWakeLost, fallbackTicks>>
+    /\ UNCHANGED <<applied, accepted, target, statusDurable,
+                  servedFreshBehind, requestedSchema, builtSchema,
+                  competingWork, secondWakeLost, fallbackTicks>>
 
-\* A consistent read consults the index; serving it as fresh while behind is
-\* the silent missing-results failure.
+\* A consistent read consults the index; serving it as fresh while behind
+\* accepted writes records the silent missing-results failure.
 Query ==
     /\ servedFreshBehind' =
-        (servedFreshBehind \/ (state = "fresh" /\ applied < target))
-    /\ UNCHANGED <<state, applied, target, statusDurable,
+        (servedFreshBehind \/ (state = "fresh" /\ applied < accepted))
+    /\ UNCHANGED <<state, applied, accepted, target, statusDurable,
                   requestedSchema, builtSchema, wakeQueued,
                   workerAdmitted, competingWork, secondWakeLost, fallbackTicks>>
 
@@ -264,7 +274,7 @@ Spec == Init /\ [][Next]_vars
 
 (*
   Liveness: if the index does not fail forever, the build converges to
-  fresh. Writes are structurally bounded (target <= MaxSeq), so debt is
+  fresh. Writes are structurally bounded (accepted <= MaxSeq), so debt is
   finite. STRONG fairness is required, not weak: a crash/reopen loop resets
   the runtime state and repeatedly interrupts enabledness, but applied is
   durable, so intermittently-enabled fair build steps still drain the debt
@@ -284,20 +294,23 @@ Fairness ==
 FairSpec == Spec /\ Fairness
 
 BuildEventuallyConverges ==
-    (<>[](state # "failed")) => <>(state = "fresh" /\ applied = target)
+    (<>[](state # "failed")) => <>(state = "fresh" /\ applied = accepted)
 
 SecondSchemaEventuallyConverges ==
     [](requestedSchema = 2 =>
-        <>(builtSchema = 2 /\ state = "fresh" /\ applied = target))
+        <>(builtSchema = 2 /\ state = "fresh" /\ applied = accepted))
 
 TypeOK ==
     /\ BuggySwapIncompleteShadow \in BOOLEAN
     /\ BuggyRecoverTrustsStaleStatus \in BOOLEAN
     /\ BuggyLoseSecondSchemaWakeup \in BOOLEAN
+    /\ BuggyDropAcceptedWrite \in BOOLEAN
     /\ state \in States
     /\ applied \in 0..MaxSeq
+    /\ accepted \in 0..MaxSeq
     /\ target \in 0..MaxSeq
     /\ applied <= target
+    /\ target <= accepted
     /\ statusDurable \in States
     /\ servedFreshBehind \in BOOLEAN
     /\ requestedSchema \in 1..MaxSchema
@@ -313,6 +326,10 @@ TypeOK ==
 FreshImpliesCaughtUp ==
     state = "fresh" => applied = target
 
+\* A published generation covers every write accepted after its admission.
+PublishedGenerationCoversAcceptedWrites ==
+    state = "fresh" => applied = accepted
+
 \* No query is ever served fresh results from a behind index.
 NoFreshServeBehind ==
     ~servedFreshBehind
@@ -326,6 +343,7 @@ EveryRequestedGenerationHasDurableWork ==
 Safety ==
     /\ TypeOK
     /\ FreshImpliesCaughtUp
+    /\ PublishedGenerationCoversAcceptedWrites
     /\ NoFreshServeBehind
     /\ EveryRequestedGenerationHasDurableWork
 

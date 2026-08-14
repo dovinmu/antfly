@@ -14,6 +14,20 @@ bounds and fairness assumptions, (4) deliberately omitted behavior, and
 The B1 and B5 July-25 smokeout findings are examples of why fairness and
 enabling assumptions are part of the result rather than harmless boilerplate.
 
+## Maintenance Rule
+
+Change a TLA+ state machine only when product behavior changes an invariant,
+permitted transition order, durability boundary, or progress/fairness
+assumption.
+
+- If none of those contracts changed, rerun the existing checks without
+  editing the model.
+- If one changed, update the relevant model and add one focused mutant.
+
+Refactors, symbol moves, payload changes, performance tuning, and new
+implementations of an unchanged abstract protocol require correspondence or
+implementation-test review, not model edits.
+
 `bash ../scripts/tla-check.sh audit` is the static hygiene audit: leftover
 `_TTrace_` artifacts, `Buggy*` constants no check enables, sections no tier
 would ever run (hard failures), and Safety-conjunction-pinned checks
