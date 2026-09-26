@@ -16,9 +16,10 @@ All notable changes to Antfly will be documented in this file.
 
 ### [Unreleased]
 
-- **Native PDF extraction** — repair demonstrably interleaved horizontal columns
-  without changing paint order. Preserve authored order for overlapping paint
-  sequences, already-grouped columns, and ambiguous or vertically separated
+- **Native PDF extraction** — repair demonstrably interleaved horizontal prose
+  columns without changing paint order. Require sustained prose in both columns
+  and preserve ambiguous table row associations. Preserve authored order for
+  overlapping paint sequences, already-grouped columns, and vertically separated
   layouts. Resolve indirect CCITT decode parameters, accept valid zero-filled
   Group 3 line markers, and correct PNG compression-buffer ownership.
 - **Durable OCR grounding** — preserve compatible Reader regions as UTF-8 byte

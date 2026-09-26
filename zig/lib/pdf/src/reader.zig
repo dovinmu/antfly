@@ -17769,13 +17769,15 @@ fn textLayoutNeedsColumnReordering(
         previous_bottom = @min(previous_bottom, line.bounds.min_y);
     }
 
-    // Short labels paired with phrases or numeric cells are also painted
-    // row-major. Those rows are ambiguous evidence for prose columns.
-    var table_rows: usize = 0;
+    // A wide gutter and repeated right-to-left transitions also describe a
+    // table. Require sustained prose on BOTH sides before changing authored
+    // row associations. Short cells remain ambiguous regardless of their
+    // value type or the number of operators used to paint each word.
+    var left_prose_lines: usize = 0;
+    var right_prose_lines: usize = 0;
     for (lines) |line| {
         var left_words: usize = 0;
         var right_words: usize = 0;
-        var right_numeric = false;
         var previous_left: ?usize = null;
         var previous_right_run: ?usize = null;
         for (line.run_indices.items) |index| {
@@ -17793,19 +17795,25 @@ fn textLayoutNeedsColumnReordering(
                     const word_gap = @max(0.5, @abs(runs[prior].font_size) * textRunAxisLength(runs[prior]) * 0.12) * @abs(runs[prior].horizontal_scale);
                     break :blk textRunForwardGap(runs[prior], runs[index]) <= word_gap;
                 } else false;
-                if (is_left and !joins_previous) left_words += 1;
-                if (is_right) {
-                    if (!joins_previous) right_words += 1;
-                    right_numeric = right_numeric or (!joins_previous and (std.fmt.parseFloat(f64, word) catch null) != null);
+                // Numeric and punctuation-only cells do not establish prose.
+                var has_letter = false;
+                for (word) |byte| has_letter = has_letter or std.ascii.isAlphabetic(byte) or byte >= 0x80;
+                const numeric = (std.fmt.parseFloat(f64, word) catch null) != null;
+                if (has_letter and !numeric and !joins_previous) {
+                    if (is_left) left_words += 1;
+                    if (is_right) right_words += 1;
                 }
                 first = false;
             }
             if (is_left) previous_left = index;
             if (is_right) previous_right_run = index;
         }
-        if (left_words > 0 and left_words <= 2 and (right_words >= 2 or right_numeric)) table_rows += 1;
+        const center_y = (line.bounds.min_y + line.bounds.max_y) * 0.5;
+        if (center_y < gutter.body_bottom or center_y > gutter.body_top) continue;
+        if (left_words >= 3) left_prose_lines += 1;
+        if (right_words >= 3) right_prose_lines += 1;
     }
-    if (table_rows >= 3) return false;
+    if (left_prose_lines < 3 or right_prose_lines < 3) return false;
 
     // Repair demonstrably interleaved columns, not already grouped streams.
     // A return from the right column to a later left-column row identifies
@@ -21891,9 +21899,9 @@ test "reader extracts full-width heading and split-operator columns without chan
     const alloc = std.testing.allocator;
     const content =
         "BT /F1 12 Tf 1 0 0 1 20 278 Tm (FULL WIDTH HEADING SPANS BOTH COLUMNS) Tj ET\n" ++
-        "BT /F1 10 Tf 1 0 0 1 20 240 Tm (LEF) Tj (T1) Tj 1 0 0 1 220 240 Tm (RIG) Tj (HT1) Tj ET\n" ++
-        "BT /F1 10 Tf 1 0 0 1 20 220 Tm (LEF) Tj (T2) Tj 1 0 0 1 220 220 Tm (RIG) Tj (HT2) Tj ET\n" ++
-        "BT /F1 10 Tf 1 0 0 1 20 200 Tm (LEF) Tj (T3) Tj 1 0 0 1 220 200 Tm (RIG) Tj (HT3) Tj ET\n";
+        "BT /F1 10 Tf 1 0 0 1 20 240 Tm (LEF) Tj (T1 body text) Tj 1 0 0 1 220 240 Tm (RIG) Tj (HT1 body text) Tj ET\n" ++
+        "BT /F1 10 Tf 1 0 0 1 20 220 Tm (LEF) Tj (T2 body text) Tj 1 0 0 1 220 220 Tm (RIG) Tj (HT2 body text) Tj ET\n" ++
+        "BT /F1 10 Tf 1 0 0 1 20 200 Tm (LEF) Tj (T3 body text) Tj 1 0 0 1 220 200 Tm (RIG) Tj (HT3 body text) Tj ET\n";
     const sample = try buildTextOrderingTestPdfAlloc(alloc, content);
     defer alloc.free(sample);
     var reader = try Reader.init(alloc, sample);
@@ -21901,8 +21909,8 @@ test "reader extracts full-width heading and split-operator columns without chan
 
     const expected =
         "FULL WIDTH HEADING SPANS BOTH COLUMNS\n" ++
-        "LEFT1\nLEFT2\nLEFT3\n" ++
-        "RIGHT1\nRIGHT2\nRIGHT3\n";
+        "LEFT1 body text\nLEFT2 body text\nLEFT3 body text\n" ++
+        "RIGHT1 body text\nRIGHT2 body text\nRIGHT3 body text\n";
     var analysis = try reader.extractPageTextAnalysisAlloc(1);
     defer analysis.deinit(alloc);
     try std.testing.expectEqualStrings(expected, analysis.text);
@@ -21945,8 +21953,8 @@ test "reader orders text columns emitted through form xobjects" {
         "q 1 0 0 1 20 240 cm /FL Do Q q 1 0 0 1 220 240 cm /FR Do Q\n" ++
         "q 1 0 0 1 20 220 cm /FL Do Q q 1 0 0 1 220 220 cm /FR Do Q\n" ++
         "q 1 0 0 1 20 200 cm /FL Do Q q 1 0 0 1 220 200 cm /FR Do Q\n";
-    const left_content = "BT /F1 10 Tf 1 0 0 1 0 0 Tm (LEFT) Tj ET\n";
-    const right_content = "BT /F1 10 Tf 1 0 0 1 0 0 Tm (RIGHT) Tj ET\n";
+    const left_content = "BT /F1 10 Tf 1 0 0 1 0 0 Tm (LEFT BODY TEXT) Tj ET\n";
+    const right_content = "BT /F1 10 Tf 1 0 0 1 0 0 Tm (RIGHT BODY TEXT) Tj ET\n";
     const page_stream = try std.fmt.allocPrint(alloc, "4 0 obj\n<< /Length {d} >>\nstream\n{s}endstream\nendobj\n", .{ page_content.len, page_content });
     defer alloc.free(page_stream);
     const left_form = try std.fmt.allocPrint(
@@ -21977,10 +21985,10 @@ test "reader orders text columns emitted through form xobjects" {
 
     var analysis = try reader.extractPageTextAnalysisAlloc(1);
     defer analysis.deinit(alloc);
-    try std.testing.expectEqualStrings("LEFT\nLEFT\nLEFT\nRIGHT\nRIGHT\nRIGHT\n", analysis.text);
+    try std.testing.expectEqualStrings("LEFT BODY TEXT\nLEFT BODY TEXT\nLEFT BODY TEXT\nRIGHT BODY TEXT\nRIGHT BODY TEXT\nRIGHT BODY TEXT\n", analysis.text);
     try std.testing.expectEqual(@as(usize, 6), analysis.runs.len);
-    try std.testing.expectEqualStrings("RIGHT", analysis.runs[1].text);
-    try std.testing.expectEqualStrings("LEFT", analysis.runs[2].text);
+    try std.testing.expectEqualStrings("RIGHT BODY TEXT", analysis.runs[1].text);
+    try std.testing.expectEqualStrings("LEFT BODY TEXT", analysis.runs[2].text);
     try std.testing.expect(analysis.runs[1].paint_order < analysis.runs[2].paint_order);
 }
 
@@ -22002,17 +22010,17 @@ test "reader keeps ordinary single-column extraction stable" {
 test "reader requires three lines and two line heights for a column gutter" {
     const alloc = std.testing.allocator;
     var exact_width = [_]TextRun{
-        .{ .text = "L1", .x = 0, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-        .{ .text = "R1", .x = 30, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-        .{ .text = "L2", .x = 0, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-        .{ .text = "R2", .x = 30, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-        .{ .text = "L3 ", .x = 0, .y = 60, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-        .{ .text = "R3", .x = 30, .y = 60, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+        .{ .text = "L1 prose words", .x = 0, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+        .{ .text = "R1 prose words", .x = 30, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+        .{ .text = "L2 prose words", .x = 0, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+        .{ .text = "R2 prose words", .x = 30, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+        .{ .text = "L3 prose words ", .x = 0, .y = 60, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+        .{ .text = "R3 prose words", .x = 30, .y = 60, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
     };
     const exact_text = try reconstructTextFromRunsAlloc(alloc, &exact_width);
     defer alloc.free(exact_text);
-    try std.testing.expectEqualStrings("L1\nL2\nL3\nR1\nR2\nR3\n", exact_text);
-    try std.testing.expectEqual(TextOutputSpan{ .start = 6, .end = 8 }, exact_width[4].output_span.?);
+    try std.testing.expectEqualStrings("L1 prose words\nL2 prose words\nL3 prose words\nR1 prose words\nR2 prose words\nR3 prose words\n", exact_text);
+    try std.testing.expectEqual(TextOutputSpan{ .start = 30, .end = 44 }, exact_width[4].output_span.?);
 
     var narrow = exact_width;
     narrow[1].x = 29.5;
@@ -22020,17 +22028,17 @@ test "reader requires three lines and two line heights for a column gutter" {
     narrow[5].x = 29.5;
     const narrow_text = try reconstructTextFromRunsAlloc(alloc, &narrow);
     defer alloc.free(narrow_text);
-    try std.testing.expectEqualStrings("L1 R1\nL2 R2\nL3 R3\n", narrow_text);
+    try std.testing.expectEqualStrings("L1 prose words R1 prose words\nL2 prose words R2 prose words\nL3 prose words R3 prose words\n", narrow_text);
 
     var two_lines = [_]TextRun{
-        .{ .text = "L1", .x = 0, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-        .{ .text = "R1", .x = 100, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-        .{ .text = "L2", .x = 0, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-        .{ .text = "R2", .x = 100, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+        .{ .text = "L1 prose words", .x = 0, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+        .{ .text = "R1 prose words", .x = 100, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+        .{ .text = "L2 prose words", .x = 0, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+        .{ .text = "R2 prose words", .x = 100, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
     };
     const two_line_text = try reconstructTextFromRunsAlloc(alloc, &two_lines);
     defer alloc.free(two_line_text);
-    try std.testing.expectEqualStrings("L1 R1\nL2 R2\n", two_line_text);
+    try std.testing.expectEqualStrings("L1 prose words R1 prose words\nL2 prose words R2 prose words\n", two_line_text);
 }
 
 test "reader leaves rotated and mixed-direction script runs in original order" {
@@ -22090,16 +22098,16 @@ test "reader column ordering releases allocations on every failure" {
     const Runner = struct {
         fn run(failing_alloc: Allocator) !void {
             var runs = [_]TextRun{
-                .{ .text = "L1", .x = 0, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-                .{ .text = "R1", .x = 100, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-                .{ .text = "L2", .x = 0, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-                .{ .text = "R2", .x = 100, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-                .{ .text = "L3", .x = 0, .y = 60, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
-                .{ .text = "R3", .x = 100, .y = 60, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+                .{ .text = "L1 prose words", .x = 0, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+                .{ .text = "R1 prose words", .x = 100, .y = 100, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+                .{ .text = "L2 prose words", .x = 0, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+                .{ .text = "R2 prose words", .x = 100, .y = 80, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+                .{ .text = "L3 prose words", .x = 0, .y = 60, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
+                .{ .text = "R3 prose words", .x = 100, .y = 60, .font_size = 10, .advance_width = 10, .ascent = 8, .descent = 2 },
             };
             const text = try reconstructTextFromRunsAlloc(failing_alloc, &runs);
             defer failing_alloc.free(text);
-            try std.testing.expectEqualStrings("L1\nL2\nL3\nR1\nR2\nR3\n", text);
+            try std.testing.expectEqualStrings("L1 prose words\nL2 prose words\nL3 prose words\nR1 prose words\nR2 prose words\nR3 prose words\n", text);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Runner.run, .{});
@@ -30973,4 +30981,71 @@ test "reader bounds dense page ordering and honors reconstruction cancellation" 
     };
     var probe = Probe{};
     try std.testing.expectError(error.Canceled, reconstructTextFromRunsCancelableAlloc(alloc, runs, .{ .context = &probe, .is_cancelled_fn = Probe.canceled }));
+}
+
+test "reader preserves ambiguous cells independent of text vocabulary" {
+    const alloc = std.testing.allocator;
+    const cases = [_][6][]const u8{
+        .{ "Name", "Alice", "City", "Paris", "Role", "Engineer" },
+        .{ "First name", "Alice", "Home city", "Paris", "Job role", "Engineer" },
+        .{ "Full legal person name", "Alice", "Current city of residence", "Paris", "Primary current job role", "Engineer" },
+        .{ "Name", "Alice Jane Smith", "City", "Greater Paris Region", "Role", "Senior Software Engineer" },
+        .{ "A", "B", "C", "D", "E", "F" },
+        .{ "L1", "R1", "L2", "R2", "L3", "R3" },
+        .{ "Code", "123 456 789", "Code", "456 789 123", "Code", "789 123 456" },
+        .{ "1e3 2e3 3e3", "4e3 5e3 6e3", "7e3 8e3 9e3", "1e4 2e4 3e4", "4e4 5e4 6e4", "7e4 8e4 9e4" },
+        .{ "姓名", "小明", "城市", "東京", "職業", "工程師" },
+    };
+    for (cases) |cells| {
+        var runs: [6]TextRun = undefined;
+        for (&runs, 0..) |*run, i| run.* = .{
+            .text = cells[i],
+            .x = if (i % 2 == 0) 0 else 200,
+            .y = 100 - @as(f64, @floatFromInt(i / 2)) * 20,
+            .font_size = 10,
+            .advance_width = 100,
+            .ascent = 8,
+            .descent = 2,
+        };
+        const text = try reconstructTextFromRunsAlloc(alloc, &runs);
+        defer alloc.free(text);
+        const expected = try std.fmt.allocPrint(alloc, "{s} {s}\n{s} {s}\n{s} {s}\n", .{ cells[0], cells[1], cells[2], cells[3], cells[4], cells[5] });
+        defer alloc.free(expected);
+        try std.testing.expectEqualStrings(expected, text);
+        for (runs, 0..) |run, i| {
+            const span = run.output_span.?;
+            try std.testing.expectEqualStrings(cells[i], text[span.start..span.end]);
+            if (i > 0) try std.testing.expect(runs[i - 1].output_span.?.end < span.start);
+        }
+    }
+}
+
+test "reader preserves PDF table rows and split-word provenance" {
+    const alloc = std.testing.allocator;
+    const content =
+        "BT /F1 10 Tf 1 0 0 1 20 240 Tm (Na) Tj (me) Tj 1 0 0 1 220 240 Tm (Alice) Tj ET\n" ++
+        "BT /F1 10 Tf 1 0 0 1 20 220 Tm (City) Tj 1 0 0 1 220 220 Tm (Paris) Tj ET\n" ++
+        "BT /F1 10 Tf 1 0 0 1 20 200 Tm (Role) Tj 1 0 0 1 220 200 Tm (Engineer) Tj ET\n";
+    const sample = try buildTextOrderingTestPdfAlloc(alloc, content);
+    defer alloc.free(sample);
+    var reader = try Reader.init(alloc, sample);
+    defer reader.deinit();
+    const expected = "Name Alice\nCity Paris\nRole Engineer\n";
+    var analysis = try reader.extractPageTextAnalysisAlloc(1);
+    defer analysis.deinit(alloc);
+    try std.testing.expectEqualStrings(expected, analysis.text);
+    try std.testing.expectEqual(@as(usize, 7), analysis.runs.len);
+    for (analysis.runs) |run| {
+        const span = run.output_span.?;
+        try std.testing.expectEqualStrings(run.text, analysis.text[span.start..span.end]);
+    }
+    try std.testing.expectEqual(TextOutputSpan{ .start = 0, .end = 2 }, analysis.runs[0].output_span.?);
+    try std.testing.expectEqual(TextOutputSpan{ .start = 2, .end = 4 }, analysis.runs[1].output_span.?);
+    const plain = try reader.extractPageTextAlloc(1);
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings(expected, plain);
+    var render_runs = try reader.extractPageRenderRunsForRasterAlloc(1, 400, 300);
+    defer render_runs.deinit(alloc);
+    try std.testing.expectEqualStrings("Alice", render_runs.text_runs[2].text);
+    try std.testing.expectEqualStrings("City", render_runs.text_runs[3].text);
 }

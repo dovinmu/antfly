@@ -4327,7 +4327,7 @@ pub fn executeNode(
             if (attrs.num_spatial == 1 and attrs.groups == 1 and
                 input_shape.rank() == 3 and weight_shape.rank() == 3 and
                 attrs.padding[0][0] == attrs.padding[0][1] and
-                attrs.dilations[0] == 1 and attrs.output_padding[0] == 0)
+                attrs.dilations[0] > 0 and attrs.output_padding[0] == 0)
             {
                 const batch = try positiveResolvedDim(input_actual, input_shape, 0);
                 const in_channels = try positiveResolvedDim(input_actual, input_shape, 1);
@@ -6219,7 +6219,7 @@ test "MoE round-trip: trace grouped path → interpret with live routing" {
 const native_mod = if (build_options.enable_native) @import("../ops/native_compute.zig") else struct {};
 const NativeCompute = if (build_options.enable_native) native_mod.NativeCompute else opaque {};
 const WeightStore = if (build_options.enable_native) native_mod.WeightStore else opaque {};
-fn expectNativeConvTranspose(
+fn expectNativeConvolution(
     attrs: ml.graph.node.ConvAttrs,
     input_declared: Shape,
     weight_declared: Shape,
@@ -6277,7 +6277,7 @@ test "native ConvTranspose 1d executes scatter-add with asymmetric kernel" {
     attrs.transposed = true;
     attrs.num_spatial = 1;
 
-    try expectNativeConvTranspose(
+    try expectNativeConvolution(
         attrs,
         Shape.init(.f32, &.{ -1, 1, -1 }),
         Shape.init(.f32, &.{ 1, 1, 3 }),
@@ -6297,7 +6297,7 @@ test "native ConvTranspose 1d stride two handles overlap and non-overlap" {
     attrs.num_spatial = 1;
     attrs.strides[0] = 2;
 
-    try expectNativeConvTranspose(
+    try expectNativeConvolution(
         attrs,
         Shape.init(.f32, &.{ 1, 1, 2 }),
         Shape.init(.f32, &.{ 1, 1, 3 }),
@@ -6309,7 +6309,7 @@ test "native ConvTranspose 1d stride two handles overlap and non-overlap" {
         &.{ 1, 1, 3, 2, 2 },
         &.{ 1, 1, 5 },
     );
-    try expectNativeConvTranspose(
+    try expectNativeConvolution(
         attrs,
         Shape.init(.f32, &.{ 1, 1, 2 }),
         Shape.init(.f32, &.{ 1, 1, 2 }),
@@ -6333,7 +6333,7 @@ test "native ConvTranspose 2d executes groups dilation signed pads and output pa
     attrs.dilations = .{ 2, 1, 1, 1 };
     attrs.output_padding = .{ 1, 1, 0, 0 };
 
-    try expectNativeConvTranspose(
+    try expectNativeConvolution(
         attrs,
         Shape.init(.f32, &.{ 1, 2, 2, 2 }),
         Shape.init(.f32, &.{ 2, 1, 2, 1 }),
@@ -8401,4 +8401,17 @@ test "Metal i64 arithmetic and mixed comparisons never round through float" {
     const cast_bytes = (try gpu.exportTensorData(cast, a)).?;
     defer a.free(cast_bytes.payload.bytes);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&[_]i64{ -1, 0, 2 }), cast_bytes.payload.bytes);
+}
+
+test "native Conv1d preserves dilation with padding stride and multiple channels" {
+    var attrs: ml.graph.node.ConvAttrs = .{};
+    attrs.num_spatial = 1;
+    attrs.dilations[0] = 2;
+    try expectNativeConvolution(attrs, Shape.init(.f32, &.{ 1, 1, 5 }), Shape.init(.f32, &.{ 1, 1, 2 }), Shape.init(.f32, &.{ 1, 1, 3 }), &.{ 1, 2, 3, 4, 5 }, &.{ 1, 1, 5 }, &.{ 1, 1 }, &.{ 1, 1, 2 }, &.{ 4, 6, 8 }, &.{ 1, 1, 3 });
+    attrs.padding[0] = .{ 1, 1 };
+    attrs.strides[0] = 2;
+    try expectNativeConvolution(attrs, Shape.init(.f32, &.{ 1, 1, 5 }), Shape.init(.f32, &.{ 1, 1, 2 }), Shape.init(.f32, &.{ 1, 1, 3 }), &.{ 1, 2, 3, 4, 5 }, &.{ 1, 1, 5 }, &.{ 1, 1 }, &.{ 1, 1, 2 }, &.{ 2, 6, 4 }, &.{ 1, 1, 3 });
+    attrs.padding[0] = .{ 0, 0 };
+    attrs.strides[0] = 1;
+    try expectNativeConvolution(attrs, Shape.init(.f32, &.{ 1, 2, 5 }), Shape.init(.f32, &.{ 1, 2, 2 }), Shape.init(.f32, &.{ 1, 1, 3 }), &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }, &.{ 1, 2, 5 }, &.{ 1, 2, 3, 4 }, &.{ 1, 2, 2 }, &.{ 57, 67, 77 }, &.{ 1, 1, 3 });
 }
