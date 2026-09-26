@@ -267,6 +267,26 @@ pub const MaskedBceWithLogitsBackwardRequest = struct {
     logits_shape: []const i64,
 };
 
+pub const SelectedTiedHeadLogitsRequest = struct {
+    hidden: CT,
+    weight: CT,
+    token_ids: CT,
+    in_dim: usize,
+    vocab_size: usize,
+    frozen_weight: bool,
+    output_shape: []const i64,
+};
+
+pub const SelectedTiedHeadBackwardRequest = struct {
+    weight: CT,
+    token_ids: CT,
+    upstream: CT,
+    in_dim: usize,
+    vocab_size: usize,
+    frozen_weight: bool,
+    hidden_shape: []const i64,
+};
+
 pub const LoraLinearBranchResult = struct {
     after_a: CT,
     after_b: CT,
@@ -1391,6 +1411,10 @@ pub const TrainingRuntimeStats = struct {
     h2d_bytes: u64 = 0,
     d2h_bytes: u64 = 0,
     largest_d2h_transfer_bytes: u64 = 0,
+    download_events: u64 = 0,
+    download_event_bytes: u64 = 0,
+    download_last_bytes: u64 = 0,
+    download_previous_bytes: u64 = 0,
     to_float32_calls: u64 = 0,
     download_alloc_calls: u64 = 0,
     stream_synchronizations: u64 = 0,
@@ -1726,6 +1750,10 @@ pub const ComputeBackend = struct {
         /// acquisition. Free exactly once; the backend must outlive the handle.
         /// Storage may still be borrowed from the model or backend cache.
         acquireWeight: *const fn (ctx: *anyopaque, name: []const u8) anyerror!CT,
+        /// Look up an immutable weight for row gathers. Backends may skip
+        /// matrix-specific packing; use only with embedding lookup operations.
+        /// Handles may be shared: free once per lookup. Defaults to getWeight.
+        getEmbeddingWeight: ?*const fn (ctx: *anyopaque, name: []const u8) anyerror!CT = null,
         prefetchWeightHint: *const fn (ctx: *anyopaque, name: []const u8, hint: u32) void,
         drainPrefetchBudget: *const fn (ctx: *anyopaque, max_items: usize) void,
         debugProfileCheckpoint: ?*const fn (ctx: *anyopaque, label: []const u8, layer: usize) void = null,
@@ -2957,6 +2985,14 @@ pub const ComputeBackend = struct {
         /// Log-softmax along last dimension: x - max - log(sum(exp(x-max))).
         /// `last_dim_size` is the size of the last dimension (not an axis index).
         logSoftmaxOp: ?*const fn (ctx: *anyopaque, input: CT, last_dim_size: u32) anyerror!CT = null,
+        /// Compute selected log-softmax values from a row-major logits matrix
+        /// without materializing the full log-probability matrix. Backends
+        /// return null when no fused resident implementation is available.
+        selectedTokenLogprobs: ?*const fn (ctx: *anyopaque, logits: CT, row_indices: []const u32, token_ids: []const u32, rows: usize, vocab_size: usize) anyerror!?CT = null,
+        /// Two selected logits from a frozen tied language-model head.
+        selectedTiedHeadLogits: ?*const fn (ctx: *anyopaque, request: *const SelectedTiedHeadLogitsRequest) anyerror!CT = null,
+        /// d_hidden for the selected tied-head projection.
+        selectedTiedHeadBackward: ?*const fn (ctx: *anyopaque, request: *const SelectedTiedHeadBackwardRequest) anyerror!CT = null,
         /// GLiNER-style masked BCE-with-logits scalar loss.
         maskedBceWithLogitsLoss: ?*const fn (ctx: *anyopaque, request: *const MaskedBceWithLogitsRequest) anyerror!CT = null,
         /// Gradient of masked BCE-with-logits with respect to logits.
@@ -3012,6 +3048,12 @@ pub const ComputeBackend = struct {
     pub fn acquireWeight(self: *const ComputeBackend, name: []const u8) !CT {
         try self.checkExecutionControl();
         return self.vtable.acquireWeight(self.ptr, name);
+    }
+
+    pub fn getEmbeddingWeight(self: *const ComputeBackend, name: []const u8) !CT {
+        try self.checkExecutionControl();
+        const acquire = self.vtable.getEmbeddingWeight orelse self.vtable.getWeight;
+        return acquire(self.ptr, name);
     }
 
     pub fn prefetchWeight(self: *const ComputeBackend, name: []const u8) void {
@@ -5423,6 +5465,18 @@ pub const ComputeBackend = struct {
     }
     pub fn primLogSoftmax(self: *const ComputeBackend, input: CT, dim: u32) !CT {
         if (self.vtable.logSoftmaxOp) |f| return f(self.ptr, input, dim);
+        return error.UnsupportedPrimitiveOp;
+    }
+    pub fn selectedTokenLogprobs(self: *const ComputeBackend, logits: CT, row_indices: []const u32, token_ids: []const u32, rows: usize, vocab_size: usize) !?CT {
+        if (self.vtable.selectedTokenLogprobs) |f| return f(self.ptr, logits, row_indices, token_ids, rows, vocab_size);
+        return null;
+    }
+    pub fn selectedTiedHeadLogits(self: *const ComputeBackend, request: *const SelectedTiedHeadLogitsRequest) !CT {
+        if (self.vtable.selectedTiedHeadLogits) |f| return f(self.ptr, request);
+        return error.UnsupportedPrimitiveOp;
+    }
+    pub fn selectedTiedHeadBackward(self: *const ComputeBackend, request: *const SelectedTiedHeadBackwardRequest) !CT {
+        if (self.vtable.selectedTiedHeadBackward) |f| return f(self.ptr, request);
         return error.UnsupportedPrimitiveOp;
     }
     pub fn maskedBceWithLogitsLoss(self: *const ComputeBackend, request: *const MaskedBceWithLogitsRequest) !CT {

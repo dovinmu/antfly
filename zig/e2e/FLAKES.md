@@ -1,5 +1,224 @@
 # Zig E2E flakes
 
+## 2026-09-25: progressive activation observations during admission maintenance
+
+[Main job 108330133910](https://github.com/antflydb/antfly/actions/runs/36213445604/job/108330133910)
+failed `test_progressive_index_is_semantically_queryable_before_full_coverage`:
+`semantic_title_live` retained `runtime_unavailable` beyond the five-second
+activation deadline while `semantic_progressive` continued serving its partial
+generation under provider throttling. Server output records the second index's
+native checkpoint installation followed by bounded-maintenance waiting. The
+job finished with 762 passed, one failed, and seven skipped.
+
+The compiled structural path discarded a fresh resident observation whenever
+its maintenance result was `busy`. The outer scheduler also published only
+when a plan group completed. This unnecessarily tied visibility of an installed
+index to completion of its admission maintenance. Fresh observations now pass
+through the existing leadership, catalog, physical-root, and exact-incarnation
+publication fences even when the group remains pending. Coverage, replay debt,
+and maintenance completion retain their own proofs; observing a runtime does
+not declare the index ready. A bounded quantum visits each initially pending
+group at most once, avoiding duplicate observations and repeated work when a
+busy group rotates back to the head of a small plan.
+
+Enrichment reconfiguration also joined an inline provider retry implemented as
+an ordinary executor sleep. Its delay could reach five seconds, and publishing
+shutdown to the runtime condition did not wake that separate sleep. Retry and
+interactive-yield waits now use a sticky lifecycle event with their original
+monotonic deadline. Teardown wakes them immediately, including a signal that
+arrives before wait admission; spurious wakes do not shorten or extend normal
+backoff. The event resets only when the preceding worker/replay owner has
+joined and a replacement starts. The same teardown entry point publishes
+provider cancellation, and provider admission rejects further dispatch after
+shutdown. The existing lifetime drain still waits for any callback already
+using runtime/provider-owned memory.
+
+A deterministic regression admits a 60-second backoff, signals teardown both
+before admission and while the event is actually waiting, and requires the
+owner to return. Restoring the original sleep makes this regression fail with
+`Timeout`; the fixed wait passes. The test also rejects provider admission
+after teardown. It is included in the enrichment ownership suite. All 12
+focused backoff, retry isolation, restart, and visibility regressions passed
+without skips, failures, or leaks.
+
+The deterministic compiled-owner regression forces busy maintenance with a
+fresh exact index observation, checks publication from the scheduler quantum,
+retains pending coverage and plan debt, and checks one visit per group. Missing
+observations remain blocked. All 30 compiled-owner source regressions passed
+without skips, failures, or leaks. The focused lifecycle/fence selection also
+passed 23 tests without skips, failures, or leaks. Ten unchanged-server local
+reproductions passed; they did not reproduce the original CI timeout. These
+results establish the publication and backoff-wakeup bugs, but the CI logs do
+not prove a sole cause of delay on that runner. The test's five-second
+activation deadline is unchanged.
+
+The final native CPU ReleaseFast build passed all 35 steps; a second build of
+the frozen source was fully cached. A frozen binary from `d23eeeb591`, including
+both activation fixes, atomic quantized preparation, and the merge of
+`origin/main` at `cc9be026f9`, passed **200/200** independent invocations through
+the repository flake loop (four workers, 50 repetitions each). All 200 JUnit
+cases passed with zero errors, failures, or skips. Recorded activation times
+were 67.7 ms median, 71.8 ms p95, and 75.4 ms maximum. These are local gate
+measurements, not evidence of a before/after latency improvement.
+
+Reproduction from the repository root, after building the native CPU binary:
+
+```sh
+SKIP_BUILD=1 ANTFLY_E2E_ENV_LOADED=1 \
+ANTFLY_E2E_REGRESSION_WORKERS=4 \
+ANTFLY_E2E_REGRESSION_REPEATS=50 \
+ANTFLY_E2E_REGRESSION_REPORT_DIR=/private/tmp/pr890-progressive-final-soak-200 \
+ANTFLY_BIN="$PWD/zig/zig-out/bin/antfly" \
+scripts/ci/zig-e2e-regression-loop.sh \
+  e2e/antfly/test_quickstart.py::test_progressive_index_is_semantically_queryable_before_full_coverage
+```
+
+The validation run used a frozen copy of that binary at
+`/private/tmp/pr890-progressive-final-binary/antfly`. Local evidence is retained
+in `/private/tmp/pr890-progressive-final-soak-200.log`, the report directory
+above, `/private/tmp/pr890-progressive-final-soak-build.json` (binary/source
+hashes), and `/private/tmp/pr890-progressive-final-soak-summary.json`.
+
+## 2026-09-25: main HA promotion retry and CPU inference diagnostics
+
+[Main run 36200131260](https://github.com/antflydb/antfly/actions/runs/36200131260)
+failed HA `test_empty_seed_then_first_table_replication_and_fenced_promotion`
+with a 500 response after `MetadataHABindingBusy` and `HAPrimaryNotConfigured`.
+Promotion had already transferred its primary WAL to the runtime, but an
+unconditional local `errdefer` closed that transferred handle when metadata
+binding failed. Promotion also discarded its retry configuration before
+binding completed. The runtime now retains ownership and the retry state,
+and keeps public reads and writes gated until every binding succeeds.
+The background loop treats metadata binding contention as nonfatal and retains
+its exact diagnostic while scheduling another round.
+The deterministic regression injects repeated metadata binding contention,
+checks closed public gates, retries successfully, and tears down without leaks.
+
+The same run's inference suite timed out in dictate cleanup after 600 seconds;
+four later dictate requests and three embedding requests returned capacity
+errors. Two local CPU baseline invocations completed in 182 and 158 seconds,
+so the CI timeout has not been reproduced locally. Their supervisor cleanup
+failed under the local sandbox's process-group signaling restrictions; these
+are test-level observations, not successful soak invocations. A CPU sample
+identified whole-table matrix preparation during Gemma PLE row gathering.
+Gather-only weight lookup now retains raw quantized rows and skips matrix
+packing, including on the lazy-load path. Other backends retain their existing
+weight lookup semantics, and ordinary matrix consumers retain preparation.
+Regressions cover exact row values, raw-only request accounting, reservation
+release, lazy handle pins, and later matrix preparation. Shared request
+reservations grow once when a matrix borrower needs a larger footprint; a
+denied growth does not add a borrower or leak its original charge. Matrix
+preparation now stages all new layouts and publishes them atomically. If a
+later allocation fails, only the newly allocated buffers are freed; existing
+layouts and raw rows survive, and retained-byte accounting remains exact. The
+allocation-failure regression checks both raw-only and already-prepared row
+layouts, then verifies a successful retry. Seven focused native gather and
+quantized-row tests passed without skips or leaks. This removes
+observed unnecessary work; it does not establish the exact cause of the CI timeout.
+
+The regression loop now selects the inference project's environment for
+inference selectors and preserves complete server output beside its reports.
+Full inference CI also uploads those logs, rather than relying on a short
+failure tail. GLiNER span extraction's multi-text contract is independent of
+the boundary extractor's qualified singleton contract; the span registration
+now accepts multi-text requests again while boundary limits remain enforced.
+
+
+Validation used the repository's `zig-e2e-regression-loop.sh` for the HA
+selector: two workers, three repetitions, six passed invocations with no skips,
+errors, or failures. The CPU inference sequence used `run_e2e_case.py` to
+supervise two independent pytest sessions, each containing all five dictate
+cases, the three failing embedding cases, and the resolver extraction case.
+All 18 invocations passed with no skips, errors, or failures; retained logs
+confirm native CPU selection. Each session used a one-model limit and CI's
+300-second request deadline. The soak binary contained the HA and inference
+fixes; later import-only coordination changes were validated separately.
+These runs do not reproduce the original 600-second CI timeout or prove a
+before/after latency improvement: the earlier baseline binary was a different
+build configuration.
+
+
+## 2026-09-25: schema rewrite reply-loss recovery retries under leader churn
+
+[PR #882's recovery-0 job](https://github.com/antflydb/antfly/actions/runs/36173392068/job/108211921323)
+failed `test_schema_rewrite_recovers_dependency_cohort[publication-reply_loss]`:
+after 180 seconds the restore was still running at attempt 9, with zero of two
+tables published and `GroupLeaderUnavailable` during the rewrite tail. Two
+metadata nodes reported `metadata leader unavailable`. Retained metadata logs
+showed individual WAL syncs taking 0.5–1.5 seconds, even for small records.
+Those syncs explain some delayed Raft rounds, but the logs do not prove why
+the data-group leader remained unavailable or that storage was the only cause.
+
+The rewrite worker previously classified `GroupLeaderUnavailable` as a generic
+execution failure. Each transient route gap durably requeued a new job attempt,
+adding metadata consensus writes and eventually multi-second exponential
+backoff during the same outage. Source reads are observations; routed source
+writes distinguish non-proposal from unknown outcomes, and rewrite work resumes
+from durable source and target receipts. The worker now treats a route gap as a
+bounded continuation of the same attempt. Unknown write outcomes retain their
+distinct classification. Neither Raft durability nor the test deadline changes.
+
+The unchanged server passed 2/2 local reproductions on two workers; it did not
+reproduce the CI leadership stall. The focused Zig rewrite suite passes all
+three tests, including the retry classification regression. The first post-fix
+two-worker, two-repetition loop passed 3/4. The fourth run reached the rewrite's
+validating phase before data-4 exited with `ReadFailed` from background store
+report collection. Metadata still had a stable term-1 leader and all three
+snapshot probes succeeded. This is a distinct failure, not evidence that the
+leader-gap continuation failed.
+
+Background inventory collection and publication read local owner state and
+remote metadata. A failed collection publishes no partial report, marks status
+dirty, and retries from a fresh snapshot. Propagating its `ReadFailed` to the
+control supervisor needlessly removes a data voter. The store-report error
+handler now keeps the process running for this read failure, like its existing transient storage
+errors. A deterministic worker regression injects `ReadFailed`, checks that no
+fatal error escapes and the dirty bit survives, then completes a fresh report.
+Persistent read failures remain logged and keep the report dirty.
+
+With both fixes, the same two-worker, two-repetition flake loop passed 4/4
+executed cases (zero skips, errors, or failures). The focused data-runtime
+report-worker regression passed, as did all 42 restore-job store tests and all
+three rewrite-driver tests. The local soak exercises the full cohort rewrite
+and reply loss but did not reproduce CI's prolonged metadata WAL latency; a clean
+local result cannot establish that the underlying slow-sync availability
+problem has been eliminated.
+
+```sh
+SKIP_BUILD=1 ANTFLY_E2E_ENV_LOADED=1 \
+  ANTFLY_E2E_REGRESSION_WORKERS=2 ANTFLY_E2E_REGRESSION_REPEATS=2 \
+  scripts/ci/zig-e2e-regression-loop.sh \
+  'e2e/antfly/test_relational_integrity_recovery.py::test_schema_rewrite_recovers_dependency_cohort[publication-reply_loss]'
+```
+
+## 2026-09-24: recovery shard quorum stalls in run 36028793026
+
+[The recovery-1 job](https://github.com/antflydb/antfly/actions/runs/36028793026/job/107754773721)
+failed `online_fk_merge_preserves_shadow_claims_and_retained_references[snapshot-child_owner]`
+during corpus setup and `schema_rewrite_recovers_dependency_cohort[publication-coordinator]`
+during source preparation. Both retained data logs show a proposed entry one
+index above the committed/applied index at the write timeout. One leader had
+zero recorded send failures; the other had 2,335 send failures and 648 exhausted
+retries across its served groups. Metadata repeatedly reported
+`GroupLeaderUnavailable` for the data group, while one metadata node still
+served the running restore job. Its Raft WAL also recorded individual syncs
+lasting 0.3–4 seconds. These facts do not yet distinguish a follower WAL stall
+from a backed-up peer sender or a separate group route problem.
+
+The unchanged cases passed 8/8 on two local workers and two repetitions;
+the first case took 4.6–5 minutes per worker in the first repetition, so it
+does exercise a heavy path without reproducing the CI timeout.
+Raft leader-wait diagnostics now include voter match/activity counts and the
+async HTTP sender's pending/failure/queue-full counters. A recurrence can use
+those bounded snapshots to decide whether to change transport scheduling or
+persistence. The sender also coalesces obsolete queued context-free heartbeats
+for the same peer and group set, so they cannot indefinitely fill a per-peer
+FIFO ahead of append traffic while a slow request is in flight. Heartbeats
+carrying read-index context, heartbeat responses, votes, append, and snapshots
+are retained. This addresses a bounded-queue pressure mechanism but does not
+prove it caused either CI stall; slow physical WAL sync remains a separate
+possible cause. A timeout increase is not accepted as a fix.
+
 ## 2026-09-22: #846 restore staging and #856 standby failures
 
 [Issue #846](https://github.com/antflydb/antfly/issues/846) recurred in

@@ -232,6 +232,7 @@ from .edge_type_config import EdgeTypeConfig
 from .edge_type_config_topology import EdgeTypeConfigTopology
 from .edges_response import EdgesResponse
 from .embedder_config import EmbedderConfig
+from .embedder_config_inputs_item import EmbedderConfigInputsItem
 from .embedder_provider import EmbedderProvider
 from .embedding_index_activity import EmbeddingIndexActivity
 from .embedding_index_activity_phase import EmbeddingIndexActivityPhase
@@ -248,6 +249,7 @@ from .embeddings_index_stats_index_type import EmbeddingsIndexStatsIndexType
 from .embeddings_index_stats_promotion import EmbeddingsIndexStatsPromotion
 from .embeddings_index_stats_resolution import EmbeddingsIndexStatsResolution
 from .enrichment_config import EnrichmentConfig
+from .enrichment_config_producer import EnrichmentConfigProducer
 from .enrichment_kind import EnrichmentKind
 from .enrichment_neighbor_context_config import EnrichmentNeighborContextConfig
 from .enrichment_neighbor_context_config_direction import EnrichmentNeighborContextConfigDirection
@@ -486,6 +488,7 @@ from .graph_artifact_node_mapping_config import GraphArtifactNodeMappingConfig
 from .graph_artifact_node_mapping_config_model import GraphArtifactNodeMappingConfigModel
 from .graph_artifact_producer_config import GraphArtifactProducerConfig
 from .graph_artifact_producer_config_kind import GraphArtifactProducerConfigKind
+from .graph_artifact_producer_config_producer import GraphArtifactProducerConfigProducer
 from .graph_artifact_producer_config_producer_json import GraphArtifactProducerConfigProducerJson
 from .graph_artifact_producer_source_config import GraphArtifactProducerSourceConfig
 from .graph_artifact_producer_source_config_type import GraphArtifactProducerSourceConfigType
@@ -613,6 +616,11 @@ from .graph_resolver_config import GraphResolverConfig
 from .graph_resolver_config_candidate_search import GraphResolverConfigCandidateSearch
 from .graph_resolver_config_fusion_combine import GraphResolverConfigFusionCombine
 from .graph_resolver_config_source_artifact_kind import GraphResolverConfigSourceArtifactKind
+from .graph_resolver_scorer_comparison import GraphResolverScorerComparison
+from .graph_resolver_scorer_config import GraphResolverScorerConfig
+from .graph_resolver_scorer_config_combine import GraphResolverScorerConfigCombine
+from .graph_resolver_scorer_config_decision import GraphResolverScorerConfigDecision
+from .graph_resolver_scorer_level import GraphResolverScorerLevel
 from .graph_result_node import GraphResultNode
 from .graph_result_node_document import GraphResultNodeDocument
 from .graph_result_node_evidence import GraphResultNodeEvidence
@@ -812,8 +820,6 @@ from .inference_read_response_object import InferenceReadResponseObject
 from .inference_read_result import InferenceReadResult
 from .inference_read_result_fields import InferenceReadResultFields
 from .inference_request_admission_config import InferenceRequestAdmissionConfig
-from .inference_rerank_multimodal_document import InferenceRerankMultimodalDocument
-from .inference_rerank_multimodal_request import InferenceRerankMultimodalRequest
 from .inference_rerank_object import InferenceRerankObject
 from .inference_rerank_object_object import InferenceRerankObjectObject
 from .inference_rerank_request import InferenceRerankRequest
@@ -1085,6 +1091,36 @@ from .reranker_candidate_limit_exceeded_error_status import RerankerCandidateLim
 from .reranker_config import RerankerConfig
 from .reranker_profile import RerankerProfile
 from .reranker_provider import RerankerProvider
+from .research_agent_request import ResearchAgentRequest
+from .research_agent_result import ResearchAgentResult
+from .research_agent_steps import ResearchAgentSteps
+from .research_budget import ResearchBudget
+from .research_citation import ResearchCitation
+from .research_claim import ResearchClaim
+from .research_evidence import ResearchEvidence
+from .research_evidence_source import ResearchEvidenceSource
+from .research_finding import ResearchFinding
+from .research_incomplete_details import ResearchIncompleteDetails
+from .research_incomplete_details_reason import ResearchIncompleteDetailsReason
+from .research_job import ResearchJob
+from .research_job_advance_request import ResearchJobAdvanceRequest
+from .research_job_start_request import ResearchJobStartRequest
+from .research_job_state import ResearchJobState
+from .research_phase import ResearchPhase
+from .research_plan import ResearchPlan
+from .research_reflection import ResearchReflection
+from .research_report import ResearchReport
+from .research_report_section import ResearchReportSection
+from .research_retrieval_step_config import ResearchRetrievalStepConfig
+from .research_state import ResearchState
+from .research_step_config import ResearchStepConfig
+from .research_sub_question import ResearchSubQuestion
+from .research_sub_question_sources_item import ResearchSubQuestionSourcesItem
+from .research_sub_question_status import ResearchSubQuestionStatus
+from .research_unsupported_claim import ResearchUnsupportedClaim
+from .research_usage import ResearchUsage
+from .research_verification import ResearchVerification
+from .research_write_step_config import ResearchWriteStepConfig
 from .resource_type import ResourceType
 from .restore_job import RestoreJob
 from .restore_job_list import RestoreJobList
@@ -1517,6 +1553,7 @@ __all__ = (
     "EdgeTypeConfig",
     "EdgeTypeConfigTopology",
     "EmbedderConfig",
+    "EmbedderConfigInputsItem",
     "EmbedderProvider",
     "EmbeddingIndexActivity",
     "EmbeddingIndexActivityPhase",
@@ -1533,6 +1570,7 @@ __all__ = (
     "EmbeddingType1",
     "EmbeddingType3",
     "EnrichmentConfig",
+    "EnrichmentConfigProducer",
     "EnrichmentKind",
     "EnrichmentNeighborContextConfig",
     "EnrichmentNeighborContextConfigDirection",
@@ -1765,6 +1803,7 @@ __all__ = (
     "GraphArtifactNodeMappingConfigModel",
     "GraphArtifactProducerConfig",
     "GraphArtifactProducerConfigKind",
+    "GraphArtifactProducerConfigProducer",
     "GraphArtifactProducerConfigProducerJson",
     "GraphArtifactProducerSourceConfig",
     "GraphArtifactProducerSourceConfigType",
@@ -1892,6 +1931,11 @@ __all__ = (
     "GraphResolverConfigCandidateSearch",
     "GraphResolverConfigFusionCombine",
     "GraphResolverConfigSourceArtifactKind",
+    "GraphResolverScorerComparison",
+    "GraphResolverScorerConfig",
+    "GraphResolverScorerConfigCombine",
+    "GraphResolverScorerConfigDecision",
+    "GraphResolverScorerLevel",
     "GraphResultNode",
     "GraphResultNodeDocument",
     "GraphResultNodeEvidence",
@@ -2091,8 +2135,6 @@ __all__ = (
     "InferenceReadResult",
     "InferenceReadResultFields",
     "InferenceRequestAdmissionConfig",
-    "InferenceRerankMultimodalDocument",
-    "InferenceRerankMultimodalRequest",
     "InferenceRerankObject",
     "InferenceRerankObjectObject",
     "InferenceRerankRequest",
@@ -2360,6 +2402,36 @@ __all__ = (
     "RerankerConfig",
     "RerankerProfile",
     "RerankerProvider",
+    "ResearchAgentRequest",
+    "ResearchAgentResult",
+    "ResearchAgentSteps",
+    "ResearchBudget",
+    "ResearchCitation",
+    "ResearchClaim",
+    "ResearchEvidence",
+    "ResearchEvidenceSource",
+    "ResearchFinding",
+    "ResearchIncompleteDetails",
+    "ResearchIncompleteDetailsReason",
+    "ResearchJob",
+    "ResearchJobAdvanceRequest",
+    "ResearchJobStartRequest",
+    "ResearchJobState",
+    "ResearchPhase",
+    "ResearchPlan",
+    "ResearchReflection",
+    "ResearchReport",
+    "ResearchReportSection",
+    "ResearchRetrievalStepConfig",
+    "ResearchState",
+    "ResearchStepConfig",
+    "ResearchSubQuestion",
+    "ResearchSubQuestionSourcesItem",
+    "ResearchSubQuestionStatus",
+    "ResearchUnsupportedClaim",
+    "ResearchUsage",
+    "ResearchVerification",
+    "ResearchWriteStepConfig",
     "ResourceType",
     "RestoreJob",
     "RestoreJobList",

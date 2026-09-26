@@ -353,6 +353,22 @@ pub const Config = struct {
         kernel_jit: KernelJitConfig = .{},
         prompt_cache: PromptCacheConfig = .{},
         keep_alive: ?[]u8 = null,
+        // `keep_alive_ms` is not part of the shared openapi inference schema
+        // (only the `keep_alive` duration string is); it exists solely so
+        // `antfly inference run`'s config loader (parseRunConfig in
+        // inference_runtime/runtime.zig) can accept the operator's flat
+        // integer-millisecond spelling. Never populated by the generic
+        // `Config.parseFromSlice` openapi path.
+        keep_alive_ms: ?u64 = null,
+        // True only when `antfly inference run`'s merged config (nested
+        // `inference.prompt_cache` or the operator's flat top-level
+        // `prompt_cache`) explicitly set a `prompt_cache` object.
+        // `PromptCacheConfig.enabled` defaults to false once that object is
+        // present, but the run server's own built-in default is enabled=true;
+        // this flag lets callers keep that default when the key is absent
+        // entirely. Never populated by the generic `Config.parseFromSlice`
+        // openapi path.
+        prompt_cache_configured: bool = false,
         max_loaded_models: ?i64 = null,
 
         fn deinit(self: *InferenceConfig, alloc: std.mem.Allocator) void {
@@ -2265,6 +2281,8 @@ pub fn parseInferencePreloadModels(
             .object => |entry| entry,
             else => return error.InvalidConfig,
         };
+        if (!objectContainsOnly(model_object, &.{ "kind", "name", "backend", "format", "quantization", "residency_mode", "memory_budget_mb" }))
+            return error.InvalidConfig;
         // Include the partially parsed entry in error cleanup as soon as any
         // owned fields can be allocated (e.g. a missing name after kind).
         out[i] = .{ .kind = &.{}, .name = &.{} };
@@ -2653,6 +2671,24 @@ test "common config parses inference preload" {
     try std.testing.expectEqualStrings("BAAI/bge-reranker", cfg.inference.preload[1].name);
     try std.testing.expectEqualStrings("native", cfg.inference.preload[1].backend.?);
     try std.testing.expectEqualStrings("onnx", cfg.inference.preload[1].format.?);
+}
+
+test "common config rejects model-specific and unknown preload tuning fields" {
+    const fields = .{
+        .{ "load_strategy", "\"pipeline\"" },
+        .{ "load_workers", "6" },
+        .{ "load_staging_mb", "384" },
+        .{ "prepared_pack", "\"required\"" },
+        .{ "drop_host_cache_after_load", "true" },
+        .{ "startup_strategy", "\"prefetch\"" },
+        .{ "prepared_pak", "\"required\"" },
+    };
+    inline for (fields) |field| {
+        try std.testing.expectError(error.InvalidConfig, Config.parseFromSlice(
+            std.testing.allocator,
+            "{\"inference\":{\"preload\":[{\"kind\":\"generator\",\"name\":\"gemma-a4b\",\"" ++ field[0] ++ "\":" ++ field[1] ++ "}]}}",
+        ));
+    }
 }
 
 test "common config rejects invalid prompt cache policy" {

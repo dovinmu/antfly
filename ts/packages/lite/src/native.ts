@@ -28,6 +28,27 @@
  */
 import koffi, { type KoffiFunc, type LibraryHandle } from "koffi";
 import { type ResolvedLibrary, resolveLibrary } from "./discovery.js";
+import { InvalidArgumentError } from "./errors.js";
+import { Storage } from "./types.js";
+
+// antfly_storage_kind_* values from antfly.h. These do NOT match this
+// binding's public Storage enum numbering (Storage.Lite is 0 for ergonomic
+// defaulting); storageKind() below translates between them, mirroring the Go
+// binding's Storage.cKind().
+const ANTFLY_STORAGE_KIND_DIRECTORY = 0;
+const ANTFLY_STORAGE_KIND_LITE = 1;
+
+/** Translates the public Storage enum to the antfly_storage_kind_* wire value. */
+export function storageKind(storage: Storage | undefined): number {
+  switch (storage ?? Storage.Lite) {
+    case Storage.Lite:
+      return ANTFLY_STORAGE_KIND_LITE;
+    case Storage.Directory:
+      return ANTFLY_STORAGE_KIND_DIRECTORY;
+    default:
+      throw new InvalidArgumentError(`invalid Storage value: ${storage}`);
+  }
+}
 
 // --- Struct types (must match zig/pkg/antfly/include/antfly.h exactly) ----
 
@@ -55,14 +76,21 @@ export const AntflyVersionPredicate = koffi.struct("antfly_version_predicate", {
   expected_version: "uint64_t",
 });
 
-// Field order and types must match antfly_lite_open_options in antfly.h
-// exactly; ABI size agreement is checked at runtime against
-// antfly_lite_open_options_size() (see validateAbi in errors-abi.ts).
-export const AntflyLiteOpenOptions = koffi.struct("antfly_lite_open_options", {
+// antfly_db is an opaque handle (see "Naming" in antfly.h): a typed pointer,
+// not void *. Field order and types below must match antfly_open_options in
+// antfly.h exactly; ABI size agreement is checked at runtime against
+// antfly_open_options_size() (see validateAbi in abi.ts).
+const AntflyDbOpaque = koffi.opaque("antfly_db");
+export const PAntflyDb = koffi.pointer(AntflyDbOpaque);
+const PAntflyDbOut = koffi.out(koffi.pointer(AntflyDbOpaque, 2));
+
+export const AntflyOpenOptions = koffi.struct("antfly_open_options", {
   abi_size: "uint32_t",
+  storage_kind: "uint32_t",
   open_mode: "uint32_t",
   profile: "uint32_t",
   flags: "uint32_t",
+  reserved0: "uint32_t",
   map_size: "uint64_t",
   ttl_cleanup_enabled: "bool",
   ttl_cleanup_lease_owned: "bool",
@@ -78,19 +106,85 @@ export const AntflyLiteOpenOptions = koffi.struct("antfly_lite_open_options", {
   inference_kv_budget_mb: "uint32_t",
   inference_scratch_budget_mb: "uint32_t",
   busy_timeout_ms: "uint64_t",
-  reserved: koffi.array("uint64_t", 7),
+  reserved: koffi.array("uint64_t", 8),
 });
 
-const PAntflyLiteOpenOptions = koffi.pointer(AntflyLiteOpenOptions);
-const PAntflyLiteOpenOptionsOut = koffi.out(PAntflyLiteOpenOptions);
+const PAntflyOpenOptions = koffi.pointer(AntflyOpenOptions);
+const PAntflyOpenOptionsOut = koffi.out(PAntflyOpenOptions);
 const PAntflyBufferOut = koffi.out(koffi.pointer(AntflyBuffer));
 const PAntflyWriteIntentArray = koffi.pointer(AntflyWriteIntent);
 const PAntflyVersionPredicateArray = koffi.pointer(AntflyVersionPredicate);
 const PAntflySliceArray = koffi.pointer(AntflySlice);
-const PVoidOut = koffi.out(koffi.pointer("void *"));
 const PUint8Out = koffi.out(koffi.pointer("uint8_t"));
 const PUint64Out = koffi.out(koffi.pointer("uint64_t"));
 const PBoolOut = koffi.out(koffi.pointer("bool"));
+
+// --- Embedded inference (antfly_inference_*, see "Embedded inference
+// without a database" in antfly.h) -------------------------------------
+
+// antfly_inference is an opaque handle, like antfly_db (see "Naming" in
+// antfly.h): typed pointer, own registry, same close/generation safety.
+const AntflyInferenceOpaque = koffi.opaque("antfly_inference");
+export const PAntflyInference = koffi.pointer(AntflyInferenceOpaque);
+const PAntflyInferenceOut = koffi.out(koffi.pointer(AntflyInferenceOpaque, 2));
+
+// Field order and types below must match antfly_inference_options in
+// antfly.h exactly; ABI size agreement is checked at runtime against
+// antfly_inference_options_size() (see validateInferenceAbi in abi.ts).
+export const AntflyInferenceOptions = koffi.struct("antfly_inference_options", {
+  abi_size: "uint32_t",
+  flags: "uint32_t",
+  models_dir: AntflySlice,
+  host_budget_mb: "uint32_t",
+  backend_budget_mb: "uint32_t",
+  process_memory_budget_mb: "uint32_t",
+  combined_budget_mb: "uint32_t",
+  kv_budget_mb: "uint32_t",
+  scratch_budget_mb: "uint32_t",
+  call_timeout_ms: "uint64_t",
+  reserved: koffi.array("uint64_t", 8),
+});
+
+const PAntflyInferenceOptions = koffi.pointer(AntflyInferenceOptions);
+const PAntflyInferenceOptionsOut = koffi.out(PAntflyInferenceOptions);
+
+// One report to an antfly_inference_pull_json progress callback. The
+// antfly_slice fields (model, file) are valid only during the callback.
+export const AntflyInferencePullProgress = koffi.struct("antfly_inference_pull_progress", {
+  abi_size: "uint32_t",
+  reserved0: "uint32_t",
+  model: AntflySlice,
+  file: AntflySlice,
+  bytes_downloaded: "uint64_t",
+  total_bytes: "uint64_t",
+  files_done: "uint64_t",
+  files_total: "uint64_t",
+  cached: "bool",
+});
+
+// antfly_inference_pull_progress_fn: bool(void *context, const
+// antfly_inference_pull_progress *progress). Returning true continues the
+// pull, false cancels it (the call then returns ANTFLY_CANCELLED; completed
+// files stay staged so a re-pull resumes). koffi cannot auto-decode a
+// callback's pointer-to-struct argument (see inference.ts's decoding of the
+// raw pointer via koffi.decode); this only declares the ABI shape.
+const AntflyInferencePullProgressFnProto = koffi.proto(
+  "antfly_inference_pull_progress_fn",
+  "bool",
+  ["void *", koffi.pointer(AntflyInferencePullProgress)]
+);
+export const PAntflyInferencePullProgressFn = koffi.pointer(AntflyInferencePullProgressFnProto);
+
+// antfly_inference_stream_fn: bool(void *context, antfly_slice chunk_json).
+// chunk_json is passed by value (not by pointer), so koffi decodes it
+// directly into a {ptr, len} JS object for the callback -- see
+// inference.ts's decodeSliceUtf8. Returning true continues generation,
+// false stops it (the call then returns ANTFLY_CANCELLED).
+const AntflyInferenceStreamFnProto = koffi.proto("antfly_inference_stream_fn", "bool", [
+  "void *",
+  AntflySlice,
+]);
+export const PAntflyInferenceStreamFn = koffi.pointer(AntflyInferenceStreamFnProto);
 
 export interface NativeLibrary {
   handle: LibraryHandle;
@@ -98,33 +192,40 @@ export interface NativeLibrary {
 
   abiVersion: KoffiFunc<() => number>;
   threadingMode: KoffiFunc<() => number>;
-  liteOpenOptionsSize: KoffiFunc<() => number>;
+  openOptionsSize: KoffiFunc<() => number>;
   errorCodeName: KoffiFunc<(code: number) => string>;
   errorCodeDescription: KoffiFunc<(code: number) => string>;
-  liteOpenOptionsInit: KoffiFunc<(options: object) => number>;
+  openOptionsInit: KoffiFunc<(options: object) => number>;
 
-  liteOpenWithOptions: KoffiFunc<(path: string, options: object, outHandle: unknown[]) => number>;
-  liteCreateWithOptions: KoffiFunc<(path: string, options: object, outHandle: unknown[]) => number>;
+  dbOpenWithOptions: KoffiFunc<(path: string, options: object, outHandle: unknown[]) => number>;
+  dbCreateWithOptions: KoffiFunc<(path: string, options: object, outHandle: unknown[]) => number>;
   liteOpenHosted: KoffiFunc<(path: string, outHandle: unknown[]) => number>;
   liteCreateHosted: KoffiFunc<(path: string, outHandle: unknown[]) => number>;
 
   dbClose: KoffiFunc<(handle: unknown) => void>;
   bufferFree: KoffiFunc<(buffer: object) => void>;
 
-  liteStatusJson: KoffiFunc<(handle: unknown, out: object) => number>;
-  liteCapabilitiesJson: KoffiFunc<(handle: unknown, out: object) => number>;
-  liteBackup: KoffiFunc<(handle: unknown, out: object) => number>;
-  liteExport: KoffiFunc<(handle: unknown, out: object) => number>;
-  liteImportBackup: KoffiFunc<(handle: unknown, backup: object) => number>;
-  liteImport: KoffiFunc<(handle: unknown, backup: object) => number>;
-  liteRestoreBackupJson: KoffiFunc<
-    (destPath: string, backup: object, replace: boolean, out: object) => number
+  dbStatusJson: KoffiFunc<(handle: unknown, out: object) => number>;
+  dbCapabilitiesJson: KoffiFunc<(handle: unknown, out: object) => number>;
+  dbBackup: KoffiFunc<(handle: unknown, out: object) => number>;
+  dbImportBackup: KoffiFunc<(handle: unknown, backup: object) => number>;
+  restoreBackupJson: KoffiFunc<
+    (
+      destPath: string,
+      options: object | null,
+      backup: object,
+      replace: boolean,
+      out: object
+    ) => number
   >;
-  liteRestoreJson: KoffiFunc<
-    (destPath: string, backup: object, replace: boolean, out: object) => number
-  >;
-  liteRestoreBackupFileJson: KoffiFunc<
-    (destPath: string, backupPath: string, replace: boolean, out: object) => number
+  restoreBackupFileJson: KoffiFunc<
+    (
+      destPath: string,
+      options: object | null,
+      backupPath: string,
+      replace: boolean,
+      out: object
+    ) => number
   >;
   liteCheckJson: KoffiFunc<(handle: unknown, out: object) => number>;
   liteCheckFileJson: KoffiFunc<(path: string, out: object) => number>;
@@ -136,10 +237,10 @@ export interface NativeLibrary {
   >;
   liteCompactJson: KoffiFunc<(handle: unknown, out: object) => number>;
   liteVacuumJson: KoffiFunc<(handle: unknown, out: object) => number>;
-  liteRunUntilIdle: KoffiFunc<(handle: unknown) => number>;
-  liteRunUntilIdleJson: KoffiFunc<(handle: unknown, out: object) => number>;
-  liteReplayGeneratedEnrichmentsJson: KoffiFunc<(handle: unknown, out: object) => number>;
-  litePendingWorkStatsJson: KoffiFunc<(handle: unknown, out: object) => number>;
+  dbRunUntilIdle: KoffiFunc<(handle: unknown) => number>;
+  dbRunUntilIdleJson: KoffiFunc<(handle: unknown, out: object) => number>;
+  dbReplayGeneratedEnrichmentsJson: KoffiFunc<(handle: unknown, out: object) => number>;
+  dbPendingWorkStatsJson: KoffiFunc<(handle: unknown, out: object) => number>;
 
   dbBatch: KoffiFunc<
     (
@@ -205,7 +306,7 @@ export interface NativeLibrary {
   dbLookupArtifactJson: KoffiFunc<
     (handle: unknown, artifactIdBase64: object, out: object) => number
   >;
-  dbDecodeArtifactIdJson: KoffiFunc<(artifactIdBase64: object, out: object) => number>;
+  decodeArtifactIdJson: KoffiFunc<(artifactIdBase64: object, out: object) => number>;
   dbExtractEnrichmentsJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
   dbComputeEnrichmentsJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
 
@@ -234,6 +335,40 @@ export interface NativeLibrary {
   dbFindShortestPathJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
   dbFindKShortestPathsJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
   dbMatchPatternJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
+
+  // --- Embedded inference (antfly_inference_*) ---
+  inferenceOptionsSize: KoffiFunc<() => number>;
+  inferenceOptionsInit: KoffiFunc<(options: object) => number>;
+  inferenceOpen: KoffiFunc<(options: object | null, outHandle: unknown[]) => number>;
+  inferenceClose: KoffiFunc<(handle: unknown) => void>;
+  inferenceEmbedJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
+  inferenceRerankJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
+  inferenceChunkJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
+  inferenceGenerateJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
+  inferenceGenerateStreamJson: KoffiFunc<
+    (
+      handle: unknown,
+      request: object,
+      onChunk: unknown,
+      chunkContext: unknown,
+      out: object
+    ) => number
+  >;
+  inferenceGenerateBatchJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
+  inferenceRewriteJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
+  inferenceExtractJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
+  inferenceReadJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
+  inferenceTranscribeJson: KoffiFunc<(handle: unknown, request: object, out: object) => number>;
+  inferenceListModelsJson: KoffiFunc<(handle: unknown, out: object) => number>;
+  inferencePullJson: KoffiFunc<
+    (
+      handle: unknown,
+      request: object,
+      progress: unknown,
+      progressContext: unknown,
+      out: object
+    ) => number
+  >;
 }
 
 let cached: NativeLibrary | undefined;
@@ -298,60 +433,49 @@ function buildNative(): NativeLibrary {
 
     abiVersion: f("antfly_abi_version", "uint32_t", []),
     threadingMode: f("antfly_threading_mode", "uint32_t", []),
-    liteOpenOptionsSize: f("antfly_lite_open_options_size", "uint32_t", []),
+    openOptionsSize: f("antfly_open_options_size", "uint32_t", []),
     errorCodeName: f("antfly_error_code_name", "str", ["uint32_t"]),
     errorCodeDescription: f("antfly_error_code_description", "str", ["uint32_t"]),
-    liteOpenOptionsInit: f("antfly_lite_open_options_init", "uint32_t", [
-      PAntflyLiteOpenOptionsOut,
-    ]),
+    openOptionsInit: f("antfly_open_options_init", "uint32_t", [PAntflyOpenOptionsOut]),
 
-    liteOpenWithOptions: f("antfly_lite_open_with_options", "uint32_t", [
+    dbOpenWithOptions: f("antfly_db_open_with_options", "uint32_t", [
       "str",
-      PAntflyLiteOpenOptions,
-      PVoidOut,
+      PAntflyOpenOptions,
+      PAntflyDbOut,
     ]),
-    liteCreateWithOptions: f("antfly_lite_create_with_options", "uint32_t", [
+    dbCreateWithOptions: f("antfly_db_create_with_options", "uint32_t", [
       "str",
-      PAntflyLiteOpenOptions,
-      PVoidOut,
+      PAntflyOpenOptions,
+      PAntflyDbOut,
     ]),
-    liteOpenHosted: f("antfly_lite_open_hosted", "uint32_t", ["str", PVoidOut]),
-    liteCreateHosted: f("antfly_lite_create_hosted", "uint32_t", ["str", PVoidOut]),
+    liteOpenHosted: f("antfly_lite_open_hosted", "uint32_t", ["str", PAntflyDbOut]),
+    liteCreateHosted: f("antfly_lite_create_hosted", "uint32_t", ["str", PAntflyDbOut]),
 
-    dbClose: f("antfly_db_close", "void", ["void *"]),
+    dbClose: f("antfly_db_close", "void", [PAntflyDb]),
     bufferFree: f("antfly_buffer_free", "void", [koffi.pointer(AntflyBuffer)]),
 
-    liteStatusJson: f("antfly_lite_status_json", "uint32_t", ["void *", PAntflyBufferOut]),
-    liteCapabilitiesJson: f("antfly_lite_capabilities_json", "uint32_t", [
-      "void *",
-      PAntflyBufferOut,
-    ]),
-    liteBackup: f("antfly_lite_backup", "uint32_t", ["void *", PAntflyBufferOut]),
-    liteExport: f("antfly_lite_export", "uint32_t", ["void *", PAntflyBufferOut]),
-    liteImportBackup: f("antfly_lite_import_backup", "uint32_t", ["void *", AntflySlice]),
-    liteImport: f("antfly_lite_import", "uint32_t", ["void *", AntflySlice]),
-    liteRestoreBackupJson: f("antfly_lite_restore_backup_json", "uint32_t", [
+    dbStatusJson: f("antfly_db_status_json", "uint32_t", [PAntflyDb, PAntflyBufferOut]),
+    dbCapabilitiesJson: f("antfly_db_capabilities_json", "uint32_t", [PAntflyDb, PAntflyBufferOut]),
+    dbBackup: f("antfly_db_backup", "uint32_t", [PAntflyDb, PAntflyBufferOut]),
+    dbImportBackup: f("antfly_db_import_backup", "uint32_t", [PAntflyDb, AntflySlice]),
+    restoreBackupJson: f("antfly_restore_backup_json", "uint32_t", [
       "str",
+      PAntflyOpenOptions,
       AntflySlice,
       "bool",
       PAntflyBufferOut,
     ]),
-    liteRestoreJson: f("antfly_lite_restore_json", "uint32_t", [
+    restoreBackupFileJson: f("antfly_restore_backup_file_json", "uint32_t", [
       "str",
-      AntflySlice,
-      "bool",
-      PAntflyBufferOut,
-    ]),
-    liteRestoreBackupFileJson: f("antfly_lite_restore_backup_file_json", "uint32_t", [
-      "str",
+      PAntflyOpenOptions,
       "str",
       "bool",
       PAntflyBufferOut,
     ]),
-    liteCheckJson: f("antfly_lite_check_json", "uint32_t", ["void *", PAntflyBufferOut]),
+    liteCheckJson: f("antfly_lite_check_json", "uint32_t", [PAntflyDb, PAntflyBufferOut]),
     liteCheckFileJson: f("antfly_lite_check_file_json", "uint32_t", ["str", PAntflyBufferOut]),
     liteCopyStableSnapshotJson: f("antfly_lite_copy_stable_snapshot_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       "str",
       "bool",
       PAntflyBufferOut,
@@ -362,25 +486,24 @@ function buildNative(): NativeLibrary {
       "bool",
       PAntflyBufferOut,
     ]),
-    liteCompactJson: f("antfly_lite_compact_json", "uint32_t", ["void *", PAntflyBufferOut]),
-    liteVacuumJson: f("antfly_lite_vacuum_json", "uint32_t", ["void *", PAntflyBufferOut]),
-    liteRunUntilIdle: f("antfly_lite_run_until_idle", "uint32_t", ["void *"]),
-    liteRunUntilIdleJson: f("antfly_lite_run_until_idle_json", "uint32_t", [
-      "void *",
+    liteCompactJson: f("antfly_lite_compact_json", "uint32_t", [PAntflyDb, PAntflyBufferOut]),
+    liteVacuumJson: f("antfly_lite_vacuum_json", "uint32_t", [PAntflyDb, PAntflyBufferOut]),
+    dbRunUntilIdle: f("antfly_db_run_until_idle", "uint32_t", [PAntflyDb]),
+    dbRunUntilIdleJson: f("antfly_db_run_until_idle_json", "uint32_t", [
+      PAntflyDb,
       PAntflyBufferOut,
     ]),
-    liteReplayGeneratedEnrichmentsJson: f(
-      "antfly_lite_replay_generated_enrichments_json",
-      "uint32_t",
-      ["void *", PAntflyBufferOut]
-    ),
-    litePendingWorkStatsJson: f("antfly_lite_pending_work_stats_json", "uint32_t", [
-      "void *",
+    dbReplayGeneratedEnrichmentsJson: f("antfly_db_replay_generated_enrichments_json", "uint32_t", [
+      PAntflyDb,
+      PAntflyBufferOut,
+    ]),
+    dbPendingWorkStatsJson: f("antfly_db_pending_work_stats_json", "uint32_t", [
+      PAntflyDb,
       PAntflyBufferOut,
     ]),
 
     dbBatch: f("antfly_db_batch", "uint32_t", [
-      "void *",
+      PAntflyDb,
       PAntflyWriteIntentArray,
       "size_t",
       PAntflyVersionPredicateArray,
@@ -388,16 +511,16 @@ function buildNative(): NativeLibrary {
       "uint64_t",
       "uint8_t",
     ]),
-    dbBatchJson: f("antfly_db_batch_json", "uint32_t", ["void *", AntflySlice, PAntflyBufferOut]),
+    dbBatchJson: f("antfly_db_batch_json", "uint32_t", [PAntflyDb, AntflySlice, PAntflyBufferOut]),
     dbBeginTransactionWithId: f("antfly_db_begin_transaction_with_id", "uint32_t", [
-      "void *",
+      PAntflyDb,
       "const uint8_t *",
       "uint64_t",
       PAntflySliceArray,
       "size_t",
     ]),
     dbWriteTransaction: f("antfly_db_write_transaction", "uint32_t", [
-      "void *",
+      PAntflyDb,
       "const uint8_t *",
       PAntflyWriteIntentArray,
       "size_t",
@@ -405,90 +528,98 @@ function buildNative(): NativeLibrary {
       "size_t",
     ]),
     dbResolveIntents: f("antfly_db_resolve_intents", "uint32_t", [
-      "void *",
+      PAntflyDb,
       "const uint8_t *",
       "uint8_t",
       "uint64_t",
     ]),
     dbGetTransactionStatus: f("antfly_db_get_transaction_status", "uint32_t", [
-      "void *",
+      PAntflyDb,
       "const uint8_t *",
       PUint8Out,
     ]),
     dbGetCommitVersion: f("antfly_db_get_commit_version", "uint32_t", [
-      "void *",
+      PAntflyDb,
       "const uint8_t *",
       PUint64Out,
     ]),
 
-    dbLookupJson: f("antfly_db_lookup_json", "uint32_t", ["void *", AntflySlice, PAntflyBufferOut]),
-    dbGetRaw: f("antfly_db_get_raw", "uint32_t", ["void *", AntflySlice, PAntflyBufferOut]),
-    dbGetSchemaJson: f("antfly_db_get_schema_json", "uint32_t", ["void *", PAntflyBufferOut]),
-    dbSetSchemaJson: f("antfly_db_set_schema_json", "uint32_t", ["void *", AntflySlice]),
-    dbListIndexesJson: f("antfly_db_list_indexes_json", "uint32_t", ["void *", PAntflyBufferOut]),
-    dbAddIndexJson: f("antfly_db_add_index_json", "uint32_t", ["void *", AntflySlice]),
-    dbDeleteIndex: f("antfly_db_delete_index", "uint32_t", ["void *", AntflySlice, PBoolOut]),
-    dbListEnrichmentsJson: f("antfly_db_list_enrichments_json", "uint32_t", [
-      "void *",
+    dbLookupJson: f("antfly_db_lookup_json", "uint32_t", [
+      PAntflyDb,
+      AntflySlice,
       PAntflyBufferOut,
     ]),
-    dbAddEnrichmentJson: f("antfly_db_add_enrichment_json", "uint32_t", ["void *", AntflySlice]),
+    dbGetRaw: f("antfly_db_get_raw", "uint32_t", [PAntflyDb, AntflySlice, PAntflyBufferOut]),
+    dbGetSchemaJson: f("antfly_db_get_schema_json", "uint32_t", [PAntflyDb, PAntflyBufferOut]),
+    dbSetSchemaJson: f("antfly_db_set_schema_json", "uint32_t", [PAntflyDb, AntflySlice]),
+    dbListIndexesJson: f("antfly_db_list_indexes_json", "uint32_t", [PAntflyDb, PAntflyBufferOut]),
+    dbAddIndexJson: f("antfly_db_add_index_json", "uint32_t", [PAntflyDb, AntflySlice]),
+    dbDeleteIndex: f("antfly_db_delete_index", "uint32_t", [PAntflyDb, AntflySlice, PBoolOut]),
+    dbListEnrichmentsJson: f("antfly_db_list_enrichments_json", "uint32_t", [
+      PAntflyDb,
+      PAntflyBufferOut,
+    ]),
+    dbAddEnrichmentJson: f("antfly_db_add_enrichment_json", "uint32_t", [PAntflyDb, AntflySlice]),
     dbDeleteEnrichment: f("antfly_db_delete_enrichment", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       AntflySlice,
       PBoolOut,
     ]),
-    dbScanJson: f("antfly_db_scan_json", "uint32_t", ["void *", AntflySlice, PAntflyBufferOut]),
-    dbStatsJson: f("antfly_db_stats_json", "uint32_t", ["void *", PAntflyBufferOut]),
-    dbSearchJson: f("antfly_db_search_json", "uint32_t", ["void *", AntflySlice, PAntflyBufferOut]),
+    dbScanJson: f("antfly_db_scan_json", "uint32_t", [PAntflyDb, AntflySlice, PAntflyBufferOut]),
+    dbStatsJson: f("antfly_db_stats_json", "uint32_t", [PAntflyDb, PAntflyBufferOut]),
+    dbSearchJson: f("antfly_db_search_json", "uint32_t", [
+      PAntflyDb,
+      AntflySlice,
+      PAntflyBufferOut,
+    ]),
     dbSearchDenseWire: f("antfly_db_search_dense_wire", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbSearchTextMatchWire: f("antfly_db_search_text_match_wire", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbSearchTextTermWire: f("antfly_db_search_text_term_wire", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbSearchTextMatchPhraseWire: f("antfly_db_search_text_match_phrase_wire", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbAggregateHitsJson: f("antfly_db_aggregate_hits_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbLookupArtifactJson: f("antfly_db_lookup_artifact_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
-    dbDecodeArtifactIdJson: f("antfly_db_decode_artifact_id_json", "uint32_t", [
+    decodeArtifactIdJson: f("antfly_decode_artifact_id_json", "uint32_t", [
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbExtractEnrichmentsJson: f("antfly_db_extract_enrichments_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbComputeEnrichmentsJson: f("antfly_db_compute_enrichments_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
 
     dbGetEdgesJson: f("antfly_db_get_edges_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       AntflySlice,
       AntflySlice,
@@ -496,17 +627,17 @@ function buildNative(): NativeLibrary {
       PAntflyBufferOut,
     ]),
     dbTraverseEdgesJson: f("antfly_db_traverse_edges_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbExecuteGraphQueriesJson: f("antfly_db_execute_graph_queries_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbGetNeighborsJson: f("antfly_db_get_neighbors_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       AntflySlice,
       AntflySlice,
@@ -514,18 +645,92 @@ function buildNative(): NativeLibrary {
       PAntflyBufferOut,
     ]),
     dbFindShortestPathJson: f("antfly_db_find_shortest_path_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbFindKShortestPathsJson: f("antfly_db_find_k_shortest_paths_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
       PAntflyBufferOut,
     ]),
     dbMatchPatternJson: f("antfly_db_match_pattern_json", "uint32_t", [
-      "void *",
+      PAntflyDb,
       AntflySlice,
+      PAntflyBufferOut,
+    ]),
+
+    // --- Embedded inference (antfly_inference_*) ---
+    inferenceOptionsSize: f("antfly_inference_options_size", "uint32_t", []),
+    inferenceOptionsInit: f("antfly_inference_options_init", "uint32_t", [
+      PAntflyInferenceOptionsOut,
+    ]),
+    inferenceOpen: f("antfly_inference_open", "uint32_t", [
+      PAntflyInferenceOptions,
+      PAntflyInferenceOut,
+    ]),
+    inferenceClose: f("antfly_inference_close", "void", [PAntflyInference]),
+    inferenceEmbedJson: f("antfly_inference_embed_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyBufferOut,
+    ]),
+    inferenceRerankJson: f("antfly_inference_rerank_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyBufferOut,
+    ]),
+    inferenceChunkJson: f("antfly_inference_chunk_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyBufferOut,
+    ]),
+    inferenceGenerateJson: f("antfly_inference_generate_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyBufferOut,
+    ]),
+    inferenceGenerateStreamJson: f("antfly_inference_generate_stream_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyInferenceStreamFn,
+      "void *",
+      PAntflyBufferOut,
+    ]),
+    inferenceGenerateBatchJson: f("antfly_inference_generate_batch_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyBufferOut,
+    ]),
+    inferenceRewriteJson: f("antfly_inference_rewrite_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyBufferOut,
+    ]),
+    inferenceExtractJson: f("antfly_inference_extract_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyBufferOut,
+    ]),
+    inferenceReadJson: f("antfly_inference_read_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyBufferOut,
+    ]),
+    inferenceTranscribeJson: f("antfly_inference_transcribe_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyBufferOut,
+    ]),
+    inferenceListModelsJson: f("antfly_inference_list_models_json", "uint32_t", [
+      PAntflyInference,
+      PAntflyBufferOut,
+    ]),
+    inferencePullJson: f("antfly_inference_pull_json", "uint32_t", [
+      PAntflyInference,
+      AntflySlice,
+      PAntflyInferencePullProgressFn,
+      "void *",
       PAntflyBufferOut,
     ]),
   };

@@ -25,8 +25,8 @@ const db = @import("../storage/db/mod.zig");
 const native = @import("../storage/db/restore_staging.zig");
 const owner_api = @import("restore_owner.zig");
 const catalog_mod = @import("restore_catalog.zig");
-const reads = @import("table_reads.zig");
-const writes = @import("table_writes.zig");
+const reads = @import("table_read_source.zig");
+const writes = @import("table_write_source.zig");
 const distributed = @import("distributed_txn.zig");
 const contract = @import("distributed_txn_contract.zig");
 const operation = @import("operation.zig");
@@ -744,7 +744,16 @@ pub fn runWithPolicy(comptime Driver: type, invalid_child: bool, override: ?http
         try std.testing.io.sleep(.fromMilliseconds(12), .awake);
     } else {
         const state = try std.json.parseFromSlice(restore_jobs.JobState, a, (try server.restore_job_store.load(a, worker.value.job_id)).?, .{});
-        std.debug.print("restore worker did not converge: phase={s} error={s}\n", .{ @tagName(state.value.phase), state.value.last_error orelse "none" });
+        std.debug.print("restore worker did not converge: phase={s} attempt={d} staging_attempt={d} owner_phase={d} owner_cursor={d} validation_phase={d} validation_owner={d} error={s}\n", .{
+            @tagName(state.value.phase),
+            state.value.attempt_id,
+            state.value.staging_attempt_id,
+            state.value.staging_owner_phase,
+            state.value.staging_owner_cursor,
+            state.value.staging_validation_phase,
+            state.value.staging_validation_owner,
+            state.value.last_error orelse "none",
+        });
         return error.RestoreWorkerDidNotConverge;
     }
     var published = (try source.adminSnapshot()).?;

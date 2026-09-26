@@ -42,10 +42,6 @@ pub const Buffer = extern struct {
 
 pub const threading_serialized: u32 = 1;
 
-pub const lite_open_mode_writer: u32 = 0;
-pub const lite_open_mode_readonly: u32 = 1;
-pub const lite_open_mode_status_only: u32 = 2;
-
 pub const open_mode_writer: u32 = 0;
 pub const open_mode_readonly: u32 = 1;
 pub const open_mode_status_only: u32 = 2;
@@ -56,20 +52,11 @@ pub const storage_kind_lite: u32 = 1;
 pub const profile_native: u32 = 0;
 pub const profile_hosted: u32 = 1;
 
-pub const lite_profile_native: u32 = 0;
-pub const lite_profile_hosted: u32 = 1;
-
 pub const open_flag_no_sync: u32 = 1 << 0;
 pub const open_flag_ttl_cleanup: u32 = 1 << 1;
 pub const open_flag_remote_provider_configured: u32 = 1 << 2;
 pub const open_flag_local_runtime_configured: u32 = 1 << 3;
 pub const open_flag_generated_enrichment_replay: u32 = 1 << 4;
-
-pub const lite_open_flag_no_sync: u32 = 1 << 0;
-pub const lite_open_flag_ttl_cleanup: u32 = 1 << 1;
-pub const lite_open_flag_remote_provider_configured: u32 = 1 << 2;
-pub const lite_open_flag_local_runtime_configured: u32 = 1 << 3;
-pub const lite_open_flag_generated_enrichment_replay: u32 = 1 << 4;
 
 pub const OpenOptions = extern struct {
     abi_size: u32 = @sizeOf(OpenOptions),
@@ -86,36 +73,13 @@ pub const OpenOptions = extern struct {
     ttl_cleanup_lease_ttl_ms: u64 = 0,
     ttl_cleanup_interval_ms: u64 = 0,
     ttl_cleanup_grace_period_ns: u64 = 0,
-    // Milliseconds to keep retrying an open while another writer holds the
-    // database's writer lock (ANTFLY_BUSY), like sqlite3_busy_timeout. 0
-    // fails immediately. Carved from the first reserved word, so the struct
-    // size is unchanged and older callers, which zero it, keep failing fast.
-    busy_timeout_ms: u64 = 0,
-    reserved: [7]u64 = .{0} ** 7,
-};
-
-pub const LiteOpenOptions = extern struct {
-    abi_size: u32 = @sizeOf(LiteOpenOptions),
-    open_mode: u32 = lite_open_mode_writer,
-    profile: u32 = lite_profile_native,
-    flags: u32 = 0,
-    map_size: u64 = 0,
-    ttl_cleanup_enabled: bool = false,
-    ttl_cleanup_lease_owned: bool = false,
-    ttl_cleanup_batch_size: u32 = 0,
-    ttl_cleanup_owner_id: Slice = .{},
-    ttl_cleanup_lease_ttl_ms: u64 = 0,
-    ttl_cleanup_interval_ms: u64 = 0,
-    ttl_cleanup_grace_period_ns: u64 = 0,
     // Explicit embedded-inference resource-budget overrides in MiB, 0
     // meaning automatic/host-detected sizing. Only consulted when `flags`
-    // carries `lite_open_flag_local_runtime_configured`; mirror the CLI's
+    // carries `open_flag_local_runtime_configured`; mirror the CLI's
     // `--inference-host-budget-mb`/`--inference-backend-budget-mb`/
     // `--process-memory-budget-mb` (see standalone/runtime.zig,
     // inference_runtime/runtime.zig, and
-    // inference_provider.EmbeddedInferenceNodeOptions). Older callers built
-    // against a smaller `abi_size` implicitly get 0/automatic through
-    // `readOptionField`'s forward-compat size check.
+    // inference_provider.EmbeddedInferenceNodeOptions).
     inference_host_budget_mb: u32 = 0,
     inference_backend_budget_mb: u32 = 0,
     inference_process_memory_budget_mb: u32 = 0,
@@ -124,11 +88,51 @@ pub const LiteOpenOptions = extern struct {
     inference_scratch_budget_mb: u32 = 0,
     // Milliseconds to keep retrying an open while another writer holds the
     // database's writer lock (ANTFLY_BUSY), like sqlite3_busy_timeout. 0
-    // fails immediately. Carved from the first reserved word, so the struct
-    // size is unchanged and older callers, which zero it, keep failing fast.
+    // fails immediately.
     busy_timeout_ms: u64 = 0,
-    reserved: [7]u64 = .{0} ** 7,
+    reserved: [8]u64 = .{0} ** 8,
 };
+
+/// Options for `antfly_inference_open`. Same prefix-compatible contract as
+/// `OpenOptions`: initialize with `antfly_inference_options_init`.
+pub const InferenceOptions = extern struct {
+    abi_size: u32 = @sizeOf(InferenceOptions),
+    /// No flags are defined yet; must be zero.
+    flags: u32 = 0,
+    /// Models directory; empty uses `$ANTFLY_INFERENCE_MODELS_DIR`, else
+    /// `~/.antfly/inference/models`.
+    models_dir: Slice = .{},
+    // Resource budgets in MiB, 0 meaning automatic. Same meaning as the
+    // `inference_*_budget_mb` fields of `OpenOptions`.
+    host_budget_mb: u32 = 0,
+    backend_budget_mb: u32 = 0,
+    process_memory_budget_mb: u32 = 0,
+    combined_budget_mb: u32 = 0,
+    kv_budget_mb: u32 = 0,
+    scratch_budget_mb: u32 = 0,
+    /// Per-call deadline in milliseconds; 0 means none.
+    call_timeout_ms: u64 = 0,
+    reserved: [8]u64 = .{0} ** 8,
+};
+
+/// One progress report passed to an `antfly_inference_pull_json` callback.
+pub const InferencePullProgress = extern struct {
+    abi_size: u32 = @sizeOf(InferencePullProgress),
+    reserved0: u32 = 0,
+    model: Slice = .{},
+    file: Slice = .{},
+    bytes_downloaded: u64 = 0,
+    total_bytes: u64 = 0,
+    files_done: u64 = 0,
+    files_total: u64 = 0,
+    cached: bool = false,
+};
+
+/// Returns false to cancel the pull.
+pub const InferencePullProgressFn = *const fn (?*anyopaque, *const InferencePullProgress) callconv(.c) bool;
+
+/// Receives one streamed chunk's JSON; returns false to stop generating.
+pub const InferenceStreamFn = *const fn (?*anyopaque, Slice) callconv(.c) bool;
 
 pub const DenseSearchHit = extern struct {
     id_ptr: ?[*]u8 = null,
@@ -237,9 +241,12 @@ pub const ErrorCode = enum(c_int) {
     /// configured stall window and gave up instead of spinning forever. Not a
     /// malformed request or a generic server fault: retrying after operator
     /// intervention (or waiting for a slow-but-legitimate backlog) may
-    /// succeed. See `antfly_lite_run_until_idle_json`/`antfly_db_run_until_idle_json`
+    /// succeed. See `antfly_db_run_until_idle_json`
     /// for the stuck index name and indexed/expected counters.
     stalled = 9,
+    /// The caller cancelled the call, by returning false from its progress
+    /// or stream callback.
+    cancelled = 10,
     internal = 255,
 };
 
@@ -255,6 +262,7 @@ pub fn errorCodeName(code: c_int) [*:0]const u8 {
         @intFromEnum(ErrorCode.outcome_unknown) => "ANTFLY_OUTCOME_UNKNOWN",
         @intFromEnum(ErrorCode.unsupported) => "ANTFLY_UNSUPPORTED",
         @intFromEnum(ErrorCode.stalled) => "ANTFLY_STALLED",
+        @intFromEnum(ErrorCode.cancelled) => "ANTFLY_CANCELLED",
         @intFromEnum(ErrorCode.internal) => "ANTFLY_INTERNAL",
         else => "ANTFLY_UNKNOWN_ERROR",
     };
@@ -272,6 +280,7 @@ pub fn errorCodeDescription(code: c_int) [*:0]const u8 {
         @intFromEnum(ErrorCode.outcome_unknown) => "the operation was published, but crash durability could not be confirmed; inspect the destination and do not retry automatically",
         @intFromEnum(ErrorCode.unsupported) => "the operation requires a capability that is not supported by this platform or filesystem",
         @intFromEnum(ErrorCode.stalled) => "a bounded drain made no forward progress for its configured stall window and gave up",
+        @intFromEnum(ErrorCode.cancelled) => "the caller cancelled the operation",
         @intFromEnum(ErrorCode.internal) => "an internal error occurred",
         else => "unknown Antfly error code",
     };
@@ -379,8 +388,17 @@ pub fn mapError(err: anyerror) ErrorCode {
         error.SourceFileChanged,
         error.PortableImportPublicationInProgress,
         error.PortableRuntimeActivationPending,
+        error.GenerationTransitionActive,
         => .busy,
-        error.FileLocksUnsupported => .unsupported,
+        error.FileLocksUnsupported, error.GenerationFileLocksUnsupported => .unsupported,
+        // The inference runtime needs a sandboxed worker process on this
+        // backend and no `antfly` executable was found to run it.
+        error.InferenceWorkerExecutableNotConfigured,
+        // The runtime, or the worker process it runs models in, could not
+        // start; the process log has the cause.
+        error.InferenceRuntimeStartupFailed,
+        => .unsupported,
+        error.InferenceProviderCallCapacityExhausted => .busy,
         error.DurabilityOutcomeUnknown => .outcome_unknown,
         error.RunUntilIdleNoProgress => .stalled,
         // A dimension probe against a live embedder hit an operational

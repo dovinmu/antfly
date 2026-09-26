@@ -4518,7 +4518,7 @@ pub const Reader = struct {
         if (layout_runs.items.len > 0 and
             sameNonWhitespaceBytesAsTextRuns(owned_text, layout_runs.items))
         {
-            const reconstructed = try reconstructTextFromRunsAlloc(self.alloc, layout_runs.items);
+            const reconstructed = try reconstructTextFromRunsCancelableAlloc(self.alloc, layout_runs.items, self.cancellation);
             self.alloc.free(owned_text);
             owned_text = reconstructed;
         } else {
@@ -5959,7 +5959,7 @@ pub const Reader = struct {
         if (runs.items.len > 0 and
             sameNonWhitespaceBytesAsTextRuns(owned_text, runs.items))
         {
-            const reconstructed = try reconstructTextFromRunsAlloc(self.alloc, runs.items);
+            const reconstructed = try reconstructTextFromRunsCancelableAlloc(self.alloc, runs.items, self.cancellation);
             self.alloc.free(owned_text);
             owned_text = reconstructed;
         } else {
@@ -17473,13 +17473,14 @@ fn deinitTextLayoutLines(alloc: Allocator, lines: []TextLayoutLine) void {
     alloc.free(lines);
 }
 
-fn collectTextLayoutLinesAlloc(alloc: Allocator, runs: anytype, indices: []const usize) ![]TextLayoutLine {
+fn collectTextLayoutLinesAlloc(alloc: Allocator, runs: anytype, indices: []const usize, cancellation: CancellationProbe) ![]TextLayoutLine {
     var lines = std.ArrayList(TextLayoutLine).empty;
     errdefer {
         for (lines.items) |*line| line.deinit(alloc);
         lines.deinit(alloc);
     }
     for (indices) |run_index| {
+        try cancellation.check();
         const run = runs[run_index];
         const bounds = textRunBounds(run);
         var best_line_index: ?usize = null;
@@ -17690,17 +17691,25 @@ fn candidateTextLayoutGutter(
 }
 
 fn findTextLayoutGutter(
+    alloc: Allocator,
     runs: anytype,
     indices: []const usize,
     lines: []const TextLayoutLine,
     metrics: TextLayoutMetrics,
-) TextLayoutGutterSearch {
+    cancellation: CancellationProbe,
+) !TextLayoutGutterSearch {
     var search = TextLayoutGutterSearch{};
+    var seen = std.AutoHashMap([2]u64, void).init(alloc);
+    defer seen.deinit();
     for (lines) |line| {
+        try cancellation.check();
         if (line.run_indices.items.len < 2) continue;
         for (line.run_indices.items[0 .. line.run_indices.items.len - 1], line.run_indices.items[1..]) |left_index, right_index| {
             const left_bounds = textRunBounds(runs[left_index]);
             const right_bounds = textRunBounds(runs[right_index]);
+            const key = [2]u64{ @bitCast(left_bounds.max_x), @bitCast(right_bounds.min_x) };
+            const entry = try seen.getOrPut(key);
+            if (entry.found_existing) continue;
             search.consider(candidateTextLayoutGutter(
                 runs,
                 indices,
@@ -17711,26 +17720,29 @@ fn findTextLayoutGutter(
             ));
         }
     }
-    // Column baselines do not have to align. A sweep from every right edge to
-    // the next run start finds the same geometric cut when no line contains
-    // fragments from both columns.
-    for (indices) |left_index| {
-        const left_bounds = textRunBounds(runs[left_index]);
-        var nearest_right = std.math.inf(f64);
-        for (indices) |right_index| {
-            const right_bounds = textRunBounds(runs[right_index]);
-            if (right_bounds.min_x > left_bounds.max_x)
-                nearest_right = @min(nearest_right, right_bounds.min_x);
-        }
-        if (!std.math.isFinite(nearest_right)) continue;
-        search.consider(candidateTextLayoutGutter(
-            runs,
-            indices,
-            lines,
-            metrics,
-            left_bounds.max_x,
-            nearest_right,
-        ));
+    // Sort edges once and consider each distinct gutter only once. Repeated
+    // glyph positions must not trigger repeated full-page candidate scans.
+    const starts = try alloc.alloc(f64, indices.len);
+    defer alloc.free(starts);
+    const ends = try alloc.alloc(f64, indices.len);
+    defer alloc.free(ends);
+    for (indices, 0..) |index, i| {
+        const bounds = textRunBounds(runs[index]);
+        starts[i] = bounds.min_x;
+        ends[i] = bounds.max_x;
+    }
+    std.mem.sort(f64, starts, {}, std.sort.asc(f64));
+    std.mem.sort(f64, ends, {}, std.sort.asc(f64));
+    var start_index: usize = 0;
+    for (ends, 0..) |left_edge, i| {
+        try cancellation.check();
+        if (i > 0 and left_edge == ends[i - 1]) continue;
+        while (start_index < starts.len and starts[start_index] <= left_edge) start_index += 1;
+        if (start_index == starts.len) break;
+        const key = [2]u64{ @bitCast(left_edge), @bitCast(starts[start_index]) };
+        const entry = try seen.getOrPut(key);
+        if (entry.found_existing) continue;
+        search.consider(candidateTextLayoutGutter(runs, indices, lines, metrics, left_edge, starts[start_index]));
     }
     return search;
 }
@@ -17756,6 +17768,44 @@ fn textLayoutNeedsColumnReordering(
             return false;
         previous_bottom = @min(previous_bottom, line.bounds.min_y);
     }
+
+    // Short labels paired with phrases or numeric cells are also painted
+    // row-major. Those rows are ambiguous evidence for prose columns.
+    var table_rows: usize = 0;
+    for (lines) |line| {
+        var left_words: usize = 0;
+        var right_words: usize = 0;
+        var right_numeric = false;
+        var previous_left: ?usize = null;
+        var previous_right_run: ?usize = null;
+        for (line.run_indices.items) |index| {
+            const bounds = textRunBounds(runs[index]);
+            const is_left = bounds.max_x <= gutter.left;
+            const is_right = bounds.min_x >= gutter.right;
+            const previous = if (is_left) previous_left else previous_right_run;
+            var first = true;
+            var words = std.mem.tokenizeAny(u8, runs[index].text, &std.ascii.whitespace);
+            while (words.next()) |word| {
+                const joins_previous = first and if (previous) |prior| blk: {
+                    const prior_text = runs[prior].text;
+                    if (prior_text.len == 0 or std.ascii.isWhitespace(prior_text[prior_text.len - 1]) or
+                        std.ascii.isWhitespace(runs[index].text[0])) break :blk false;
+                    const word_gap = @max(0.5, @abs(runs[prior].font_size) * textRunAxisLength(runs[prior]) * 0.12) * @abs(runs[prior].horizontal_scale);
+                    break :blk textRunForwardGap(runs[prior], runs[index]) <= word_gap;
+                } else false;
+                if (is_left and !joins_previous) left_words += 1;
+                if (is_right) {
+                    if (!joins_previous) right_words += 1;
+                    right_numeric = right_numeric or (!joins_previous and (std.fmt.parseFloat(f64, word) catch null) != null);
+                }
+                first = false;
+            }
+            if (is_left) previous_left = index;
+            if (is_right) previous_right_run = index;
+        }
+        if (left_words > 0 and left_words <= 2 and (right_words >= 2 or right_numeric)) table_rows += 1;
+    }
+    if (table_rows >= 3) return false;
 
     // Repair demonstrably interleaved columns, not already grouped streams.
     // A return from the right column to a later left-column row identifies
@@ -17801,13 +17851,15 @@ fn appendPartitionedTextRunOrder(
     indices: []const usize,
     metrics: TextLayoutMetrics,
     depth: usize,
+    cancellation: CancellationProbe,
 ) !void {
+    try cancellation.check();
     if (indices.len <= 1) return appendOriginalTextRunIndices(alloc, out, indices);
     if (depth >= 32) return appendOriginalTextRunIndices(alloc, out, indices);
 
-    const lines = try collectTextLayoutLinesAlloc(alloc, runs, indices);
+    const lines = try collectTextLayoutLinesAlloc(alloc, runs, indices, cancellation);
     defer deinitTextLayoutLines(alloc, lines);
-    const gutter_search = findTextLayoutGutter(runs, indices, lines, metrics);
+    const gutter_search = try findTextLayoutGutter(alloc, runs, indices, lines, metrics, cancellation);
     // Without positive evidence of interleaved columns, retain content order.
     // Sorting an unpartitioned leaf can interleave overprinted glyphs or move
     // marginal annotations into otherwise intact sentences.
@@ -17839,18 +17891,23 @@ fn appendPartitionedTextRunOrder(
     }
     if (left.items.len == 0 or right.items.len == 0)
         return appendOriginalTextRunIndices(alloc, out, indices);
-    try appendPartitionedTextRunOrder(alloc, out, runs, headings.items, metrics, depth + 1);
-    try appendPartitionedTextRunOrder(alloc, out, runs, left.items, metrics, depth + 1);
-    try appendPartitionedTextRunOrder(alloc, out, runs, right.items, metrics, depth + 1);
-    try appendPartitionedTextRunOrder(alloc, out, runs, footers.items, metrics, depth + 1);
+    try appendPartitionedTextRunOrder(alloc, out, runs, headings.items, metrics, depth + 1, cancellation);
+    try appendPartitionedTextRunOrder(alloc, out, runs, left.items, metrics, depth + 1, cancellation);
+    try appendPartitionedTextRunOrder(alloc, out, runs, right.items, metrics, depth + 1, cancellation);
+    try appendPartitionedTextRunOrder(alloc, out, runs, footers.items, metrics, depth + 1, cancellation);
 }
 
 fn orderedTextRunIndicesAlloc(alloc: Allocator, runs: anytype) ![]usize {
+    return orderedTextRunIndicesCancelableAlloc(alloc, runs, .{});
+}
+
+fn orderedTextRunIndicesCancelableAlloc(alloc: Allocator, runs: anytype, cancellation: CancellationProbe) ![]usize {
     var original = std.ArrayList(usize).empty;
     defer original.deinit(alloc);
     var ordering_supported = true;
     var reference_index: ?usize = null;
     for (runs, 0..) |run, run_index| {
+        if (run_index % 256 == 0) try cancellation.check();
         if (run.text.len == 0) continue;
         try original.append(alloc, run_index);
         if (!textRunHasSupportedOrderingGeometry(run)) {
@@ -17864,12 +17921,15 @@ fn orderedTextRunIndicesAlloc(alloc: Allocator, runs: anytype) ![]usize {
             reference_index = run_index;
         }
     }
-    if (!ordering_supported or original.items.len <= 1)
+    // Above this bound, preserve authored order. Both line clustering and
+    // candidate validation have quadratic worst cases; optional layout repair
+    // must have a fixed work ceiling even for glyph-per-run documents.
+    if (!ordering_supported or original.items.len <= 1 or original.items.len > 2048)
         return try original.toOwnedSlice(alloc);
     const metrics = try textLayoutMetricsAlloc(alloc, runs, original.items);
     var ordered = std.ArrayList(usize).empty;
     errdefer ordered.deinit(alloc);
-    try appendPartitionedTextRunOrder(alloc, &ordered, runs, original.items, metrics, 0);
+    try appendPartitionedTextRunOrder(alloc, &ordered, runs, original.items, metrics, 0, cancellation);
     std.debug.assert(ordered.items.len == original.items.len);
     return try ordered.toOwnedSlice(alloc);
 }
@@ -17919,13 +17979,19 @@ fn endsWithColon(text: []const u8) bool {
 }
 
 fn reconstructTextFromRunsAlloc(alloc: Allocator, runs: anytype) ![]u8 {
+    return reconstructTextFromRunsCancelableAlloc(alloc, runs, .{});
+}
+
+fn reconstructTextFromRunsCancelableAlloc(alloc: Allocator, runs: anytype, cancellation: CancellationProbe) ![]u8 {
+    try cancellation.check();
     clearTextRunOutputSpans(runs);
-    const ordered_indices = try orderedTextRunIndicesAlloc(alloc, runs);
+    const ordered_indices = try orderedTextRunIndicesCancelableAlloc(alloc, runs, cancellation);
     defer alloc.free(ordered_indices);
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     var previous_index: ?usize = null;
     for (ordered_indices, 0..) |run_index, emitted_index| {
+        if (emitted_index % 256 == 0) try cancellation.check();
         const run = &runs[run_index];
         if (previous_index) |prior_index| {
             const prior = runs[prior_index];
@@ -30866,4 +30932,45 @@ test "reader preserves body rows painted after a separate footer block" {
     const text = try reconstructTextFromRunsAlloc(alloc, &runs);
     defer alloc.free(text);
     try std.testing.expectEqualStrings("FOOTER\nA Value A\nB Value B\nC Value C\n", text);
+}
+
+test "reader preserves ambiguous label value table rows" {
+    const alloc = std.testing.allocator;
+    var runs = [_]TextRun{
+        .{ .text = "A", .x = 0, .y = 100, .font_size = 10, .advance_width = 30, .ascent = 8, .descent = 2 },
+        .{ .text = "Value A", .x = 100, .y = 100, .font_size = 10, .advance_width = 40, .ascent = 8, .descent = 2 },
+        .{ .text = "B", .x = 0, .y = 80, .font_size = 10, .advance_width = 30, .ascent = 8, .descent = 2 },
+        .{ .text = "Value B", .x = 100, .y = 80, .font_size = 10, .advance_width = 40, .ascent = 8, .descent = 2 },
+        .{ .text = "C", .x = 0, .y = 60, .font_size = 10, .advance_width = 30, .ascent = 8, .descent = 2 },
+        .{ .text = "Value C", .x = 100, .y = 60, .font_size = 10, .advance_width = 40, .ascent = 8, .descent = 2 },
+    };
+    const text = try reconstructTextFromRunsAlloc(alloc, &runs);
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings("A Value A\nB Value B\nC Value C\n", text);
+    runs[1].text = "123.45";
+    runs[3].text = "456.78";
+    runs[5].text = "789.01";
+    const numeric = try reconstructTextFromRunsAlloc(alloc, &runs);
+    defer alloc.free(numeric);
+    try std.testing.expectEqualStrings("A 123.45\nB 456.78\nC 789.01\n", numeric);
+}
+
+test "reader bounds dense page ordering and honors reconstruction cancellation" {
+    const alloc = std.testing.allocator;
+    const runs = try alloc.alloc(TextRun, 20000);
+    defer alloc.free(runs);
+    for (runs, 0..) |*run, i| run.* = .{ .text = "word", .x = @floatFromInt(i % 50 * 4), .y = @floatFromInt(i / 50 * 3), .font_size = 1, .advance_width = 1, .ascent = 0.8, .descent = 0.2 };
+    const order = try orderedTextRunIndicesAlloc(alloc, runs);
+    defer alloc.free(order);
+    for (order, 0..) |index, i| try std.testing.expectEqual(i, index);
+    const Probe = struct {
+        calls: usize = 0,
+        fn canceled(raw: ?*const anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(raw.?)));
+            self.calls += 1;
+            return self.calls >= 3;
+        }
+    };
+    var probe = Probe{};
+    try std.testing.expectError(error.Canceled, reconstructTextFromRunsCancelableAlloc(alloc, runs, .{ .context = &probe, .is_cancelled_fn = Probe.canceled }));
 }

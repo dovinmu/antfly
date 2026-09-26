@@ -821,6 +821,131 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/db/v1/agents/research": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Research Agent - Bounded multi-phase research with a cited report
+         * @description Runs a bounded research state machine:
+         *     plan → research (parallel retrieval researchers) → reflect → … → write → verify
+         *
+         *     Every researcher is an ordinary retrieval-agent run over the request's
+         *     authorized queries, so authorization, mandatory predicates and tool
+         *     policy are identical to `/agents/retrieval`. Researchers return
+         *     compressed findings; the writer only sees findings and a deduplicated
+         *     evidence registry, and the server validates every `[E#]` citation.
+         *
+         *     All work is bounded by `budget`. Send `research_state` back to resume
+         *     or extend a run. For runs longer than one request, use
+         *     `/agents/research/jobs`.
+         *
+         *     **SSE Event Types:** the retrieval-agent events are reused.
+         *     `step_progress` carries `phase` values `plan`, `sub_question_started`,
+         *     `finding`, `reflection`, `section` and `verification`. Report text
+         *     streams as `generation`. `done` carries the authoritative
+         *     ResearchAgentResult.
+         */
+        post: operations["researchAgent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/db/v1/agents/research/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start a durable research job
+         * @description Persists a research request as a durable job that advances one bounded
+         *     phase at a time. Each phase checkpoints its research_state, so a job
+         *     survives server restarts and can be resumed by any caller holding the
+         *     same identity. Jobs are scoped to the authenticated principal.
+         */
+        post: operations["startResearchJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/db/v1/agents/research/jobs/{jobId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Research job identifier. */
+                jobId: string;
+            };
+            cookie?: never;
+        };
+        /** Get a durable research job */
+        get: operations["getResearchJob"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/db/v1/agents/research/jobs/{jobId}/advance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Research job identifier. */
+                jobId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Advance a durable research job
+         * @description Runs up to `max_phases` bounded research phases and persists the
+         *     checkpoint after each one. Concurrent advances of the same job are
+         *     rejected with 409.
+         */
+        post: operations["advanceResearchJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/db/v1/agents/research/jobs/{jobId}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Research job identifier. */
+                jobId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a durable research job */
+        post: operations["cancelResearchJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/db/v1/tables": {
         parameters: {
             query?: never;
@@ -3179,33 +3304,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/ai/v1/rerank_multimodal": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Rerank multimodal documents by relevance
-         * @description Re-scores multimodal documents based on relevance to a text query.
-         *
-         *     This endpoint accepts the same content-part image conventions as generation and embedding.
-         *     Text-only requests can be served immediately. Image-bearing requests reserve the stable
-         *     contract for native ColQwen-style late-interaction reranking as that encoder lands.
-         *     Image-bearing requests already run native Zig image preprocessing and grid preparation.
-         *     Remote URL byte potential is reserved before fetch, and image headers plus aggregate
-         *     decoded pixels are admitted before model loading.
-         */
-        post: operations["rerankMultimodalPrompts"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/ai/v1/rerank": {
         parameters: {
             query?: never;
@@ -3216,32 +3314,34 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Rerank prompts by relevance
-         * @description Re-scores pre-rendered text prompts based on relevance to a query using native or ONNX reranking models.
+         * Rerank documents by relevance
+         * @description Re-scores documents by relevance to a text query. Returns one score per
+         *     document, in request order.
          *
-         *     ## Client Responsibilities
+         *     Each entry in `documents` is either a string or an array of content parts, in
+         *     the same format that generation and embedding use: `text` parts, `image_url`
+         *     parts, and inline `media` parts with an `image/*` MIME type. The client renders
+         *     document fields or templates to text before calling this endpoint.
          *
-         *     The client must:
-         *     1. Extract relevant fields from documents
-         *     2. Render any templates
-         *     3. Send pre-rendered text strings as `prompts`
-         *
-         *     This design keeps inference stateless and allows clients to customize rendering logic.
+         *     Text-only documents work with any reranker. Documents with images require a
+         *     model that supports them: a ColQwen-style late-interaction reranker (manifest
+         *     capability `colqwen` or `multimodal_late_interaction`) or a Qwen3-VL reranker
+         *     bundled with its GGUF vision projector. Otherwise the request is rejected with
+         *     a `400`. Within a request that contains images, documents without images are
+         *     scored by the model's text scorer.
          *
          *     ## Models
          *
          *     - Models are auto-discovered from `models_dir/rerankers/`
-         *     - Cross-encoder rerankers are supported through the existing text scorer
+         *     - Cross-encoder rerankers are supported through the text scorer
          *     - Late-interaction text rerankers such as ColBERT can opt in with `model_manifest.json` capability `late_interaction` or `colbert`
-         *     - Supports quantized models (`model_quantized.onnx`)
          *     - Automatically prefers quantized variants if available
          *
-         *     This endpoint is still text-only. Real ColQwen-style multimodal reranking requires a future request shape that carries page images or image-derived embeddings.
-         *
-         *     For document-based reranking with field extraction, use the client-side
-         *     `lib/reranking` package which handles rendering before calling this endpoint.
+         *     Remote image URLs are fetched subject to the configured content security
+         *     policy. Image headers and aggregate decoded pixels are admitted before the
+         *     model loads.
          */
-        post: operations["rerankPrompts"];
+        post: operations["rerankDocuments"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4829,50 +4929,9 @@ export interface components {
          *
          *        See: https://antfly.io/docs/configuration#security--cors
          *
-         *     4. **encodeToon** - Encode data in TOON format (Token-Oriented Object Notation)
-         *        ```handlebars
-         *        {{encodeToon this.fields}}
-         *        {{encodeToon this.fields lengthMarker=false indent=4}}
-         *        {{encodeToon this.fields delimiter="\t"}}
-         *        ```
-         *
-         *        **What is TOON?**
-         *        TOON is a compact, human-readable format designed for passing structured data to LLMs.
-         *        It provides **30-60% token reduction** compared to JSON while maintaining high LLM
-         *        comprehension accuracy.
-         *
-         *        **Key Features:**
-         *        - Compact syntax using `:` for key-value pairs
-         *        - Array length markers: `tags[#3]: ai,search,ml`
-         *        - Tabular format for uniform data structures
-         *        - Optimized for LLM parsing and understanding
-         *        - Maintains human readability
-         *
-         *        **Benefits:**
-         *        - **Lower API costs** - Reduced token usage means lower LLM API costs
-         *        - **Faster responses** - Less tokens to process
-         *        - **More context** - Fit more documents within token limits
-         *
-         *        **Options:**
-         *        - `lengthMarker` (bool): Add # prefix to array counts like `[#3]` (default: true)
-         *        - `indent` (int): Indentation spacing for nested objects (default: 2)
-         *        - `delimiter` (string): Field separator for tabular arrays (default: none, use `"\t"` for tabs)
-         *
-         *        **Example output:**
-         *        ```
-         *        title: Introduction to Vector Search
-         *        author: Jane Doe
-         *        tags[#3]: ai,search,ml
-         *        metadata:
-         *          edition: 2
-         *          pages: 450
-         *        ```
-         *
-         *        **Default in RAG:** TOON is the default format for document rendering in RAG queries.
-         *
-         *        **References:**
-         *        - TOON Specification: https://github.com/toon-format/toon
-         *        - Go Implementation: https://github.com/alpkeskin/gotoon
+         *     4. **encodeToon** is not available in these templates. It is a helper of the
+         *        retrieval agent's `document_renderer`, which renders documents into the
+         *        generation prompt as TOON by default.
          *
          *     **Template Examples:**
          *
@@ -4954,26 +5013,26 @@ export interface components {
             rate_limit?: components["schemas"]["RateLimitConfig"];
             provider: components["schemas"]["EmbedderProvider"];
             /**
-             * @description Declare that this model supports non-text content (images, audio, video, PDFs),
-             *     even if the model isn't in Antfly's built-in model registry yet.
+             * @description Input types the model accepts. Normally omitted: Antfly learns them from the
+             *     model's capabilities, which Antfly inference publishes for every model it
+             *     serves. Set it only to use a model whose capabilities Antfly cannot discover
+             *     yet, such as a newly released model. When set, it replaces the discovered
+             *     input types.
              *
-             *     When `true`, Antfly treats the model as multimodal and sends binary content
-             *     (images, audio, etc.) through an embedding adapter that supports content parts.
-             *     Antfly currently provides that contract for local Antfly inference and Bedrock;
-             *     text-only provider adapters reject media rather than silently discarding it.
-             *
-             *     Not needed for models already in the local registry (e.g., `clip-*`, `clipclap`).
+             *     Only providers whose adapters can send media accept media inputs: `antfly`
+             *     (`image`, `audio`) and `bedrock` (`image`). Other providers reject `image` and
+             *     `audio` here rather than silently discarding media.
              *
              *     **Example:**
              *     ```json
              *     {
              *       "provider": "antfly",
              *       "model": "some-future-multimodal-model",
-             *       "multimodal": true
+             *       "inputs": ["text", "image"]
              *     }
              *     ```
              */
-            multimodal?: boolean;
+            inputs?: ("text" | "image" | "audio")[];
             /**
              * @deprecated
              * @description Deprecated compatibility form of
@@ -6104,7 +6163,7 @@ export interface components {
         /**
          * @description Synchronization level for batch operations:
          *     - "propose": Wait for Raft proposal acceptance (fastest, default)
-         *     - "write": Wait for Pebble KV write
+         *     - "write": Wait for the write to be durably applied to the local key-value store
          *     - "full_text": Wait for full-text index WAL write
          *     - "enrichments": Precompute enrichments before committing the document. A synchronous
          *       producer failure rejects the write; post-commit worker failures retain the document
@@ -8232,8 +8291,9 @@ export interface components {
              */
             mode?: string;
             /**
-             * @description Preferred output artifact. Suggested values are `query_request`, `bleve`, and
-             *     `filter_query`. The compatibility `query` field is still returned for existing clients.
+             * @description Preferred output artifact. Suggested values are `query_request`, `bleve` (Antfly's
+             *     native, Bleve-compatible full-text query JSON), and `filter_query`. The compatibility
+             *     `query` field is still returned for existing clients.
              * @example query_request
              */
             output?: string;
@@ -8271,7 +8331,8 @@ export interface components {
             /** @description Clarification questions exposed in the shared bounded-agent envelope. */
             questions?: components["schemas"]["AgentQuestion"][];
             /**
-             * @description Generated search query in native Bleve format.
+             * @description Generated search query in Antfly's native full-text query format (a Bleve-compatible
+             *     JSON query DSL: `match`, `term`, `conjuncts`, `disjuncts`, `must_not`, etc.).
              *     Can be used directly in QueryRequest.full_text_search or filter_query.
              * @example {
              *       "conjuncts": [
@@ -8721,9 +8782,23 @@ export interface components {
             /** @description Step configuration */
             steps?: components["schemas"]["RetrievalAgentSteps"];
             /**
-             * @description Handlebars template for rendering documents in the generation prompt.
-             *     Default uses TOON format for token efficiency.
-             *     Requires steps.generation to be set.
+             * @description Handlebars template that renders each retrieved document in the
+             *     generation prompt. Requires steps.generation to be set.
+             *
+             *     The template is rendered once per hit against `{id, score, fields}`,
+             *     where `fields` is the hit's source. When omitted, each document's
+             *     fields are encoded as TOON (Token-Oriented Object Notation), which
+             *     carries the same structure as JSON in fewer tokens.
+             *
+             *     Helpers: `encodeToon` (options `indent`, 1 to 16, default 2; and
+             *     `delimiter`: `comma`, `tab`, or `pipe`), `scrubHtml`, `eq`, and
+             *     `media`. Values in `{{...}}` are HTML-escaped; use `{{{...}}}` for
+             *     raw text.
+             *
+             *     Examples:
+             *     - `{{encodeToon this.fields}}`
+             *     - `{{encodeToon this.fields delimiter="tab"}}`
+             *     - `Title: {{{this.fields.title}}}`
              * @example {{encodeToon this.fields}}
              */
             document_renderer?: string;
@@ -8803,6 +8878,473 @@ export interface components {
             followup_questions?: string[];
             /** @description Evaluation results when steps.eval was configured */
             eval_result?: components["schemas"]["EvalResult"];
+        };
+        /**
+         * @description Research state-machine phase. `plan` decomposes the question,
+         *     `research` runs one bounded round of retrieval researchers, `reflect`
+         *     decides whether another round is needed, `write` produces the cited
+         *     report, `verify` checks citations, and `done` is terminal.
+         * @enum {string}
+         */
+        ResearchPhase: "plan" | "research" | "reflect" | "write" | "verify" | "done";
+        /**
+         * @description Declared upper bounds for one research run. The worst-case LLM and
+         *     tool-call cost is computable before execution; requests whose worst
+         *     case exceeds the server ceiling are rejected, not clamped.
+         */
+        ResearchBudget: {
+            /**
+             * @description Maximum research rounds (plan or reflect, then fan-out).
+             * @default 2
+             */
+            max_rounds?: number;
+            /**
+             * @description Maximum sub-questions researched per round.
+             * @default 4
+             */
+            max_sub_questions?: number;
+            /**
+             * @description Maximum researchers in flight at once.
+             * @default 2
+             */
+            max_parallel?: number;
+            /**
+             * @description Model-generation rounds available to each researcher.
+             * @default 6
+             */
+            researcher_iterations?: number;
+            /**
+             * @description Tool calls available to each researcher.
+             * @default 8
+             */
+            researcher_tool_calls?: number;
+            /**
+             * @description Hard cap on model calls across every role in the run.
+             * @default 80
+             */
+            max_llm_calls?: number;
+            /**
+             * @description Hard cap on tool calls across every researcher in the run.
+             * @default 120
+             */
+            max_tool_calls?: number;
+            /**
+             * @description Maximum distinct evidence items retained in the registry.
+             * @default 80
+             */
+            max_evidence?: number;
+            /**
+             * @description Output token budget for the report writer.
+             * @default 4000
+             */
+            max_report_tokens?: number;
+            /**
+             * @description Wall-clock budget for a synchronous run or a single job advance.
+             * @default 600000
+             */
+            deadline_ms?: number;
+        };
+        /** @description Configuration for one research role. Generator and chain default to the top-level request values. */
+        ResearchStepConfig: {
+            /** @description Whether the step runs. Defaults vary by step. */
+            enabled?: boolean;
+            /** @description Generator for this role. */
+            generator?: components["schemas"]["GeneratorConfig"];
+            /** @description Chain of generators for this role. */
+            chain?: components["schemas"]["ChainLink"][];
+            /** @description Additional role instructions. They cannot change authorized tables, filters, tools or budgets. */
+            instructions?: string;
+        };
+        /**
+         * @description Configuration for researchers. Every researcher is a bounded retrieval
+         *     agent run over the request's authorized queries. `tools` narrows the
+         *     top-level tools policy and cannot widen it.
+         */
+        ResearchRetrievalStepConfig: {
+            /** @description Generator for researchers. Defaults to the top-level generator. */
+            generator?: components["schemas"]["GeneratorConfig"];
+            /** @description Chain of generators for researchers. */
+            chain?: components["schemas"]["ChainLink"][];
+            /** @description Additional researcher instructions. */
+            instructions?: string;
+            /** @description Researcher tool policy. Narrows the top-level tools policy. */
+            tools?: components["schemas"]["ChatToolsConfig"];
+            /** @description Optional tree or graph navigation available to each researcher. */
+            navigation?: components["schemas"]["RetrievalNavigationConfig"];
+        };
+        /** @description Configuration for the report writer. */
+        ResearchWriteStepConfig: {
+            /** @description Generator for the writer. Defaults to the top-level generator. */
+            generator?: components["schemas"]["GeneratorConfig"];
+            /** @description Chain of generators for the writer. */
+            chain?: components["schemas"]["ChainLink"][];
+            /** @description Additional writer instructions, for example audience or tone. */
+            instructions?: string;
+            /** @description Optional caller-supplied section headings. When omitted the writer chooses them. */
+            outline?: string[];
+        };
+        /** @description Per-role configuration for the research agent. */
+        ResearchAgentSteps: {
+            /** @description Planner that writes the research brief and sub-questions. Always runs unless research_state carries a plan. */
+            plan?: components["schemas"]["ResearchStepConfig"];
+            /** @description Researcher configuration. */
+            research?: components["schemas"]["ResearchRetrievalStepConfig"];
+            /** @description Gap analysis after each round. Enabled by default when budget.max_rounds > 1. */
+            reflect?: components["schemas"]["ResearchStepConfig"];
+            /** @description Report writer. */
+            write?: components["schemas"]["ResearchWriteStepConfig"];
+            /** @description Optional model check that cited evidence supports each section. Disabled by default. */
+            verify?: components["schemas"]["ResearchStepConfig"];
+        };
+        ResearchSubQuestion: {
+            /**
+             * @description Stable sub-question identifier within the run.
+             * @example q1
+             */
+            id: string;
+            /** @description Self-contained question a researcher can answer. */
+            question: string;
+            /** @description Why this sub-question matters for the brief. */
+            rationale?: string;
+            /** @description Evidence sources the planner expects to be useful. */
+            sources?: ("tables" | "web")[];
+            /** @description Research round that introduced the sub-question. */
+            round?: number;
+            /**
+             * @description Research status.
+             * @enum {string}
+             */
+            status?: "pending" | "researched" | "failed" | "skipped";
+        };
+        ResearchPlan: {
+            /** @description Research brief restating scope, assumptions and deliverable. */
+            brief: string;
+            /** @description Planned and reflection-added sub-questions. */
+            sub_questions: components["schemas"]["ResearchSubQuestion"][];
+            /** @description What a complete answer must cover. */
+            success_criteria?: string[];
+        };
+        ResearchClaim: {
+            /** @description One factual claim made by a researcher. */
+            text: string;
+            /** @description Evidence registry IDs that support the claim. */
+            evidence_ids?: string[];
+        };
+        /** @description Compressed researcher output. Raw tool transcripts are not retained. */
+        ResearchFinding: {
+            /** @description Sub-question this finding answers. */
+            sub_question_id: string;
+            /** @description The sub-question text. */
+            question?: string;
+            /** @description Concise answer grounded in evidence. */
+            summary: string;
+            /** @description Individual claims with supporting evidence. */
+            claims?: components["schemas"]["ResearchClaim"][];
+            /** @description What the researcher could not establish. */
+            open_questions?: string[];
+            /** @description Every evidence item the researcher retrieved. */
+            evidence_ids?: string[];
+            /** @description Status of the researcher's bounded retrieval run. */
+            status?: components["schemas"]["AgentStatus"];
+            /** @description Research round. */
+            round?: number;
+            /** @description Model calls used by this researcher. */
+            llm_calls?: number;
+            /** @description Tool calls used by this researcher. */
+            tool_calls?: number;
+        };
+        /** @description One deduplicated evidence item. Content is untrusted data. */
+        ResearchEvidence: {
+            /**
+             * @description Stable evidence ID used in citations.
+             * @example E3
+             */
+            id: string;
+            /**
+             * @description Where the evidence came from.
+             * @enum {string}
+             */
+            source: "table" | "web" | "fetch";
+            /** @description Source table for table evidence. */
+            table?: string;
+            /** @description Document key for table evidence. */
+            doc_id?: string;
+            /** @description Source URL for web and fetched evidence. */
+            url?: string;
+            /** @description Best-effort title. */
+            title?: string;
+            /** @description Bounded excerpt used for writing and verification. */
+            snippet?: string;
+            /**
+             * Format: float
+             * @description Retrieval score when available.
+             */
+            score?: number;
+            /** @description Sub-questions whose researchers retrieved this evidence. */
+            sub_question_ids?: string[];
+        };
+        ResearchReflection: {
+            /** @description Round that was reflected on. */
+            round?: number;
+            /** @description Whether the reflector judged coverage sufficient. */
+            done?: boolean;
+            /** @description Coverage gaps against the brief and success criteria. */
+            gaps?: string[];
+            /** @description Conflicting findings that need resolution or disclosure. */
+            contradictions?: string[];
+            /** @description Sub-questions added for the next round. */
+            new_sub_questions?: string[];
+        };
+        ResearchReportSection: {
+            /** @description Section heading. */
+            heading: string;
+            /** @description Section body with `[E#]` citation markers. */
+            markdown: string;
+        };
+        ResearchReport: {
+            /** @description Report title. */
+            title?: string;
+            /** @description Executive summary. */
+            summary?: string;
+            /** @description Report sections. */
+            sections?: components["schemas"]["ResearchReportSection"][];
+            /** @description The full report rendered as markdown, with a sources list. */
+            markdown: string;
+        };
+        ResearchCitation: {
+            /** @description Marker as written in the report, for example `[E3]`. */
+            marker: string;
+            /** @description Resolved evidence ID. */
+            evidence_id: string;
+            /** @description Section containing the marker. -1 is the summary. */
+            section_index?: number;
+            /** @description Number of occurrences in that section. */
+            count?: number;
+        };
+        ResearchUnsupportedClaim: {
+            /** @description Section containing the claim. */
+            section_index?: number;
+            /** @description Claim text. */
+            text?: string;
+            /** @description Evidence the claim cited. */
+            evidence_ids?: string[];
+            /** @description Why the claim is unsupported. */
+            reason?: string;
+        };
+        ResearchVerification: {
+            /** @description Number of sections checked. */
+            checked_sections?: number;
+            /** @description Citation markers that did not resolve to evidence and were removed. */
+            unresolved_markers?: string[];
+            /** @description Sections without any resolvable citation. */
+            uncited_sections?: number[];
+            /** @description Claims the verifier judged unsupported by their cited evidence. */
+            unsupported?: components["schemas"]["ResearchUnsupportedClaim"][];
+            /**
+             * Format: float
+             * @description Share of checked claims judged supported.
+             */
+            supported_ratio?: number;
+        };
+        ResearchUsage: {
+            /** @description Model calls across every role. */
+            llm_calls?: number;
+            /** @description Tool calls across every researcher. */
+            tool_calls?: number;
+            /** @description Researcher executions. */
+            researcher_runs?: number;
+            /** @description Research rounds completed. */
+            rounds?: number;
+            /** @description Evidence items in the registry. */
+            evidence_count?: number;
+            /**
+             * Format: int64
+             * @description Wall-clock time consumed so far.
+             */
+            elapsed_ms?: number;
+        };
+        /**
+         * @description Client-carried continuation state. Sending it back resumes the run at
+         *     `phase` without repeating completed work. It never contains raw tool
+         *     transcripts, credentials or connection settings. Evidence snippets are
+         *     bounded excerpts of documents the caller was authorized to read; every
+         *     resumed request is re-authorized.
+         *
+         *     The server signs the state it returns (`signature`) and rejects a
+         *     state whose signature does not verify, so a client cannot alter a
+         *     checkpoint, including its budget counters. Send the state back
+         *     unmodified. Signatures are valid across a cluster that shares an
+         *     internal service secret, otherwise only on the server that issued them
+         *     and until it restarts; use durable jobs to resume across restarts.
+         */
+        ResearchState: {
+            /** @description Server signature over this state. Do not modify the state. */
+            signature?: string;
+            phase: components["schemas"]["ResearchPhase"];
+            /** @description Completed research rounds. */
+            round?: number;
+            plan?: components["schemas"]["ResearchPlan"];
+            findings?: components["schemas"]["ResearchFinding"][];
+            evidence?: components["schemas"]["ResearchEvidence"][];
+            reflections?: components["schemas"]["ResearchReflection"][];
+            report?: components["schemas"]["ResearchReport"];
+            citations?: components["schemas"]["ResearchCitation"][];
+            verification?: components["schemas"]["ResearchVerification"];
+            usage?: components["schemas"]["ResearchUsage"];
+        };
+        ResearchIncompleteDetails: {
+            /**
+             * @description Why the run stopped:
+             *     - max_rounds: research rounds were exhausted before the reflector was satisfied (the report is still written)
+             *     - max_llm_calls / max_tool_calls: a hard budget was exhausted
+             *     - deadline: the wall-clock budget elapsed
+             *     - no_evidence: researchers found no evidence to write from
+             *     - clarification_required: the planner needs a user decision
+             *     - cancelled: a durable job was cancelled
+             *     - phase_limit: a job advance stopped after its requested number of phases
+             * @enum {string}
+             */
+            reason: "max_rounds" | "max_llm_calls" | "max_tool_calls" | "deadline" | "no_evidence" | "clarification_required" | "cancelled" | "phase_limit";
+            /** @description Human-readable detail. */
+            message?: string;
+        };
+        /**
+         * @description Request for the research agent. The agent plans sub-questions, runs a
+         *     bounded retrieval researcher per sub-question in parallel, reflects on
+         *     coverage, and writes a long-form report whose `[E#]` citations resolve
+         *     to a deduplicated evidence registry.
+         *
+         *     Researchers are ordinary retrieval-agent runs over `queries` with the
+         *     same authorization, mandatory predicates and tool policy. They cannot
+         *     widen tables, filters, tools or budgets.
+         */
+        ResearchAgentRequest: {
+            /**
+             * @description The research question.
+             * @example How do Antfly's hybrid search and reranking interact, and what are the tuning trade-offs?
+             */
+            query: string;
+            /**
+             * @description Authorized table scopes, as for the retrieval agent. `filter_query`
+             *     and `exclusion_query` are mandatory predicates for every researcher.
+             *     May be empty when web search is enabled.
+             */
+            queries: components["schemas"]["QueryRequest"][];
+            /** @description Optional conversational context. */
+            messages?: components["schemas"]["ChatMessage"][];
+            /** @description Domain context for every role. */
+            agent_knowledge?: string;
+            /** @description Mandatory filters applied to every researcher search. */
+            accumulated_filters?: components["schemas"]["FilterSpec"][];
+            /** @description Correlation identifier echoed back to the client. */
+            session_id?: string;
+            /** @description Structured user answers for client-carried continuation. */
+            decisions?: components["schemas"]["AgentDecision"][];
+            /**
+             * @description If true, the planner may return clarification questions instead of a plan.
+             * @default false
+             */
+            interactive?: boolean;
+            /** @description Default generator for every role. */
+            generator?: components["schemas"]["GeneratorConfig"];
+            /** @description Default chain of generators for every role. */
+            chain?: components["schemas"]["ChainLink"][];
+            /** @description Default tool policy for researchers, for example `web_search` and `fetch`. */
+            tools?: components["schemas"]["ChatToolsConfig"];
+            steps?: components["schemas"]["ResearchAgentSteps"];
+            budget?: components["schemas"]["ResearchBudget"];
+            /** @description Continuation state returned by an earlier run. */
+            research_state?: components["schemas"]["ResearchState"];
+            /** @description Per-researcher tool-result context budget in tokens. */
+            max_context_tokens?: number;
+            /** @description Tokens reserved from max_context_tokens for prompts and answers. */
+            reserve_tokens?: number;
+            /**
+             * @description Enable SSE streaming vs JSON response.
+             * @default true
+             */
+            stream?: boolean;
+        };
+        /** @description Result from the research agent. */
+        ResearchAgentResult: {
+            /**
+             * @description Unique response ID.
+             * @example resr_cr3ig20h5tbs73e3ahrg
+             */
+            id?: string;
+            /** @description Writer model. */
+            model?: string;
+            /**
+             * Format: int64
+             * @description Unix timestamp (seconds) when the response was created.
+             */
+            created_at?: number;
+            status: components["schemas"]["AgentStatus"];
+            incomplete_details?: components["schemas"]["ResearchIncompleteDetails"];
+            phase?: components["schemas"]["ResearchPhase"];
+            usage?: components["schemas"]["ResearchUsage"];
+            plan?: components["schemas"]["ResearchPlan"];
+            findings?: components["schemas"]["ResearchFinding"][];
+            evidence?: components["schemas"]["ResearchEvidence"][];
+            reflections?: components["schemas"]["ResearchReflection"][];
+            report?: components["schemas"]["ResearchReport"];
+            citations?: components["schemas"]["ResearchCitation"][];
+            verification?: components["schemas"]["ResearchVerification"];
+            research_state: components["schemas"]["ResearchState"];
+            /** @description Execution trace. */
+            steps?: components["schemas"]["AgentStep"][];
+            /** @description Clarification questions when status is clarification_required. */
+            questions?: components["schemas"]["AgentQuestion"][];
+            /** @description Echoed correlation identifier. */
+            session_id?: string;
+        };
+        /**
+         * @description Durable research job lifecycle state.
+         * @enum {string}
+         */
+        ResearchJobState: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+        ResearchJobStartRequest: {
+            /**
+             * @description The research request. `stream` is ignored. Durable jobs persist the
+             *     request, so generators must reference credentials through the
+             *     secret store, environment or server connections rather than inline
+             *     API keys.
+             */
+            request: components["schemas"]["ResearchAgentRequest"];
+            /**
+             * @description Number of phases to run before the start call returns.
+             * @default 0
+             */
+            advance?: number;
+        };
+        ResearchJobAdvanceRequest: {
+            /**
+             * @description Maximum phases to run in this advance. Each phase checkpoints before the next starts.
+             * @default 1
+             */
+            max_phases?: number;
+        };
+        ResearchJob: {
+            /** @description Job identifier. */
+            job_id: string;
+            state: components["schemas"]["ResearchJobState"];
+            phase: components["schemas"]["ResearchPhase"];
+            /** @description The research question. */
+            query?: string;
+            /** @description Completed advance calls. */
+            advances?: number;
+            /** @description Whether cancellation was requested. */
+            cancel_requested?: boolean;
+            /** @description Last advance error, if any. */
+            last_error?: string;
+            /** Format: int64 */
+            created_at_ms?: number;
+            /** Format: int64 */
+            updated_at_ms?: number;
+            /** Format: int64 */
+            expires_at_ms?: number;
+            /** @description Latest checkpointed result, including research_state. */
+            result?: components["schemas"]["ResearchAgentResult"];
         };
         /**
          * @deprecated
@@ -9446,41 +9988,9 @@ export interface components {
              */
             graph_queries?: components["schemas"]["GraphQueries"];
             /**
-             * @description Optional Handlebars template string for rendering document content in RAG queries.
-             *     Template has access to document fields via `{{this.fields.fieldName}}`.
-             *
-             *     **Default**: Uses TOON (Token-Oriented Object Notation) format for 30-60% token reduction:
-             *     ```handlebars
-             *     {{encodeToon this.fields}}
-             *     ```
-             *
-             *     **Available Helpers**:
-             *     - `encodeToon` - Renders fields in compact TOON format with configurable options:
-             *       - `lengthMarker` (bool): Add # prefix to array counts (default: true)
-             *       - `indent` (int): Indentation spacing (default: 2)
-             *       - `delimiter` (string): Field separator for tabular arrays
-             *     - `scrubHtml` - Removes HTML tags and extracts text
-             *     - `media` - Wraps data URIs for GenKit multimodal support
-             *     - `eq` - Equality comparison for conditionals
-             *
-             *     **Examples**:
-             *     - Basic TOON: `{{encodeToon this.fields}}`
-             *     - Compact TOON: `{{encodeToon this.fields lengthMarker=false indent=0}}`
-             *     - Tabular data: `{{encodeToon this.fields delimiter="\t"}}`
-             *     - Custom template: `Title: {{this.fields.title}}\nBody: {{this.fields.body}}`
-             *     - Traditional format: `{{#each this.fields}}{{@key}}: {{this}}\n{{/each}}`
-             *
-             *     TOON format produces compact, LLM-optimized output like:
-             *     ```
-             *     title: Introduction to Vector Search
-             *     author: Jane Doe
-             *     tags[#3]: ai,search,ml
-             *     ```
-             *
-             *     **References**:
-             *     - TOON Specification: https://github.com/toon-format/toon
-             *     - Go Implementation: https://github.com/alpkeskin/gotoon
-             * @example {{encodeToon this.fields}}
+             * @description Not supported on queries, which do not generate text; requests that
+             *     set it are rejected. Set `document_renderer` on a retrieval agent
+             *     request to control how documents appear in the generation prompt.
              */
             document_renderer?: string;
             /**
@@ -10733,8 +11243,8 @@ export interface components {
              */
             on_delete?: components["schemas"]["ReplicationTransformOp"][];
             /**
-             * @description Bleve-style filter query that gets translated to SQL and applied as a
-             *     WHERE clause on the PostgreSQL publication. This filters rows at the
+             * @description Antfly's native filter query (see `RawQuery`) that gets translated to SQL and
+             *     applied as a WHERE clause on the PostgreSQL publication. This filters rows at the
              *     source before they are sent over the replication stream, reducing
              *     network and processing overhead.
              *
@@ -10828,7 +11338,7 @@ export interface components {
              */
             target_table: string;
             /**
-             * @description Bleve-style filter query evaluated against each CDC row. Only rows
+             * @description Antfly's native filter query (see `RawQuery`) evaluated against each CDC row. Only rows
              *     matching this filter are written to `target_table`. If omitted,
              *     all rows match (equivalent to `match_all`).
              */
@@ -11420,13 +11930,12 @@ export interface components {
          * @description Configuration for the Antfly inference embedding provider.
          *
          *     Antfly inference is Antfly's built-in ML service for local embeddings using ONNX models.
-         *     It provides embedding generation with multi-tier caching (memory + persistent).
          *
          *     **Features:**
          *     - Local ONNX-based embedding generation
-         *     - L1 memory cache with configurable TTL
-         *     - L2 persistent Pebble database cache
-         *     - Singleflight deduplication for concurrent identical requests
+         *     - Query-time embeddings are served from an in-memory cache (64 MiB budget,
+         *       5-minute TTL by default) with concurrent identical requests coalesced onto
+         *       a single computation; there is no persistent on-disk cache tier
          *
          *     **Example Models:** bge-base-en-v1.5 (768 dims), all-MiniLM-L6-v2 (384 dims)
          *
@@ -11503,6 +12012,124 @@ export interface components {
          * @enum {string}
          */
         EnrichmentKind: "chunk" | "asset" | "embedding";
+        /** @description Options specific to text chunking. */
+        TextChunkOptions: {
+            /** @description Target number of tokens per chunk. */
+            target_tokens?: number;
+            /** @description Number of tokens to overlap between consecutive chunks. Helps maintain context across chunk boundaries. Only used by fixed-size chunkers. */
+            overlap_tokens?: number;
+            /** @description Separator string for splitting (e.g., '\n\n' for paragraphs). Only used by fixed-size chunkers. */
+            separator?: string;
+        };
+        /** @description Options specific to audio chunking. */
+        AudioChunkOptions: {
+            /** @description Window duration in milliseconds for fixed-window audio chunking (default: 30000). */
+            window_duration_ms?: number;
+            /** @description Overlap duration in milliseconds between audio chunks (default: 0). */
+            overlap_duration_ms?: number;
+        };
+        /** @description Per-request configuration for chunking. All fields are optional - zero/omitted values use chunker defaults. */
+        ChunkOptions: {
+            /** @description Maximum number of chunks to generate per document. */
+            max_chunks?: number;
+            /**
+             * Format: float
+             * @description Confidence threshold for model-based chunking (0.0-1.0).
+             */
+            threshold?: number;
+            text?: components["schemas"]["TextChunkOptions"];
+            audio?: components["schemas"]["AudioChunkOptions"];
+        };
+        /**
+         * @description Configuration for the Antfly inference chunking provider.
+         *
+         *     Antfly inference is Antfly's built-in ML service for local chunking.
+         *     The model name maps to ONNX model directory names (similar to how Ollama works).
+         *
+         *     **Chunking Models:**
+         *     - fixed: Simple fixed-size chunking by token count (built-in, no ONNX required)
+         *     - Any other name will attempt to load from models/chunkers/{name}/ directory
+         *
+         *     **Deduplication:**
+         *     - Within a single document write, chunk results are deduplicated when multiple
+         *       indexes share the same source text and chunker configuration, so the source
+         *       is chunked at most once per write.
+         * @example {
+         *       "provider": "antfly",
+         *       "api_url": "http://localhost:8080",
+         *       "model": "fixed",
+         *       "max_chunks": 50,
+         *       "text": {
+         *         "target_tokens": 500,
+         *         "overlap_tokens": 50,
+         *         "separator": "\n\n"
+         *       }
+         *     }
+         */
+        AntflyChunkerConfig: components["schemas"]["ChunkOptions"] & {
+            /**
+             * Format: uri
+             * @description The URL of the Inference API endpoint (e.g., 'http://localhost:8080'). Can also be set via ANTFLY_INFERENCE_URL environment variable.
+             * @example http://localhost:8080
+             */
+            api_url?: string;
+            /**
+             * @description The chunking model to use. Defaults to 'fixed' for simple token-based chunking; other values select a model from models/chunkers/{name}/. Successful create responses include the effective model.
+             * @default fixed
+             * @example fixed
+             */
+            model?: string;
+        };
+        /**
+         * @description The chunking provider to use.
+         * @enum {string}
+         */
+        ChunkerProvider: "mock" | "antfly";
+        /**
+         * @description A unified configuration for a chunking provider.
+         * @example {
+         *       "provider": "antfly",
+         *       "model": "fixed",
+         *       "text": {
+         *         "target_tokens": 500,
+         *         "overlap_tokens": 50
+         *       }
+         *     }
+         */
+        ChunkerConfig: components["schemas"]["AntflyChunkerConfig"] & {
+            provider: components["schemas"]["ChunkerProvider"];
+            /**
+             * @description Controls whether chunk data is persisted to storage. When false (default), chunks are generated in memory and only embeddings are stored. When true, both chunks and embeddings are stored.
+             * @default false
+             */
+            store_chunks?: boolean;
+            /**
+             * @description Configuration for full-text indexing of chunks.
+             *     When present (even if empty), chunk artifacts are persisted and indexed in Antfly's native full-text index, queryable and projectable via the document's `_chunks` field.
+             *     When absent, chunks are generated only to drive vector embeddings and are not indexed for full-text search (unless `store_chunks` is also set).
+             */
+            full_text_index?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Format: uri
+             * @description The URL of the Inference API endpoint. Can also be set via ANTFLY_INFERENCE_URL.
+             * @example http://localhost:8080
+             */
+            api_url?: string;
+            /**
+             * @description The chunking model to use. Defaults to 'fixed' for simple token-based chunking; other values select a model from models/chunkers/{name}/. Successful create responses include the effective model.
+             * @default fixed
+             * @example fixed
+             */
+            model?: string;
+            /** @description Maximum number of chunks to generate per document. Zero uses the chunker default. */
+            max_chunks?: number;
+            /** Format: float */
+            threshold?: number;
+            text?: components["schemas"]["TextChunkOptions"];
+            audio?: components["schemas"]["AudioChunkOptions"];
+        };
         /** @description Bounded sample of the document's same-shard graph neighbors appended to an asset producer's rendered input as a compact JSON block ({"neighbors":[{"edge_type":...,"direction":...,"target":...,"weight":...}]}), ordered by edge type then target key. A conceptualizer enrichment on an entities table can thereby ground its abstractions in adjacent facts ("started_by -> John Andrew Rice"). The sampled block participates in the producer's skip state, so a changed adjacency re-runs the producer. */
         EnrichmentNeighborContextConfig: {
             /** @description Name of a graph index on the same table whose local state is sampled. Validated at admission; cross-shard neighbors are not sampled. */
@@ -11615,7 +12242,12 @@ export interface components {
             chunk_size?: number;
             /** @description Chunk overlap for chunk enrichments. */
             chunk_overlap?: number;
-            /** @description Serialized chunker configuration for chunk enrichments. */
+            /** @description Chunker configuration for chunk enrichments. Cannot be combined with chunker_json. */
+            chunker?: components["schemas"]["ChunkerConfig"];
+            /**
+             * @deprecated
+             * @description Legacy serialized chunker configuration for chunk enrichments. Cannot be combined with chunker.
+             */
             chunker_json?: string;
             /**
              * @description When true on a chunk or asset enrichment, route generated text into the table's default full-text index.
@@ -11624,7 +12256,14 @@ export interface components {
             full_text_index?: boolean;
             /** @description Produced asset content type for asset enrichments. */
             content_type?: string;
-            /** @description Write-only serialized producer configuration. For managed embedding enrichments Antfly stores a canonical semantic producer identity here; credentials and execution policy are excluded. */
+            /** @description Write-only producer configuration. Cannot be combined with producer_json or transcriber. */
+            producer?: {
+                [key: string]: unknown;
+            };
+            /**
+             * @deprecated
+             * @description Write-only serialized producer configuration. For managed embedding enrichments Antfly stores a canonical semantic producer identity here; credentials and execution policy are excluded.
+             */
             producer_json?: string;
             /** @description Optional bounded sample of the document's graph neighbors appended to the producer input. Only valid on asset enrichments whose producer consumes rendered prompt text (generator or extractor); producers that treat the source as a media locator (copy, reader, transcriber, document_extraction) reject it. Only same-shard graph state is sampled; a graph index without local state for a document yields empty neighbors at runtime while the graph index reference itself is validated at admission. */
             neighbor_context?: components["schemas"]["EnrichmentNeighborContextConfig"];
@@ -11673,124 +12312,6 @@ export interface components {
          * @enum {string}
          */
         DistanceMetric: "l2_squared" | "inner_product" | "cosine";
-        /** @description Options specific to text chunking. */
-        TextChunkOptions: {
-            /** @description Target number of tokens per chunk. */
-            target_tokens?: number;
-            /** @description Number of tokens to overlap between consecutive chunks. Helps maintain context across chunk boundaries. Only used by fixed-size chunkers. */
-            overlap_tokens?: number;
-            /** @description Separator string for splitting (e.g., '\n\n' for paragraphs). Only used by fixed-size chunkers. */
-            separator?: string;
-        };
-        /** @description Options specific to audio chunking. */
-        AudioChunkOptions: {
-            /** @description Window duration in milliseconds for fixed-window audio chunking (default: 30000). */
-            window_duration_ms?: number;
-            /** @description Overlap duration in milliseconds between audio chunks (default: 0). */
-            overlap_duration_ms?: number;
-        };
-        /** @description Per-request configuration for chunking. All fields are optional - zero/omitted values use chunker defaults. */
-        ChunkOptions: {
-            /** @description Maximum number of chunks to generate per document. */
-            max_chunks?: number;
-            /**
-             * Format: float
-             * @description Confidence threshold for model-based chunking (0.0-1.0).
-             */
-            threshold?: number;
-            text?: components["schemas"]["TextChunkOptions"];
-            audio?: components["schemas"]["AudioChunkOptions"];
-        };
-        /**
-         * @description Configuration for the Antfly inference chunking provider.
-         *
-         *     Antfly inference is a centralized HTTP service that provides chunking with multi-tier caching.
-         *     The model name maps to ONNX model directory names (similar to how Ollama works).
-         *
-         *     **Chunking Models:**
-         *     - fixed: Simple fixed-size chunking by token count (built-in, no ONNX required)
-         *     - Any other name will attempt to load from models/chunkers/{name}/ directory
-         *
-         *     **Caching:**
-         *     - L1: Memory cache with 2-minute TTL
-         *     - L2: Persistent Pebble database
-         *     - Singleflight deduplication for concurrent identical requests
-         * @example {
-         *       "provider": "antfly",
-         *       "api_url": "http://localhost:8080",
-         *       "model": "fixed",
-         *       "max_chunks": 50,
-         *       "text": {
-         *         "target_tokens": 500,
-         *         "overlap_tokens": 50,
-         *         "separator": "\n\n"
-         *       }
-         *     }
-         */
-        AntflyChunkerConfig: components["schemas"]["ChunkOptions"] & {
-            /**
-             * Format: uri
-             * @description The URL of the Inference API endpoint (e.g., 'http://localhost:8080'). Can also be set via ANTFLY_INFERENCE_URL environment variable.
-             * @example http://localhost:8080
-             */
-            api_url?: string;
-            /**
-             * @description The chunking model to use. Defaults to 'fixed' for simple token-based chunking; other values select a model from models/chunkers/{name}/. Successful create responses include the effective model.
-             * @default fixed
-             * @example fixed
-             */
-            model?: string;
-        };
-        /**
-         * @description The chunking provider to use.
-         * @enum {string}
-         */
-        ChunkerProvider: "mock" | "antfly";
-        /**
-         * @description A unified configuration for a chunking provider.
-         * @example {
-         *       "provider": "antfly",
-         *       "model": "fixed",
-         *       "text": {
-         *         "target_tokens": 500,
-         *         "overlap_tokens": 50
-         *       }
-         *     }
-         */
-        ChunkerConfig: components["schemas"]["AntflyChunkerConfig"] & {
-            provider: components["schemas"]["ChunkerProvider"];
-            /**
-             * @description Controls whether chunk data is persisted to storage. When false (default), chunks are generated in memory and only embeddings are stored. When true, both chunks and embeddings are stored.
-             * @default false
-             */
-            store_chunks?: boolean;
-            /**
-             * @description Configuration for full-text indexing of chunks in Bleve.
-             *     When present (even if empty), chunks will be stored with :cft: suffix and indexed in Bleve's _chunks field.
-             *     When absent, chunks use :c: suffix and are only used for vector embeddings.
-             */
-            full_text_index?: {
-                [key: string]: unknown;
-            };
-            /**
-             * Format: uri
-             * @description The URL of the Inference API endpoint. Can also be set via ANTFLY_INFERENCE_URL.
-             * @example http://localhost:8080
-             */
-            api_url?: string;
-            /**
-             * @description The chunking model to use. Defaults to 'fixed' for simple token-based chunking; other values select a model from models/chunkers/{name}/. Successful create responses include the effective model.
-             * @default fixed
-             * @example fixed
-             */
-            model?: string;
-            /** @description Maximum number of chunks to generate per document. Zero uses the chunker default. */
-            max_chunks?: number;
-            /** Format: float */
-            threshold?: number;
-            text?: components["schemas"]["TextChunkOptions"];
-            audio?: components["schemas"]["AudioChunkOptions"];
-        };
         /** @description Namespaced execution policy for managed index shorthand. Only namespaces with runtime effects are accepted. */
         IndexExecutionConfig: {
             /** @description Chunk producer batching for shorthand-created chunk enrichments. */
@@ -12207,7 +12728,14 @@ export interface components {
             source: components["schemas"]["GraphArtifactProducerSourceConfig"];
             content_type?: string;
             execution?: components["schemas"]["ExecutionPolicy"];
-            /** @description Write-only producer configuration; it may contain credentials and is never returned. */
+            /** @description Write-only producer configuration. Cannot be combined with producer_json. */
+            producer?: {
+                [key: string]: unknown;
+            };
+            /**
+             * @deprecated
+             * @description Write-only producer configuration; it may contain credentials and is never returned.
+             */
             producer_json?: {
                 [key: string]: unknown;
             };
@@ -12220,6 +12748,33 @@ export interface components {
         /** @description Optional algebraic planning features for graph traversal. */
         GraphAlgebraicPlanningConfig: {
             bounded_traversal?: components["schemas"]["GraphBoundedTraversalConfig"];
+        };
+        GraphResolverScorerLevel: {
+            /** @description Matcher condition, such as 'exact' or 'jaro_winkler >= 0.9'. */
+            when?: string;
+            /** @description Catch-all level when no previous condition matched. */
+            else?: boolean;
+            /** Format: double */
+            weight: number;
+        };
+        GraphResolverScorerComparison: {
+            name: string;
+            left: string;
+            right: string;
+            levels: components["schemas"]["GraphResolverScorerLevel"][];
+        };
+        GraphResolverScorerConfig: {
+            comparisons: components["schemas"]["GraphResolverScorerComparison"][];
+            combine?: {
+                /** Format: double */
+                bias?: number;
+            };
+            decision?: {
+                /** Format: double */
+                match?: number;
+                /** Format: double */
+                review?: number;
+            };
         };
         /** @description Versioned entity resolver attached to an artifact-backed graph index. */
         GraphResolverConfig: {
@@ -12237,6 +12792,9 @@ export interface components {
             labels?: string[];
             /** @default true */
             type_must_match?: boolean;
+            /** @description Typed matcher scorer. Cannot be combined with scorer_json. */
+            scorer?: components["schemas"]["GraphResolverScorerConfig"];
+            /** @deprecated */
             scorer_json?: string;
             /** @enum {string} */
             candidate_search?: "" | "exact_key" | "prefix" | "ann";
@@ -12880,6 +13438,8 @@ export interface components {
             vector_space?: string;
             chunk_size?: number;
             chunk_overlap?: number;
+            chunker?: components["schemas"]["ChunkerConfig"];
+            /** @deprecated */
             chunker_json?: string;
             /** @default false */
             full_text_index?: boolean;
@@ -15567,7 +16127,7 @@ export interface components {
             provider: components["schemas"]["RerankerProvider"];
             /** @description Field name to extract from documents for reranking. */
             field?: string;
-            /** @description Handlebars template to render document text for reranking. */
+            /** @description Handlebars template that renders each candidate for reranking. The `media` and `remoteMedia` helpers add images, which are sent to the reranker alongside the rendered text; only an Antfly reranker whose model accepts images can score them, and any other reranker rejects the query with `400`. */
             template?: string;
             /** @description Optional provider model name. When omitted, the selected provider's documented default is used. */
             model?: string;
@@ -16785,33 +17345,32 @@ export interface components {
              */
             query: string;
             /**
-             * @description Pre-rendered document texts to rerank. The client is responsible for extracting
-             *     and rendering document fields/templates before calling this endpoint.
+             * @description Documents to rerank. Each entry is a string or an array of text and image
+             *     content parts. Exactly one of `documents` and `prompts` is required.
              * @example [
              *       "Introduction to machine learning...",
-             *       "Deep learning fundamentals..."
+             *       [
+             *         {
+             *           "type": "text",
+             *           "text": "Quarterly invoice"
+             *         },
+             *         {
+             *           "type": "image_url",
+             *           "image_url": {
+             *             "url": "data:image/png;base64,iVBORw0KGgo..."
+             *           }
+             *         }
+             *       ]
              *     ]
              */
-            prompts: string[];
-        };
-        InferenceRerankMultimodalDocument: {
-            /** @description Optional caller-provided document identifier */
-            id?: string;
-            content: components["schemas"]["ChatMessageContent"];
-        };
-        InferenceRerankMultimodalRequest: {
+            documents?: components["schemas"]["ChatMessageContent"][];
             /**
-             * @description Name of multimodal reranking model from models_dir/rerankers/
-             * @example vidore/colqwen2-v1.0
+             * @deprecated
+             * @description Deprecated text-only form of `documents`. Accepted so older clients keep
+             *     working; send `documents` instead. Exactly one of `documents` and `prompts`
+             *     is required.
              */
-            model: string;
-            /**
-             * @description Text query for relevance scoring
-             * @example invoice total due date
-             */
-            query: string;
-            /** @description Documents expressed as text and image content parts */
-            documents: components["schemas"]["InferenceRerankMultimodalDocument"][];
+            prompts?: string[];
         };
         InferenceRerankResponse: {
             /**
@@ -16819,7 +17378,7 @@ export interface components {
              * @enum {string}
              */
             object: "list";
-            /** @description Rerank score objects, one per input prompt. */
+            /** @description Rerank score objects, one per input document. */
             data: components["schemas"]["InferenceRerankObject"][];
             /** @description Name of model used for reranking */
             model: string;
@@ -20701,6 +21260,190 @@ export interface operations {
             502: components["responses"]["QueryBadGateway"];
             503: components["responses"]["AgentTemporarilyUnavailable"];
             504: components["responses"]["QueryGatewayTimeout"];
+        };
+    };
+    researchAgent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResearchAgentRequest"];
+            };
+        };
+        responses: {
+            /** @description Research agent response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                    "application/json": components["schemas"]["ResearchAgentResult"];
+                };
+            };
+            /** @description Invalid research agent request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The caller lacks read permission on a requested table or tool connection */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            413: components["responses"]["QueryPayloadTooLarge"];
+            422: components["responses"]["QueryUnprocessable"];
+            429: components["responses"]["QueryRateLimited"];
+            500: components["responses"]["InternalServerError"];
+            502: components["responses"]["QueryBadGateway"];
+            503: components["responses"]["AgentTemporarilyUnavailable"];
+            504: components["responses"]["QueryGatewayTimeout"];
+        };
+    };
+    startResearchJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResearchJobStartRequest"];
+            };
+        };
+        responses: {
+            /** @description Research job durably accepted */
+            202: {
+                headers: {
+                    /** @description Relative URL of the durable research job resource. */
+                    Location?: string;
+                    /** @description Suggested delay in seconds before the next advance or poll. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearchJob"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description The caller lacks read permission on a requested table or tool connection */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["QueryRateLimited"];
+            500: components["responses"]["InternalServerError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getResearchJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Research job identifier. */
+                jobId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Research job status and latest checkpoint */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearchJob"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    advanceResearchJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Research job identifier. */
+                jobId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ResearchJobAdvanceRequest"];
+            };
+        };
+        responses: {
+            /** @description Research job was already terminal */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearchJob"];
+                };
+            };
+            /** @description Research job advanced */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearchJob"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["QueryRateLimited"];
+            500: components["responses"]["InternalServerError"];
+            502: components["responses"]["QueryBadGateway"];
+            503: components["responses"]["AgentTemporarilyUnavailable"];
+        };
+    };
+    cancelResearchJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Research job identifier. */
+                jobId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Research job cancelled or already terminal */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResearchJob"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
         };
     };
     listTables: {
@@ -25610,7 +26353,7 @@ export interface operations {
             503: components["responses"]["TransientCapacity"];
         };
     };
-    rerankMultimodalPrompts: {
+    rerankDocuments: {
         parameters: {
             query?: never;
             header?: {
@@ -25626,7 +26369,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["InferenceRerankMultimodalRequest"];
+                "application/json": components["schemas"]["InferenceRerankRequest"];
             };
         };
         responses: {
@@ -25685,8 +26428,8 @@ export interface operations {
                     "application/json": components["schemas"]["InferenceError"];
                 };
             };
-            /** @description Multimodal reranking contract recognized but encoder path not implemented yet */
-            501: {
+            /** @description Internal server error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -25696,76 +26439,6 @@ export interface operations {
             };
             /** @description Remote content fetch failed */
             502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InferenceError"];
-                };
-            };
-            /** @description Inference service unavailable. The unified Antfly server also returns this status when authentication is enabled but its backend is not ready. */
-            503: components["responses"]["TransientCapacity"];
-        };
-    };
-    rerankPrompts: {
-        parameters: {
-            query?: never;
-            header?: {
-                /**
-                 * @description Set to `application/vnd.antfly.numeric.v1` to receive the values as a binary
-                 *     frame instead of JSON, which avoids serializing every float as text. Any
-                 *     other value, or none, returns the JSON body.
-                 */
-                Accept?: string;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["InferenceRerankRequest"];
-            };
-        };
-        responses: {
-            /** @description Prompts reranked successfully */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InferenceRerankResponse"];
-                    "application/vnd.antfly.numeric.v1": string;
-                };
-            };
-            /** @description Invalid request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InferenceError"];
-                };
-            };
-            /** @description Authentication is enabled and valid credentials were not supplied */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InferenceError"];
-                };
-            };
-            /** @description Model not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["InferenceError"];
-                };
-            };
-            /** @description Internal server error */
-            500: {
                 headers: {
                     [name: string]: unknown;
                 };

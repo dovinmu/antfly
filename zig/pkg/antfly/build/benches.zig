@@ -61,7 +61,7 @@ pub fn addBenchmarks(b: *std.Build, options: AddBenchmarksOptions) AddBenchmarks
     const structlog_mod = options.antfly_imports.structlog;
     const hash_mod = options.antfly_imports.hash;
     const vectorindex_mod = options.antfly_imports.vectorindex;
-    const vellum_mod = options.antfly_imports.vellum;
+    const fst_mod = options.antfly_imports.fst;
     const antfly_imports = options.antfly_imports;
     const antfly_mod = options.antfly_mod;
     const antfly_test_mod = options.antfly_test_mod;
@@ -265,7 +265,7 @@ pub fn addBenchmarks(b: *std.Build, options: AddBenchmarksOptions) AddBenchmarks
         .optimize = optimize,
     });
     text_segment_bench_root_mod.addImport("bloom", bloom_mod);
-    text_segment_bench_root_mod.addImport("antfly_vellum", vellum_mod);
+    text_segment_bench_root_mod.addImport("antfly_fst", fst_mod);
     text_segment_bench_root_mod.addImport("antfly_platform", platform_mod);
     text_segment_bench_root_mod.addImport("antfly_hash", hash_mod);
     text_segment_write_bench_mod.addImport("antfly_text_bench", text_segment_bench_root_mod);
@@ -378,7 +378,7 @@ pub fn addBenchmarks(b: *std.Build, options: AddBenchmarksOptions) AddBenchmarks
         .target = target,
         .optimize = optimize,
     });
-    quickstart_bench_root_mod.addImport("antfly_vellum", vellum_mod);
+    quickstart_bench_root_mod.addImport("antfly_fst", fst_mod);
     quickstart_bench_root_mod.addImport("bloom", bloom_mod);
     quickstart_bench_root_mod.addImport("antfly_platform", platform_mod);
     quickstart_bench_root_mod.addImport("antfly_hash", hash_mod);
@@ -503,9 +503,12 @@ pub fn addBenchmarks(b: *std.Build, options: AddBenchmarksOptions) AddBenchmarks
             "v25 norm table uses one byte per document and reads legacy packed norms",
             "v22 term dictionary block values compact one-hit terms and delta postings offsets",
             "v23 term dictionary stores front-coded blocks indexed by block ceiling",
+            "top-k limits results",
+            "scorer executes into external top-k collector",
             "WAND pivot bound remains conservative across later high-impact blocks",
             "single-term block scan preserves a later higher-impact chunk",
             "single-term equality pruning retains earliest cutoff ties",
+            "block-max scorer proves sparse matches complete below top-k",
             "pure conjunction block pruning retains earliest cutoff ties",
             "pure conjunction metadata scan preserves later competitive block",
             "multi-segment filter execution",

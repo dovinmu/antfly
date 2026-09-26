@@ -4304,6 +4304,7 @@ const HAStandbyReplicationErrorCode = enum(u8) {
     InvalidMagic,
     HeaderCrcMismatch,
     PayloadCrcMismatch,
+    MetadataHABindingBusy,
     Other,
 };
 
@@ -4362,12 +4363,14 @@ fn haStandbyReplicationErrorCode(err: anyerror) HAStandbyReplicationErrorCode {
         error.InvalidMagic => .InvalidMagic,
         error.HeaderCrcMismatch => .HeaderCrcMismatch,
         error.PayloadCrcMismatch => .PayloadCrcMismatch,
+        error.MetadataHABindingBusy => .MetadataHABindingBusy,
         else => .Other,
     };
 }
 
 fn haStandbyReplicationErrorName(code: HAStandbyReplicationErrorCode) ?[]const u8 {
     return switch (code) {
+        .MetadataHABindingBusy => "MetadataHABindingBusy",
         .none => null,
         .HttpConnectionClosing => "HttpConnectionClosing",
         .ConnectionResetByPeer => "ConnectionResetByPeer",
@@ -4473,6 +4476,7 @@ fn isNonFatalHAStandbyReplicationError(err: anyerror) bool {
         // standby's resources. Keep the process available and fail closed so
         // operators can repair configuration or storage and the next round
         // can resume the idempotent adoption.
+        error.MetadataHABindingBusy,
         error.HAPromotedPrimaryLogMissing,
         error.HAPromotedPrimarySlotsMissing,
         error.HAStandbyOwnershipRequired,
@@ -5050,6 +5054,9 @@ const RaftBatchLeaderStatusDiagnostics = struct {
     votes_granted: usize,
     votes_rejected: usize,
     votes_unknown: usize,
+    voters_at_last_index: usize,
+    recent_active_voters: usize,
+    lowest_voter_match_index: u64,
     commit_index: u64,
     last_index: u64,
     applied_index: u64,
@@ -5064,6 +5071,11 @@ const RaftBatchLeaderTimeoutDiagnostics = struct {
     retries_scheduled: usize,
     retries_exhausted: usize,
     pending_retry_count: usize,
+    async_send_pending: usize,
+    async_send_failed: u64,
+    async_send_queue_full: u64,
+    async_send_peer_queue_full: u64,
+    async_heartbeats_coalesced: u64,
 };
 
 const RaftBatchLeaderTimeoutCaptureContext = struct {
@@ -5074,6 +5086,7 @@ const RaftBatchLeaderTimeoutCaptureContext = struct {
 fn captureRaftBatchLeaderTimeoutDiagnostics(context: RaftBatchLeaderTimeoutCaptureContext) RaftBatchLeaderTimeoutDiagnostics {
     const transport_host = &context.raft.host.http_host.transport_stack.transport_host;
     const transport_metrics = transport_host.metricsSnapshot();
+    const async_metrics = context.raft.host.http_host.transport_stack.driver.metricsSnapshot();
     const status = if (context.raft.host.http_host.host.raftStatus(context.group_id)) |raft_status|
         RaftBatchLeaderStatusDiagnostics{
             .node_id = raft_status.id,
@@ -5086,6 +5099,9 @@ fn captureRaftBatchLeaderTimeoutDiagnostics(context: RaftBatchLeaderTimeoutCaptu
             .votes_granted = raft_status.votes_granted,
             .votes_rejected = raft_status.votes_rejected,
             .votes_unknown = raft_status.votes_unknown,
+            .voters_at_last_index = raft_status.voters_at_last_index,
+            .recent_active_voters = raft_status.recent_active_voters,
+            .lowest_voter_match_index = raft_status.lowest_voter_match_index,
             .commit_index = raft_status.hard.commit_index,
             .last_index = raft_status.last_index,
             .applied_index = raft_status.applied_index,
@@ -5101,6 +5117,11 @@ fn captureRaftBatchLeaderTimeoutDiagnostics(context: RaftBatchLeaderTimeoutCaptu
         .retries_scheduled = transport_metrics.retries_scheduled,
         .retries_exhausted = transport_metrics.retries_exhausted,
         .pending_retry_count = transport_host.pendingRetryCount(),
+        .async_send_pending = async_metrics.pending,
+        .async_send_failed = async_metrics.failed,
+        .async_send_queue_full = async_metrics.queue_full,
+        .async_send_peer_queue_full = async_metrics.peer_queue_full,
+        .async_heartbeats_coalesced = async_metrics.heartbeats_coalesced,
     };
 }
 
@@ -5945,6 +5966,8 @@ pub const DataServer = struct {
         }
         var owned_restore_job_store_path: ?[]u8 = null;
         defer if (owned_restore_job_store_path) |path| self.alloc.free(path);
+        var owned_research_job_store_path: ?[]u8 = null;
+        defer if (owned_research_job_store_path) |path| self.alloc.free(path);
         // Only filesystem builds can use the legacy LMDB registry. Standalone
         // lifecycle jobs already belong to the durable metadata owner.
         if (comptime build_options.lmdb_enabled) {
@@ -5957,6 +5980,15 @@ pub const DataServer = struct {
             {
                 owned_restore_job_store_path = try std.fmt.allocPrint(self.alloc, "{s}/api-restore-jobs", .{self.write_source.replica_root_dir});
                 api_server_cfg.restore_job_store_path = owned_restore_job_store_path;
+            }
+            // Research jobs checkpoint every phase so a restart resumes them.
+            if (api_server_cfg.research_job_store_path == null and
+                api_server_cfg.session_store_path == null and
+                self.status_source.standalone_hot_standby == null and
+                api_server_cfg.deployment_mode != .serverless)
+            {
+                owned_research_job_store_path = try std.fmt.allocPrint(self.alloc, "{s}/api-research-jobs", .{self.write_source.replica_root_dir});
+                api_server_cfg.research_job_store_path = owned_research_job_store_path;
             }
         }
         api_server_cfg.shard_ops = self.localShardOperationAdapter();
@@ -6098,7 +6130,7 @@ pub const DataServer = struct {
         // that open managed DBs.
         // Require atomic promotion: one fenced batch for a single shard and
         // 2PC only when the entity set spans multiple shards.
-        self.distributed_entity_sink = .{ .writes = self.write_source.source(), .atomic_batch_required = true, .catalog_binding = .{ .ptr = self, .bind_fn = bindSystemCatalogTables } };
+        self.distributed_entity_sink = .{ .writes = self.write_source.source(), .reads = self.read_source.source(), .atomic_batch_required = true, .catalog_binding = .{ .ptr = self, .bind_fn = bindSystemCatalogTables } };
         const entity_sink = self.distributed_entity_sink.?.entitySink();
         _ = self.write_source.withEntitySink(entity_sink);
         if (self.data_raft_apply) |apply_sm| {
@@ -6903,7 +6935,8 @@ pub const DataServer = struct {
             handoff,
             .{ .slot_store_options = .{ .wal_options = standby.progress_wal_options } },
         );
-        errdefer promoted_primary.close();
+        var owns_promoted_primary = true;
+        errdefer if (owns_promoted_primary) promoted_primary.close();
 
         self.ha_public_gate_state.beginPromotion();
         self.ha_cfg.standby_owner.?.* = null;
@@ -6914,11 +6947,13 @@ pub const DataServer = struct {
         }
 
         self.ha_promoted_primary = promoted_primary;
+        // Retryable binding failures now belong to the runtime owner. Closing
+        // the transferred local copy here would leave its live WAL dangling.
+        owns_promoted_primary = false;
         const promoted_primary_handle = &self.ha_promoted_primary.?;
         self.ha_cfg.internal_primary = promoted_primary_handle;
-        // Keep the owned pair independently of this config. Promotion cannot
-        // allocate or drop strings still borrowed by a replication round.
-        self.ha_cfg.standby_replication = null;
+        // Preserve the retry configuration until every promotion mirror binds.
+        // The metadata owner can be busy after durable resource adoption.
         const promoted_node_id = self.ha_cfg.admin_context.?.standby_node_id;
         self.ha_cfg.admin_context.?.primary = promoted_primary_handle;
         self.ha_cfg.admin_context.?.primary_node_id = promoted_node_id;
@@ -7010,6 +7045,10 @@ pub const DataServer = struct {
             return;
         }
         if (ctx.primary != null) {
+            if (self.ha_promoted_primary != null and self.ha_cfg.standby_replication != null) {
+                self.ha_public_gate_state.beginPromotion();
+                return;
+            }
             self.ha_public_gate_state.publishPrimaryFence(haContextPrimaryIsFenced(ctx));
         }
     }
@@ -11544,7 +11583,7 @@ pub const DataServer = struct {
         // snapshot helper has already released data_raft_mutex, so a blocked
         // log sink cannot stop Raft progress or participate in a lock cycle.
         if (diagnostics.status) |status| {
-            std.log.warn("data raft leader wait timed out group_id={} node_id={} role={} leader={?} voters={} term={} election_elapsed={} election_timeout={} votes_granted={} votes_rejected={} votes_unknown={} commit={} last={} applied={} served_groups={} peer_routes={} sent_frames={} send_failures={} retries_scheduled={} retries_exhausted={} pending_retries={}", .{
+            std.log.warn("data raft leader wait timed out group_id={} node_id={} role={} leader={?} voters={} term={} election_elapsed={} election_timeout={} votes_granted={} votes_rejected={} votes_unknown={} voters_at_last={} recent_active_voters={} lowest_voter_match={} commit={} last={} applied={} served_groups={} peer_routes={} sent_frames={} send_failures={} retries_scheduled={} retries_exhausted={} pending_retries={} async_pending={} async_failed={} async_queue_full={} async_peer_queue_full={} async_heartbeats_coalesced={}", .{
                 group_id,
                 status.node_id,
                 status.role,
@@ -11556,6 +11595,9 @@ pub const DataServer = struct {
                 status.votes_granted,
                 status.votes_rejected,
                 status.votes_unknown,
+                status.voters_at_last_index,
+                status.recent_active_voters,
+                status.lowest_voter_match_index,
                 status.commit_index,
                 status.last_index,
                 status.applied_index,
@@ -11566,9 +11608,14 @@ pub const DataServer = struct {
                 diagnostics.retries_scheduled,
                 diagnostics.retries_exhausted,
                 diagnostics.pending_retry_count,
+                diagnostics.async_send_pending,
+                diagnostics.async_send_failed,
+                diagnostics.async_send_queue_full,
+                diagnostics.async_send_peer_queue_full,
+                diagnostics.async_heartbeats_coalesced,
             });
         } else {
-            std.log.warn("data raft leader wait timed out group_id={} status=missing served_groups={} peer_routes={} sent_frames={} send_failures={} retries_scheduled={} retries_exhausted={} pending_retries={}", .{
+            std.log.warn("data raft leader wait timed out group_id={} status=missing served_groups={} peer_routes={} sent_frames={} send_failures={} retries_scheduled={} retries_exhausted={} pending_retries={} async_pending={} async_failed={} async_queue_full={} async_peer_queue_full={} async_heartbeats_coalesced={}", .{
                 group_id,
                 diagnostics.served_group_count,
                 diagnostics.peer_route_count,
@@ -11577,6 +11624,11 @@ pub const DataServer = struct {
                 diagnostics.retries_scheduled,
                 diagnostics.retries_exhausted,
                 diagnostics.pending_retry_count,
+                diagnostics.async_send_pending,
+                diagnostics.async_send_failed,
+                diagnostics.async_send_queue_full,
+                diagnostics.async_send_peer_queue_full,
+                diagnostics.async_heartbeats_coalesced,
             });
         }
     }
@@ -16565,6 +16617,10 @@ pub const DataServer = struct {
             error.UnknownGroup,
             error.LmdbUnexpected,
             error.Corrupted,
+            // Inventory collection and publication read local owner state and
+            // remote metadata. A failed read cannot publish a partial report;
+            // the worker keeps the dirty bit and retries from a fresh snapshot.
+            error.ReadFailed,
             error.StaleLocalGroupStatusGeneration,
             => {},
             error.UnknownStore => {
@@ -30565,6 +30621,16 @@ fn consumerTests() type {
             try server.runStoreStatusRoundOnly();
             try std.testing.expect(server.store_report_publisher.cursor != null);
             try std.testing.expect(fake.observations.load(.acquire) > observations);
+            // A transient read failure while collecting the next inventory
+            // must not terminate the data process or publish a partial report.
+            server.handleStoreReportFailure(error.ReadFailed);
+            try std.testing.expectEqual(@intFromError(error.ReadFailed), server.store_report_failure.load(.acquire));
+            try server.reportStoreStatusForControl(.full);
+            try std.testing.expectEqual(@as(u16, 0), server.store_report_failure.load(.acquire));
+            try std.testing.expect(server.store_status_dirty.load(.acquire));
+            server.store_report_update_retry_at_ms = 0;
+            try server.runStoreStatusRoundOnly();
+            try std.testing.expect(server.store_report_publisher.cursor != null);
             // Ownership invalidation before a queued heartbeat requires repair,
             // never publication of the cached generation or a fatal control error.
             server.invalidateLocalGroupStatusCache();
@@ -31984,6 +32050,7 @@ fn consumerTests() type {
                 try std.testing.expectEqualStrings(@errorName(err), haStandbyReplicationErrorName(code).?);
             }
             inline for (.{
+                error.MetadataHABindingBusy,
                 error.InvalidInternalReplicationRequest,
                 error.InternalReplicationEndpointNotFound,
                 error.UnsupportedOperation,
@@ -39038,7 +39105,46 @@ fn consumerTests() type {
 
             if (slot_blocker) |*handle| handle.close();
             slot_blocker = null;
+            const BindingProbe = struct {
+                busy: bool = true,
+                attempts: usize = 0,
+                fn bind(ptr: *anyopaque, _: ?antfly.db.HAWriteGate, _: ?antfly.db.HAAsyncEffectMirror) !void {
+                    const self: *@This() = @ptrCast(@alignCast(ptr));
+                    self.attempts += 1;
+                    if (self.busy) return error.MetadataHABindingBusy;
+                }
+                fn prepare(_: *anyopaque) !void {}
+                fn apply(_: *anyopaque, _: antfly.hot_standby.replication_record.RecordView) !void {
+                    return error.TestUnexpectedResult;
+                }
+                fn capture(_: *anyopaque, _: std.Io, _: []const u8) !@import("../api/standalone_hot_standby.zig").Checkpoint {
+                    return error.TestUnexpectedResult;
+                }
+                fn private(_: *anyopaque, _: std.mem.Allocator, _: u64) !?std.json.Parsed(@import("../metadata/restore_provisioning_contract.zig").ProvisioningProjection) {
+                    return error.TestUnexpectedResult;
+                }
+            };
+            var binding = BindingProbe{};
+            server.status_source.standalone_hot_standby = .{ .ptr = &binding, .vtable = &.{ .bind_mirror = BindingProbe.bind, .prepare_checkpoint = BindingProbe.prepare, .apply_record = BindingProbe.apply, .capture_checkpoint = BindingProbe.capture, .capture_private = BindingProbe.private } };
+            try std.testing.expectError(error.MetadataHABindingBusy, server.runHAStandbyReplicationRound());
+            try std.testing.expect(standby == null);
+            try std.testing.expect(server.ha_promoted_primary != null);
+            try std.testing.expect(server.ha_cfg.standby_replication != null);
+            server.refreshHAPublicGateState();
+            try std.testing.expectError(error.HAPromotedStandbyRequiresPrimaryOpen, public_write_gate.check());
+            try std.testing.expectError(error.HAReadRequiresPrimary, public_read_gate.check(.stale));
+            lockAtomic(&server.ha_state_mutex);
+            DataServer.haPublicGateStateChangedCallback(&server);
+            server.ha_state_mutex.unlock();
+            try std.testing.expectEqual(@as(usize, 2), binding.attempts);
+            try std.testing.expect(server.ha_cfg.standby_replication != null);
+            try std.testing.expectError(error.HAPromotedStandbyRequiresPrimaryOpen, public_write_gate.check());
+            binding.busy = false;
+            server.clearHAStandbyReplicationRetry();
             try server.runHAStandbyReplicationRound();
+            try std.testing.expectEqual(@as(usize, 3), binding.attempts);
+            try std.testing.expect(server.ha_cfg.standby_replication == null);
+            try public_write_gate.check();
             try std.testing.expect(standby == null);
             try std.testing.expect(server.ha_promoted_primary != null);
             try std.testing.expect(server.ha_cfg.admin_context.?.standby == null);

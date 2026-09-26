@@ -4232,7 +4232,7 @@ pub const GlobalStatefulQueryRequest = struct {
     analyses: ?Analyses = null,
     /// Declarative graph matching, traversal, and path queries. A nested node `filter` is a typed, non-scoring stored-document predicate. It shares familiar scalar syntax with document queries but deliberately excludes analyzer-backed and index-only clauses. A request may contain at most 64 named graph operations, of which at most 8 may be named `match` operations. Each operation key is a GraphIdentifier under the versioned policy published in the GraphIdentifier schema. Put multiple counts over one pattern in the same `match` return object so they share one complete anchor scan.
     graph_queries: ?antfly_indexes_openapi.GraphQueries = null,
-    /// Optional Handlebars template string for rendering document content in RAG queries. Template has access to document fields via `{{this.fields.fieldName}}`. **Default**: Uses TOON (Token-Oriented Object Notation) format for 30-60% token reduction: ```handlebars {{encodeToon this.fields}} ``` **Available Helpers**: - `encodeToon` - Renders fields in compact TOON format with configurable options: - `lengthMarker` (bool): Add # prefix to array counts (default: true) - `indent` (int): Indentation spacing (default: 2) - `delimiter` (string): Field separator for tabular arrays - `scrubHtml` - Removes HTML tags and extracts text - `media` - Wraps data URIs for GenKit multimodal support - `eq` - Equality comparison for conditionals **Examples**: - Basic TOON: `{{encodeToon this.fields}}` - Compact TOON: `{{encodeToon this.fields lengthMarker=false indent=0}}` - Tabular data: `{{encodeToon this.fields delimiter="\t"}}` - Custom template: `Title: {{this.fields.title}}\nBody: {{this.fields.body}}` - Traditional format: `{{#each this.fields}}{{@key}}: {{this}}\n{{/each}}` TOON format produces compact, LLM-optimized output like: ``` title: Introduction to Vector Search author: Jane Doe tags[#3]: ai,search,ml ``` **References**: - TOON Specification: https://github.com/toon-format/toon - Go Implementation: https://github.com/alpkeskin/gotoon
+    /// Not supported on queries, which do not generate text; requests that set it are rejected. Set `document_renderer` on a retrieval agent request to control how documents appear in the generation prompt.
     document_renderer: ?[]const u8 = null,
     /// Optional result pruning configuration to filter low-relevance results. Pruning helps detect "elbows" in score distributions and removes results that are significantly worse than top matches. It runs once on globally merged results, after optional reranking and before the final offset/limit page is selected. **Common patterns:** - RAG queries: Use `max_score_gap_percent: 30` to stop at quality drop-offs - Strict matching: Use `min_score_ratio: 0.7` for high-quality results only - Combine both for best results Example: ```json { "min_score_ratio": 0.5, "max_score_gap_percent": 25.0, "min_absolute_score": 0.3 } ```
     pruner: ?antfly_indexes_openapi.Pruner = null,
@@ -6823,7 +6823,7 @@ pub const QueryBuilderRequest = struct {
     schema_fields: ?[]const []const u8 = null,
     /// Optional strategy hint for the coordinator. Suggested values are `auto`, `full_text`, `semantic`, `hybrid`, `filter`, `tree`, and `graph`. Unknown values are accepted for forward compatibility and may fall back to `auto`.
     mode: ?[]const u8 = null,
-    /// Preferred output artifact. Suggested values are `query_request`, `bleve`, and `filter_query`. The compatibility `query` field is still returned for existing clients.
+    /// Preferred output artifact. Suggested values are `query_request`, `bleve` (Antfly's native, Bleve-compatible full-text query JSON), and `filter_query`. The compatibility `query` field is still returned for existing clients.
     output: ?[]const u8 = null,
     /// Optional execution constraints for the coordinator, such as `limit`, `allowed_fields`, `prefer_indexes`, and `require_executable`.
     constraints: ?std.json.ArrayHashMap(std.json.Value) = null,
@@ -6935,7 +6935,7 @@ pub const QueryBuilderResult = struct {
     remaining_user_clarifications: ?i64 = null,
     /// Clarification questions exposed in the shared bounded-agent envelope.
     questions: ?[]const AgentQuestion = null,
-    /// Generated search query in native Bleve format. Can be used directly in QueryRequest.full_text_search or filter_query.
+    /// Generated search query in Antfly's native full-text query format (a Bleve-compatible JSON query DSL: `match`, `term`, `conjuncts`, `disjuncts`, `must_not`, etc.). Can be used directly in QueryRequest.full_text_search or filter_query.
     query: std.json.ArrayHashMap(std.json.Value),
     /// Antfly query request assembled by the coordinator. New clients should prefer this field when they want an executable Antfly query object.
     query_request: ?QueryRequest = null,
@@ -7594,7 +7594,7 @@ pub const QueryRequest = struct {
     analyses: ?Analyses = null,
     /// Declarative graph matching, traversal, and path queries. A nested node `filter` is a typed, non-scoring stored-document predicate. It shares familiar scalar syntax with document queries but deliberately excludes analyzer-backed and index-only clauses. A request may contain at most 64 named graph operations, of which at most 8 may be named `match` operations. Each operation key is a GraphIdentifier under the versioned policy published in the GraphIdentifier schema. Put multiple counts over one pattern in the same `match` return object so they share one complete anchor scan.
     graph_queries: ?antfly_indexes_openapi.GraphQueries = null,
-    /// Optional Handlebars template string for rendering document content in RAG queries. Template has access to document fields via `{{this.fields.fieldName}}`. **Default**: Uses TOON (Token-Oriented Object Notation) format for 30-60% token reduction: ```handlebars {{encodeToon this.fields}} ``` **Available Helpers**: - `encodeToon` - Renders fields in compact TOON format with configurable options: - `lengthMarker` (bool): Add # prefix to array counts (default: true) - `indent` (int): Indentation spacing (default: 2) - `delimiter` (string): Field separator for tabular arrays - `scrubHtml` - Removes HTML tags and extracts text - `media` - Wraps data URIs for GenKit multimodal support - `eq` - Equality comparison for conditionals **Examples**: - Basic TOON: `{{encodeToon this.fields}}` - Compact TOON: `{{encodeToon this.fields lengthMarker=false indent=0}}` - Tabular data: `{{encodeToon this.fields delimiter="\t"}}` - Custom template: `Title: {{this.fields.title}}\nBody: {{this.fields.body}}` - Traditional format: `{{#each this.fields}}{{@key}}: {{this}}\n{{/each}}` TOON format produces compact, LLM-optimized output like: ``` title: Introduction to Vector Search author: Jane Doe tags[#3]: ai,search,ml ``` **References**: - TOON Specification: https://github.com/toon-format/toon - Go Implementation: https://github.com/alpkeskin/gotoon
+    /// Not supported on queries, which do not generate text; requests that set it are rejected. Set `document_renderer` on a retrieval agent request to control how documents appear in the generation prompt.
     document_renderer: ?[]const u8 = null,
     /// Optional result pruning configuration to filter low-relevance results. Pruning helps detect "elbows" in score distributions and removes results that are significantly worse than top matches. It runs once on globally merged results, after optional reranking and before the final offset/limit page is selected. **Common patterns:** - RAG queries: Use `max_score_gap_percent: 30` to stop at quality drop-offs - Strict matching: Use `min_score_ratio: 0.7` for high-quality results only - Combine both for best results Example: ```json { "min_score_ratio": 0.5, "max_score_gap_percent": 25.0, "min_absolute_score": 0.3 } ```
     pruner: ?antfly_indexes_openapi.Pruner = null,
@@ -8958,7 +8958,7 @@ pub const RepairTarget = enum {
 pub const ReplicationRoute = struct {
     /// Name of the Antfly table to write matching rows to. The table must already exist.
     target_table: []const u8,
-    /// Bleve-style filter query evaluated against each CDC row. Only rows matching this filter are written to `target_table`. If omitted, all rows match (equivalent to `match_all`).
+    /// Antfly's native filter query (see `RawQuery`) evaluated against each CDC row. Only rows matching this filter are written to `target_table`. If omitted, all rows match (equivalent to `match_all`).
     where: ?RawQuery = null,
     /// Override the source-level `key_template` for this route. If omitted, the source-level template is used.
     key_template: ?[]const u8 = null,
@@ -9025,7 +9025,7 @@ pub const ReplicationSource = struct {
     on_update: ?[]const ReplicationTransformOp = null,
     /// Transform operations applied on DELETE events. If omitted, auto-derives `$unset` ops from `on_update`'s `$set` paths (safe for multi-source). Use `$delete_document` op to delete the entire Antfly document.
     on_delete: ?[]const ReplicationTransformOp = null,
-    /// Bleve-style filter query that gets translated to SQL and applied as a WHERE clause on the PostgreSQL publication. This filters rows at the source before they are sent over the replication stream, reducing network and processing overhead. Requires PostgreSQL 15 or newer and is applied only when Antfly creates the publication. Changing this value does not alter an existing publication; update or recreate that publication directly. Only a subset of filter types are supported (term, match, range, conjuncts, disjuncts, must_not). The filter is translated to SQL with inlined literal values. Example: `{"term": "active", "field": "status"}` becomes `WHERE ("status" = 'active')` on the publication.
+    /// Antfly's native filter query (see `RawQuery`) that gets translated to SQL and applied as a WHERE clause on the PostgreSQL publication. This filters rows at the source before they are sent over the replication stream, reducing network and processing overhead. Requires PostgreSQL 15 or newer and is applied only when Antfly creates the publication. Changing this value does not alter an existing publication; update or recreate that publication directly. Only a subset of filter types are supported (term, match, range, conjuncts, disjuncts, must_not). The filter is translated to SQL with inlined literal values. Example: `{"term": "active", "field": "status"}` becomes `WHERE ("status" = 'active')` on the publication.
     publication_filter: ?RawQuery = null,
     /// Conditional routes for fan-out replication. Each route evaluates its `where` filter against every CDC row and, on match, writes to the specified `target_table`. Multiple routes can match the same row. When routes are present, the top-level `on_update`/`on_delete` are ignored — each route defines its own transforms.
     routes: ?[]const ReplicationRoute = null,
@@ -9420,6 +9420,1538 @@ pub const RerankerProfile = struct {
     }
 };
 
+/// Request for the research agent. The agent plans sub-questions, runs a bounded retrieval researcher per sub-question in parallel, reflects on coverage, and writes a long-form report whose `[E#]` citations resolve to a deduplicated evidence registry. Researchers are ordinary retrieval-agent runs over `queries` with the same authorization, mandatory predicates and tool policy. They cannot widen tables, filters, tools or budgets.
+pub const ResearchAgentRequest = struct {
+    /// The research question.
+    query: []const u8,
+    /// Authorized table scopes, as for the retrieval agent. `filter_query` and `exclusion_query` are mandatory predicates for every researcher. May be empty when web search is enabled.
+    queries: []const QueryRequest,
+    /// Optional conversational context.
+    messages: ?[]const antfly_generating_openapi.ChatMessage = null,
+    /// Domain context for every role.
+    agent_knowledge: ?[]const u8 = null,
+    /// Mandatory filters applied to every researcher search.
+    accumulated_filters: ?[]const antfly_generating_api_openapi.FilterSpec = null,
+    /// Correlation identifier echoed back to the client.
+    session_id: ?[]const u8 = null,
+    /// Structured user answers for client-carried continuation.
+    decisions: ?[]const AgentDecision = null,
+    /// If true, the planner may return clarification questions instead of a plan.
+    interactive: ?bool = null,
+    /// Default generator for every role.
+    generator: ?antfly_generating_openapi.GeneratorConfig = null,
+    /// Default chain of generators for every role.
+    chain: ?[]const antfly_generating_openapi.ChainLink = null,
+    /// Default tool policy for researchers, for example `web_search` and `fetch`.
+    tools: ?antfly_generating_api_openapi.ChatToolsConfig = null,
+    steps: ?ResearchAgentSteps = null,
+    budget: ?ResearchBudget = null,
+    /// Continuation state returned by an earlier run.
+    research_state: ?ResearchState = null,
+    /// Per-researcher tool-result context budget in tokens.
+    max_context_tokens: ?i64 = null,
+    /// Tokens reserved from max_context_tokens for prompts and answers.
+    reserve_tokens: ?i64 = null,
+    /// Enable SSE streaming vs JSON response.
+    stream: ?bool = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "query", "query", false },
+        .{ "queries", "queries", false },
+        .{ "messages", "messages", true },
+        .{ "agent_knowledge", "agent_knowledge", true },
+        .{ "accumulated_filters", "accumulated_filters", true },
+        .{ "session_id", "session_id", true },
+        .{ "decisions", "decisions", true },
+        .{ "interactive", "interactive", true },
+        .{ "generator", "generator", false },
+        .{ "chain", "chain", true },
+        .{ "tools", "tools", false },
+        .{ "steps", "steps", true },
+        .{ "budget", "budget", true },
+        .{ "research_state", "research_state", true },
+        .{ "max_context_tokens", "max_context_tokens", true },
+        .{ "reserve_tokens", "reserve_tokens", true },
+        .{ "stream", "stream", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("query");
+        try jw.write(self.query);
+        try jw.objectField("queries");
+        try jw.write(self.queries);
+        if (self.messages) |value| {
+            try jw.objectField("messages");
+            try jw.write(value);
+        }
+        if (self.agent_knowledge) |value| {
+            try jw.objectField("agent_knowledge");
+            try jw.write(value);
+        }
+        if (self.accumulated_filters) |value| {
+            try jw.objectField("accumulated_filters");
+            try jw.write(value);
+        }
+        if (self.session_id) |value| {
+            try jw.objectField("session_id");
+            try jw.write(value);
+        }
+        if (self.decisions) |value| {
+            try jw.objectField("decisions");
+            try jw.write(value);
+        }
+        if (self.interactive) |value| {
+            try jw.objectField("interactive");
+            try jw.write(value);
+        }
+        if (self.generator) |value| {
+            try jw.objectField("generator");
+            try jw.write(value);
+        } else if (jw.options.emit_null_optional_fields) {
+            try jw.objectField("generator");
+            try jw.write(@as(?u8, null));
+        }
+        if (self.chain) |value| {
+            try jw.objectField("chain");
+            try jw.write(value);
+        }
+        if (self.tools) |value| {
+            try jw.objectField("tools");
+            try jw.write(value);
+        } else if (jw.options.emit_null_optional_fields) {
+            try jw.objectField("tools");
+            try jw.write(@as(?u8, null));
+        }
+        if (self.steps) |value| {
+            try jw.objectField("steps");
+            try jw.write(value);
+        }
+        if (self.budget) |value| {
+            try jw.objectField("budget");
+            try jw.write(value);
+        }
+        if (self.research_state) |value| {
+            try jw.objectField("research_state");
+            try jw.write(value);
+        }
+        if (self.max_context_tokens) |value| {
+            try jw.objectField("max_context_tokens");
+            try jw.write(value);
+        }
+        if (self.reserve_tokens) |value| {
+            try jw.objectField("reserve_tokens");
+            try jw.write(value);
+        }
+        if (self.stream) |value| {
+            try jw.objectField("stream");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+/// Result from the research agent.
+pub const ResearchAgentResult = struct {
+    /// Unique response ID.
+    id: ?[]const u8 = null,
+    /// Writer model.
+    model: ?[]const u8 = null,
+    /// Unix timestamp (seconds) when the response was created.
+    created_at: ?i64 = null,
+    status: AgentStatus,
+    incomplete_details: ?ResearchIncompleteDetails = null,
+    phase: ?ResearchPhase = null,
+    usage: ?ResearchUsage = null,
+    plan: ?ResearchPlan = null,
+    findings: ?[]const ResearchFinding = null,
+    evidence: ?[]const ResearchEvidence = null,
+    reflections: ?[]const ResearchReflection = null,
+    report: ?ResearchReport = null,
+    citations: ?[]const ResearchCitation = null,
+    verification: ?ResearchVerification = null,
+    research_state: ResearchState,
+    /// Execution trace.
+    steps: ?[]const AgentStep = null,
+    /// Clarification questions when status is clarification_required.
+    questions: ?[]const AgentQuestion = null,
+    /// Echoed correlation identifier.
+    session_id: ?[]const u8 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "id", "id", true },
+        .{ "model", "model", true },
+        .{ "created_at", "created_at", true },
+        .{ "status", "status", false },
+        .{ "incomplete_details", "incomplete_details", true },
+        .{ "phase", "phase", true },
+        .{ "usage", "usage", true },
+        .{ "plan", "plan", true },
+        .{ "findings", "findings", true },
+        .{ "evidence", "evidence", true },
+        .{ "reflections", "reflections", true },
+        .{ "report", "report", true },
+        .{ "citations", "citations", true },
+        .{ "verification", "verification", true },
+        .{ "research_state", "research_state", false },
+        .{ "steps", "steps", true },
+        .{ "questions", "questions", true },
+        .{ "session_id", "session_id", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.id) |value| {
+            try jw.objectField("id");
+            try jw.write(value);
+        }
+        if (self.model) |value| {
+            try jw.objectField("model");
+            try jw.write(value);
+        }
+        if (self.created_at) |value| {
+            try jw.objectField("created_at");
+            try jw.write(value);
+        }
+        try jw.objectField("status");
+        try jw.write(self.status);
+        if (self.incomplete_details) |value| {
+            try jw.objectField("incomplete_details");
+            try jw.write(value);
+        }
+        if (self.phase) |value| {
+            try jw.objectField("phase");
+            try jw.write(value);
+        }
+        if (self.usage) |value| {
+            try jw.objectField("usage");
+            try jw.write(value);
+        }
+        if (self.plan) |value| {
+            try jw.objectField("plan");
+            try jw.write(value);
+        }
+        if (self.findings) |value| {
+            try jw.objectField("findings");
+            try jw.write(value);
+        }
+        if (self.evidence) |value| {
+            try jw.objectField("evidence");
+            try jw.write(value);
+        }
+        if (self.reflections) |value| {
+            try jw.objectField("reflections");
+            try jw.write(value);
+        }
+        if (self.report) |value| {
+            try jw.objectField("report");
+            try jw.write(value);
+        }
+        if (self.citations) |value| {
+            try jw.objectField("citations");
+            try jw.write(value);
+        }
+        if (self.verification) |value| {
+            try jw.objectField("verification");
+            try jw.write(value);
+        }
+        try jw.objectField("research_state");
+        try jw.write(self.research_state);
+        if (self.steps) |value| {
+            try jw.objectField("steps");
+            try jw.write(value);
+        }
+        if (self.questions) |value| {
+            try jw.objectField("questions");
+            try jw.write(value);
+        }
+        if (self.session_id) |value| {
+            try jw.objectField("session_id");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+/// Per-role configuration for the research agent.
+pub const ResearchAgentSteps = struct {
+    /// Planner that writes the research brief and sub-questions. Always runs unless research_state carries a plan.
+    plan: ?ResearchStepConfig = null,
+    /// Researcher configuration.
+    research: ?ResearchRetrievalStepConfig = null,
+    /// Gap analysis after each round. Enabled by default when budget.max_rounds > 1.
+    reflect: ?ResearchStepConfig = null,
+    /// Report writer.
+    write: ?ResearchWriteStepConfig = null,
+    /// Optional model check that cited evidence supports each section. Disabled by default.
+    verify: ?ResearchStepConfig = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "plan", "plan", true },
+        .{ "research", "research", true },
+        .{ "reflect", "reflect", true },
+        .{ "write", "write", true },
+        .{ "verify", "verify", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.plan) |value| {
+            try jw.objectField("plan");
+            try jw.write(value);
+        }
+        if (self.research) |value| {
+            try jw.objectField("research");
+            try jw.write(value);
+        }
+        if (self.reflect) |value| {
+            try jw.objectField("reflect");
+            try jw.write(value);
+        }
+        if (self.write) |value| {
+            try jw.objectField("write");
+            try jw.write(value);
+        }
+        if (self.verify) |value| {
+            try jw.objectField("verify");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+/// Declared upper bounds for one research run. The worst-case LLM and tool-call cost is computable before execution; requests whose worst case exceeds the server ceiling are rejected, not clamped.
+pub const ResearchBudget = struct {
+    /// Maximum research rounds (plan or reflect, then fan-out).
+    max_rounds: ?i64 = null,
+    /// Maximum sub-questions researched per round.
+    max_sub_questions: ?i64 = null,
+    /// Maximum researchers in flight at once.
+    max_parallel: ?i64 = null,
+    /// Model-generation rounds available to each researcher.
+    researcher_iterations: ?i64 = null,
+    /// Tool calls available to each researcher.
+    researcher_tool_calls: ?i64 = null,
+    /// Hard cap on model calls across every role in the run.
+    max_llm_calls: ?i64 = null,
+    /// Hard cap on tool calls across every researcher in the run.
+    max_tool_calls: ?i64 = null,
+    /// Maximum distinct evidence items retained in the registry.
+    max_evidence: ?i64 = null,
+    /// Output token budget for the report writer.
+    max_report_tokens: ?i64 = null,
+    /// Wall-clock budget for a synchronous run or a single job advance.
+    deadline_ms: ?i64 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "max_rounds", "max_rounds", true },
+        .{ "max_sub_questions", "max_sub_questions", true },
+        .{ "max_parallel", "max_parallel", true },
+        .{ "researcher_iterations", "researcher_iterations", true },
+        .{ "researcher_tool_calls", "researcher_tool_calls", true },
+        .{ "max_llm_calls", "max_llm_calls", true },
+        .{ "max_tool_calls", "max_tool_calls", true },
+        .{ "max_evidence", "max_evidence", true },
+        .{ "max_report_tokens", "max_report_tokens", true },
+        .{ "deadline_ms", "deadline_ms", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.max_rounds) |value| {
+            try jw.objectField("max_rounds");
+            try jw.write(value);
+        }
+        if (self.max_sub_questions) |value| {
+            try jw.objectField("max_sub_questions");
+            try jw.write(value);
+        }
+        if (self.max_parallel) |value| {
+            try jw.objectField("max_parallel");
+            try jw.write(value);
+        }
+        if (self.researcher_iterations) |value| {
+            try jw.objectField("researcher_iterations");
+            try jw.write(value);
+        }
+        if (self.researcher_tool_calls) |value| {
+            try jw.objectField("researcher_tool_calls");
+            try jw.write(value);
+        }
+        if (self.max_llm_calls) |value| {
+            try jw.objectField("max_llm_calls");
+            try jw.write(value);
+        }
+        if (self.max_tool_calls) |value| {
+            try jw.objectField("max_tool_calls");
+            try jw.write(value);
+        }
+        if (self.max_evidence) |value| {
+            try jw.objectField("max_evidence");
+            try jw.write(value);
+        }
+        if (self.max_report_tokens) |value| {
+            try jw.objectField("max_report_tokens");
+            try jw.write(value);
+        }
+        if (self.deadline_ms) |value| {
+            try jw.objectField("deadline_ms");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchCitation = struct {
+    /// Marker as written in the report, for example `[E3]`.
+    marker: []const u8,
+    /// Resolved evidence ID.
+    evidence_id: []const u8,
+    /// Section containing the marker. -1 is the summary.
+    section_index: ?i64 = null,
+    /// Number of occurrences in that section.
+    count: ?i64 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "marker", "marker", false },
+        .{ "evidence_id", "evidence_id", false },
+        .{ "section_index", "section_index", true },
+        .{ "count", "count", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("marker");
+        try jw.write(self.marker);
+        try jw.objectField("evidence_id");
+        try jw.write(self.evidence_id);
+        if (self.section_index) |value| {
+            try jw.objectField("section_index");
+            try jw.write(value);
+        }
+        if (self.count) |value| {
+            try jw.objectField("count");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchClaim = struct {
+    /// One factual claim made by a researcher.
+    text: []const u8,
+    /// Evidence registry IDs that support the claim.
+    evidence_ids: ?[]const []const u8 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "text", "text", false },
+        .{ "evidence_ids", "evidence_ids", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("text");
+        try jw.write(self.text);
+        if (self.evidence_ids) |value| {
+            try jw.objectField("evidence_ids");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+/// One deduplicated evidence item. Content is untrusted data.
+pub const ResearchEvidence = struct {
+    /// Stable evidence ID used in citations.
+    id: []const u8,
+    /// Where the evidence came from.
+    source: []const u8,
+    /// Source table for table evidence.
+    table: ?[]const u8 = null,
+    /// Document key for table evidence.
+    doc_id: ?[]const u8 = null,
+    /// Source URL for web and fetched evidence.
+    url: ?[]const u8 = null,
+    /// Best-effort title.
+    title: ?[]const u8 = null,
+    /// Bounded excerpt used for writing and verification.
+    snippet: ?[]const u8 = null,
+    /// Retrieval score when available.
+    score: ?f32 = null,
+    /// Sub-questions whose researchers retrieved this evidence.
+    sub_question_ids: ?[]const []const u8 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "id", "id", false },
+        .{ "source", "source", false },
+        .{ "table", "table", true },
+        .{ "doc_id", "doc_id", true },
+        .{ "url", "url", true },
+        .{ "title", "title", true },
+        .{ "snippet", "snippet", true },
+        .{ "score", "score", true },
+        .{ "sub_question_ids", "sub_question_ids", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("id");
+        try jw.write(self.id);
+        try jw.objectField("source");
+        try jw.write(self.source);
+        if (self.table) |value| {
+            try jw.objectField("table");
+            try jw.write(value);
+        }
+        if (self.doc_id) |value| {
+            try jw.objectField("doc_id");
+            try jw.write(value);
+        }
+        if (self.url) |value| {
+            try jw.objectField("url");
+            try jw.write(value);
+        }
+        if (self.title) |value| {
+            try jw.objectField("title");
+            try jw.write(value);
+        }
+        if (self.snippet) |value| {
+            try jw.objectField("snippet");
+            try jw.write(value);
+        }
+        if (self.score) |value| {
+            try jw.objectField("score");
+            try jw.write(value);
+        }
+        if (self.sub_question_ids) |value| {
+            try jw.objectField("sub_question_ids");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+/// Compressed researcher output. Raw tool transcripts are not retained.
+pub const ResearchFinding = struct {
+    /// Sub-question this finding answers.
+    sub_question_id: []const u8,
+    /// The sub-question text.
+    question: ?[]const u8 = null,
+    /// Concise answer grounded in evidence.
+    summary: []const u8,
+    /// Individual claims with supporting evidence.
+    claims: ?[]const ResearchClaim = null,
+    /// What the researcher could not establish.
+    open_questions: ?[]const []const u8 = null,
+    /// Every evidence item the researcher retrieved.
+    evidence_ids: ?[]const []const u8 = null,
+    /// Status of the researcher's bounded retrieval run.
+    status: ?AgentStatus = null,
+    /// Research round.
+    round: ?i64 = null,
+    /// Model calls used by this researcher.
+    llm_calls: ?i64 = null,
+    /// Tool calls used by this researcher.
+    tool_calls: ?i64 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "sub_question_id", "sub_question_id", false },
+        .{ "question", "question", true },
+        .{ "summary", "summary", false },
+        .{ "claims", "claims", true },
+        .{ "open_questions", "open_questions", true },
+        .{ "evidence_ids", "evidence_ids", true },
+        .{ "status", "status", true },
+        .{ "round", "round", true },
+        .{ "llm_calls", "llm_calls", true },
+        .{ "tool_calls", "tool_calls", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("sub_question_id");
+        try jw.write(self.sub_question_id);
+        if (self.question) |value| {
+            try jw.objectField("question");
+            try jw.write(value);
+        }
+        try jw.objectField("summary");
+        try jw.write(self.summary);
+        if (self.claims) |value| {
+            try jw.objectField("claims");
+            try jw.write(value);
+        }
+        if (self.open_questions) |value| {
+            try jw.objectField("open_questions");
+            try jw.write(value);
+        }
+        if (self.evidence_ids) |value| {
+            try jw.objectField("evidence_ids");
+            try jw.write(value);
+        }
+        if (self.status) |value| {
+            try jw.objectField("status");
+            try jw.write(value);
+        }
+        if (self.round) |value| {
+            try jw.objectField("round");
+            try jw.write(value);
+        }
+        if (self.llm_calls) |value| {
+            try jw.objectField("llm_calls");
+            try jw.write(value);
+        }
+        if (self.tool_calls) |value| {
+            try jw.objectField("tool_calls");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchIncompleteDetails = struct {
+    /// Why the run stopped: - max_rounds: research rounds were exhausted before the reflector was satisfied (the report is still written) - max_llm_calls / max_tool_calls: a hard budget was exhausted - deadline: the wall-clock budget elapsed - no_evidence: researchers found no evidence to write from - clarification_required: the planner needs a user decision - cancelled: a durable job was cancelled - phase_limit: a job advance stopped after its requested number of phases
+    reason: []const u8,
+    /// Human-readable detail.
+    message: ?[]const u8 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "reason", "reason", false },
+        .{ "message", "message", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("reason");
+        try jw.write(self.reason);
+        if (self.message) |value| {
+            try jw.objectField("message");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchJob = struct {
+    /// Job identifier.
+    job_id: []const u8,
+    state: ResearchJobState,
+    phase: ResearchPhase,
+    /// The research question.
+    query: ?[]const u8 = null,
+    /// Completed advance calls.
+    advances: ?i64 = null,
+    /// Whether cancellation was requested.
+    cancel_requested: ?bool = null,
+    /// Last advance error, if any.
+    last_error: ?[]const u8 = null,
+    created_at_ms: ?i64 = null,
+    updated_at_ms: ?i64 = null,
+    expires_at_ms: ?i64 = null,
+    /// Latest checkpointed result, including research_state.
+    result: ?ResearchAgentResult = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "job_id", "job_id", false },
+        .{ "state", "state", false },
+        .{ "phase", "phase", false },
+        .{ "query", "query", true },
+        .{ "advances", "advances", true },
+        .{ "cancel_requested", "cancel_requested", true },
+        .{ "last_error", "last_error", true },
+        .{ "created_at_ms", "created_at_ms", true },
+        .{ "updated_at_ms", "updated_at_ms", true },
+        .{ "expires_at_ms", "expires_at_ms", true },
+        .{ "result", "result", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("job_id");
+        try jw.write(self.job_id);
+        try jw.objectField("state");
+        try jw.write(self.state);
+        try jw.objectField("phase");
+        try jw.write(self.phase);
+        if (self.query) |value| {
+            try jw.objectField("query");
+            try jw.write(value);
+        }
+        if (self.advances) |value| {
+            try jw.objectField("advances");
+            try jw.write(value);
+        }
+        if (self.cancel_requested) |value| {
+            try jw.objectField("cancel_requested");
+            try jw.write(value);
+        }
+        if (self.last_error) |value| {
+            try jw.objectField("last_error");
+            try jw.write(value);
+        }
+        if (self.created_at_ms) |value| {
+            try jw.objectField("created_at_ms");
+            try jw.write(value);
+        }
+        if (self.updated_at_ms) |value| {
+            try jw.objectField("updated_at_ms");
+            try jw.write(value);
+        }
+        if (self.expires_at_ms) |value| {
+            try jw.objectField("expires_at_ms");
+            try jw.write(value);
+        }
+        if (self.result) |value| {
+            try jw.objectField("result");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchJobAdvanceRequest = struct {
+    /// Maximum phases to run in this advance. Each phase checkpoints before the next starts.
+    max_phases: ?i64 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "max_phases", "max_phases", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.max_phases) |value| {
+            try jw.objectField("max_phases");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchJobStartRequest = struct {
+    /// The research request. `stream` is ignored. Durable jobs persist the request, so generators must reference credentials through the secret store, environment or server connections rather than inline API keys.
+    request: ResearchAgentRequest,
+    /// Number of phases to run before the start call returns.
+    advance: ?i64 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "request", "request", false },
+        .{ "advance", "advance", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("request");
+        try jw.write(self.request);
+        if (self.advance) |value| {
+            try jw.objectField("advance");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+/// Durable research job lifecycle state.
+pub const ResearchJobState = enum {
+    queued,
+    running,
+    succeeded,
+    failed,
+    cancelled,
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        const s = switch (self) {
+            .queued => "queued",
+            .running => "running",
+            .succeeded => "succeeded",
+            .failed => "failed",
+            .cancelled => "cancelled",
+        };
+        try jw.write(s);
+    }
+
+    pub fn jsonParse(_: std.mem.Allocator, source: anytype, _: std.json.ParseOptions) !@This() {
+        const s = switch (try source.next()) {
+            .string => |v| v,
+            else => return error.UnexpectedToken,
+        };
+        const map = std.StaticStringMap(@This()).initComptime(.{
+            .{ "queued", .queued },
+            .{ "running", .running },
+            .{ "succeeded", .succeeded },
+            .{ "failed", .failed },
+            .{ "cancelled", .cancelled },
+        });
+        return map.get(s) orelse error.UnexpectedToken;
+    }
+};
+
+/// Research state-machine phase. `plan` decomposes the question, `research` runs one bounded round of retrieval researchers, `reflect` decides whether another round is needed, `write` produces the cited report, `verify` checks citations, and `done` is terminal.
+pub const ResearchPhase = enum {
+    plan,
+    research,
+    reflect,
+    write,
+    verify,
+    done,
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        const s = switch (self) {
+            .plan => "plan",
+            .research => "research",
+            .reflect => "reflect",
+            .write => "write",
+            .verify => "verify",
+            .done => "done",
+        };
+        try jw.write(s);
+    }
+
+    pub fn jsonParse(_: std.mem.Allocator, source: anytype, _: std.json.ParseOptions) !@This() {
+        const s = switch (try source.next()) {
+            .string => |v| v,
+            else => return error.UnexpectedToken,
+        };
+        const map = std.StaticStringMap(@This()).initComptime(.{
+            .{ "plan", .plan },
+            .{ "research", .research },
+            .{ "reflect", .reflect },
+            .{ "write", .write },
+            .{ "verify", .verify },
+            .{ "done", .done },
+        });
+        return map.get(s) orelse error.UnexpectedToken;
+    }
+};
+
+pub const ResearchPlan = struct {
+    /// Research brief restating scope, assumptions and deliverable.
+    brief: []const u8,
+    /// Planned and reflection-added sub-questions.
+    sub_questions: []const ResearchSubQuestion,
+    /// What a complete answer must cover.
+    success_criteria: ?[]const []const u8 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "brief", "brief", false },
+        .{ "sub_questions", "sub_questions", false },
+        .{ "success_criteria", "success_criteria", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("brief");
+        try jw.write(self.brief);
+        try jw.objectField("sub_questions");
+        try jw.write(self.sub_questions);
+        if (self.success_criteria) |value| {
+            try jw.objectField("success_criteria");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchReflection = struct {
+    /// Round that was reflected on.
+    round: ?i64 = null,
+    /// Whether the reflector judged coverage sufficient.
+    done: ?bool = null,
+    /// Coverage gaps against the brief and success criteria.
+    gaps: ?[]const []const u8 = null,
+    /// Conflicting findings that need resolution or disclosure.
+    contradictions: ?[]const []const u8 = null,
+    /// Sub-questions added for the next round.
+    new_sub_questions: ?[]const []const u8 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "round", "round", true },
+        .{ "done", "done", true },
+        .{ "gaps", "gaps", true },
+        .{ "contradictions", "contradictions", true },
+        .{ "new_sub_questions", "new_sub_questions", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.round) |value| {
+            try jw.objectField("round");
+            try jw.write(value);
+        }
+        if (self.done) |value| {
+            try jw.objectField("done");
+            try jw.write(value);
+        }
+        if (self.gaps) |value| {
+            try jw.objectField("gaps");
+            try jw.write(value);
+        }
+        if (self.contradictions) |value| {
+            try jw.objectField("contradictions");
+            try jw.write(value);
+        }
+        if (self.new_sub_questions) |value| {
+            try jw.objectField("new_sub_questions");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchReport = struct {
+    /// Report title.
+    title: ?[]const u8 = null,
+    /// Executive summary.
+    summary: ?[]const u8 = null,
+    /// Report sections.
+    sections: ?[]const ResearchReportSection = null,
+    /// The full report rendered as markdown, with a sources list.
+    markdown: []const u8,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "title", "title", true },
+        .{ "summary", "summary", true },
+        .{ "sections", "sections", true },
+        .{ "markdown", "markdown", false },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.title) |value| {
+            try jw.objectField("title");
+            try jw.write(value);
+        }
+        if (self.summary) |value| {
+            try jw.objectField("summary");
+            try jw.write(value);
+        }
+        if (self.sections) |value| {
+            try jw.objectField("sections");
+            try jw.write(value);
+        }
+        try jw.objectField("markdown");
+        try jw.write(self.markdown);
+        try jw.endObject();
+    }
+};
+
+pub const ResearchReportSection = struct {
+    /// Section heading.
+    heading: []const u8,
+    /// Section body with `[E#]` citation markers.
+    markdown: []const u8,
+};
+
+/// Configuration for researchers. Every researcher is a bounded retrieval agent run over the request's authorized queries. `tools` narrows the top-level tools policy and cannot widen it.
+pub const ResearchRetrievalStepConfig = struct {
+    /// Generator for researchers. Defaults to the top-level generator.
+    generator: ?antfly_generating_openapi.GeneratorConfig = null,
+    /// Chain of generators for researchers.
+    chain: ?[]const antfly_generating_openapi.ChainLink = null,
+    /// Additional researcher instructions.
+    instructions: ?[]const u8 = null,
+    /// Researcher tool policy. Narrows the top-level tools policy.
+    tools: ?antfly_generating_api_openapi.ChatToolsConfig = null,
+    /// Optional tree or graph navigation available to each researcher.
+    navigation: ?RetrievalNavigationConfig = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "generator", "generator", false },
+        .{ "chain", "chain", true },
+        .{ "instructions", "instructions", true },
+        .{ "tools", "tools", false },
+        .{ "navigation", "navigation", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.generator) |value| {
+            try jw.objectField("generator");
+            try jw.write(value);
+        } else if (jw.options.emit_null_optional_fields) {
+            try jw.objectField("generator");
+            try jw.write(@as(?u8, null));
+        }
+        if (self.chain) |value| {
+            try jw.objectField("chain");
+            try jw.write(value);
+        }
+        if (self.instructions) |value| {
+            try jw.objectField("instructions");
+            try jw.write(value);
+        }
+        if (self.tools) |value| {
+            try jw.objectField("tools");
+            try jw.write(value);
+        } else if (jw.options.emit_null_optional_fields) {
+            try jw.objectField("tools");
+            try jw.write(@as(?u8, null));
+        }
+        if (self.navigation) |value| {
+            try jw.objectField("navigation");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+/// Client-carried continuation state. Sending it back resumes the run at `phase` without repeating completed work. It never contains raw tool transcripts, credentials or connection settings. Evidence snippets are bounded excerpts of documents the caller was authorized to read; every resumed request is re-authorized. The server signs the state it returns (`signature`) and rejects a state whose signature does not verify, so a client cannot alter a checkpoint, including its budget counters. Send the state back unmodified. Signatures are valid across a cluster that shares an internal service secret, otherwise only on the server that issued them and until it restarts; use durable jobs to resume across restarts.
+pub const ResearchState = struct {
+    /// Server signature over this state. Do not modify the state.
+    signature: ?[]const u8 = null,
+    phase: ResearchPhase,
+    /// Completed research rounds.
+    round: ?i64 = null,
+    plan: ?ResearchPlan = null,
+    findings: ?[]const ResearchFinding = null,
+    evidence: ?[]const ResearchEvidence = null,
+    reflections: ?[]const ResearchReflection = null,
+    report: ?ResearchReport = null,
+    citations: ?[]const ResearchCitation = null,
+    verification: ?ResearchVerification = null,
+    usage: ?ResearchUsage = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "signature", "signature", true },
+        .{ "phase", "phase", false },
+        .{ "round", "round", true },
+        .{ "plan", "plan", true },
+        .{ "findings", "findings", true },
+        .{ "evidence", "evidence", true },
+        .{ "reflections", "reflections", true },
+        .{ "report", "report", true },
+        .{ "citations", "citations", true },
+        .{ "verification", "verification", true },
+        .{ "usage", "usage", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.signature) |value| {
+            try jw.objectField("signature");
+            try jw.write(value);
+        }
+        try jw.objectField("phase");
+        try jw.write(self.phase);
+        if (self.round) |value| {
+            try jw.objectField("round");
+            try jw.write(value);
+        }
+        if (self.plan) |value| {
+            try jw.objectField("plan");
+            try jw.write(value);
+        }
+        if (self.findings) |value| {
+            try jw.objectField("findings");
+            try jw.write(value);
+        }
+        if (self.evidence) |value| {
+            try jw.objectField("evidence");
+            try jw.write(value);
+        }
+        if (self.reflections) |value| {
+            try jw.objectField("reflections");
+            try jw.write(value);
+        }
+        if (self.report) |value| {
+            try jw.objectField("report");
+            try jw.write(value);
+        }
+        if (self.citations) |value| {
+            try jw.objectField("citations");
+            try jw.write(value);
+        }
+        if (self.verification) |value| {
+            try jw.objectField("verification");
+            try jw.write(value);
+        }
+        if (self.usage) |value| {
+            try jw.objectField("usage");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+/// Configuration for one research role. Generator and chain default to the top-level request values.
+pub const ResearchStepConfig = struct {
+    /// Whether the step runs. Defaults vary by step.
+    enabled: ?bool = null,
+    /// Generator for this role.
+    generator: ?antfly_generating_openapi.GeneratorConfig = null,
+    /// Chain of generators for this role.
+    chain: ?[]const antfly_generating_openapi.ChainLink = null,
+    /// Additional role instructions. They cannot change authorized tables, filters, tools or budgets.
+    instructions: ?[]const u8 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "enabled", "enabled", true },
+        .{ "generator", "generator", false },
+        .{ "chain", "chain", true },
+        .{ "instructions", "instructions", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.enabled) |value| {
+            try jw.objectField("enabled");
+            try jw.write(value);
+        }
+        if (self.generator) |value| {
+            try jw.objectField("generator");
+            try jw.write(value);
+        } else if (jw.options.emit_null_optional_fields) {
+            try jw.objectField("generator");
+            try jw.write(@as(?u8, null));
+        }
+        if (self.chain) |value| {
+            try jw.objectField("chain");
+            try jw.write(value);
+        }
+        if (self.instructions) |value| {
+            try jw.objectField("instructions");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchSubQuestion = struct {
+    /// Stable sub-question identifier within the run.
+    id: []const u8,
+    /// Self-contained question a researcher can answer.
+    question: []const u8,
+    /// Why this sub-question matters for the brief.
+    rationale: ?[]const u8 = null,
+    /// Evidence sources the planner expects to be useful.
+    sources: ?[]const []const u8 = null,
+    /// Research round that introduced the sub-question.
+    round: ?i64 = null,
+    /// Research status.
+    status: ?[]const u8 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "id", "id", false },
+        .{ "question", "question", false },
+        .{ "rationale", "rationale", true },
+        .{ "sources", "sources", true },
+        .{ "round", "round", true },
+        .{ "status", "status", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("id");
+        try jw.write(self.id);
+        try jw.objectField("question");
+        try jw.write(self.question);
+        if (self.rationale) |value| {
+            try jw.objectField("rationale");
+            try jw.write(value);
+        }
+        if (self.sources) |value| {
+            try jw.objectField("sources");
+            try jw.write(value);
+        }
+        if (self.round) |value| {
+            try jw.objectField("round");
+            try jw.write(value);
+        }
+        if (self.status) |value| {
+            try jw.objectField("status");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchUnsupportedClaim = struct {
+    /// Section containing the claim.
+    section_index: ?i64 = null,
+    /// Claim text.
+    text: ?[]const u8 = null,
+    /// Evidence the claim cited.
+    evidence_ids: ?[]const []const u8 = null,
+    /// Why the claim is unsupported.
+    reason: ?[]const u8 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "section_index", "section_index", true },
+        .{ "text", "text", true },
+        .{ "evidence_ids", "evidence_ids", true },
+        .{ "reason", "reason", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.section_index) |value| {
+            try jw.objectField("section_index");
+            try jw.write(value);
+        }
+        if (self.text) |value| {
+            try jw.objectField("text");
+            try jw.write(value);
+        }
+        if (self.evidence_ids) |value| {
+            try jw.objectField("evidence_ids");
+            try jw.write(value);
+        }
+        if (self.reason) |value| {
+            try jw.objectField("reason");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchUsage = struct {
+    /// Model calls across every role.
+    llm_calls: ?i64 = null,
+    /// Tool calls across every researcher.
+    tool_calls: ?i64 = null,
+    /// Researcher executions.
+    researcher_runs: ?i64 = null,
+    /// Research rounds completed.
+    rounds: ?i64 = null,
+    /// Evidence items in the registry.
+    evidence_count: ?i64 = null,
+    /// Wall-clock time consumed so far.
+    elapsed_ms: ?i64 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "llm_calls", "llm_calls", true },
+        .{ "tool_calls", "tool_calls", true },
+        .{ "researcher_runs", "researcher_runs", true },
+        .{ "rounds", "rounds", true },
+        .{ "evidence_count", "evidence_count", true },
+        .{ "elapsed_ms", "elapsed_ms", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.llm_calls) |value| {
+            try jw.objectField("llm_calls");
+            try jw.write(value);
+        }
+        if (self.tool_calls) |value| {
+            try jw.objectField("tool_calls");
+            try jw.write(value);
+        }
+        if (self.researcher_runs) |value| {
+            try jw.objectField("researcher_runs");
+            try jw.write(value);
+        }
+        if (self.rounds) |value| {
+            try jw.objectField("rounds");
+            try jw.write(value);
+        }
+        if (self.evidence_count) |value| {
+            try jw.objectField("evidence_count");
+            try jw.write(value);
+        }
+        if (self.elapsed_ms) |value| {
+            try jw.objectField("elapsed_ms");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+pub const ResearchVerification = struct {
+    /// Number of sections checked.
+    checked_sections: ?i64 = null,
+    /// Citation markers that did not resolve to evidence and were removed.
+    unresolved_markers: ?[]const []const u8 = null,
+    /// Sections without any resolvable citation.
+    uncited_sections: ?[]const i64 = null,
+    /// Claims the verifier judged unsupported by their cited evidence.
+    unsupported: ?[]const ResearchUnsupportedClaim = null,
+    /// Share of checked claims judged supported.
+    supported_ratio: ?f32 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "checked_sections", "checked_sections", true },
+        .{ "unresolved_markers", "unresolved_markers", true },
+        .{ "uncited_sections", "uncited_sections", true },
+        .{ "unsupported", "unsupported", true },
+        .{ "supported_ratio", "supported_ratio", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.checked_sections) |value| {
+            try jw.objectField("checked_sections");
+            try jw.write(value);
+        }
+        if (self.unresolved_markers) |value| {
+            try jw.objectField("unresolved_markers");
+            try jw.write(value);
+        }
+        if (self.uncited_sections) |value| {
+            try jw.objectField("uncited_sections");
+            try jw.write(value);
+        }
+        if (self.unsupported) |value| {
+            try jw.objectField("unsupported");
+            try jw.write(value);
+        }
+        if (self.supported_ratio) |value| {
+            try jw.objectField("supported_ratio");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
+/// Configuration for the report writer.
+pub const ResearchWriteStepConfig = struct {
+    /// Generator for the writer. Defaults to the top-level generator.
+    generator: ?antfly_generating_openapi.GeneratorConfig = null,
+    /// Chain of generators for the writer.
+    chain: ?[]const antfly_generating_openapi.ChainLink = null,
+    /// Additional writer instructions, for example audience or tone.
+    instructions: ?[]const u8 = null,
+    /// Optional caller-supplied section headings. When omitted the writer chooses them.
+    outline: ?[]const []const u8 = null,
+
+    /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
+    pub const openApiFieldMetadata = .{
+        .{ "generator", "generator", false },
+        .{ "chain", "chain", true },
+        .{ "instructions", "instructions", true },
+        .{ "outline", "outline", true },
+    };
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObject(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) !@This() {
+        return try openApiParseObjectFromValue(@This(), openApiFieldMetadata, allocator, source, options);
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.beginObject();
+        if (self.generator) |value| {
+            try jw.objectField("generator");
+            try jw.write(value);
+        } else if (jw.options.emit_null_optional_fields) {
+            try jw.objectField("generator");
+            try jw.write(@as(?u8, null));
+        }
+        if (self.chain) |value| {
+            try jw.objectField("chain");
+            try jw.write(value);
+        }
+        if (self.instructions) |value| {
+            try jw.objectField("instructions");
+            try jw.write(value);
+        }
+        if (self.outline) |value| {
+            try jw.objectField("outline");
+            try jw.write(value);
+        }
+        try jw.endObject();
+    }
+};
+
 pub const RestoreJob = struct {
     /// Opaque durable restore-job identifier. Clients must not parse it as a number.
     job_id: []const u8,
@@ -9600,7 +11132,7 @@ pub const RetrievalAgentRequest = struct {
     tools: ?antfly_generating_api_openapi.ChatToolsConfig = null,
     /// Step configuration
     steps: ?RetrievalAgentSteps = null,
-    /// Handlebars template for rendering documents in the generation prompt. Default uses TOON format for token efficiency. Requires steps.generation to be set.
+    /// Handlebars template that renders each retrieved document in the generation prompt. Requires steps.generation to be set. The template is rendered once per hit against `{id, score, fields}`, where `fields` is the hit's source. When omitted, each document's fields are encoded as TOON (Token-Oriented Object Notation), which carries the same structure as JSON in fewer tokens. Helpers: `encodeToon` (options `indent`, 1 to 16, default 2; and `delimiter`: `comma`, `tab`, or `pipe`), `scrubHtml`, `eq`, and `media`. Values in `{{...}}` are HTML-escaped; use `{{{...}}}` for raw text. Examples: - `{{encodeToon this.fields}}` - `{{encodeToon this.fields delimiter="tab"}}` - `Title: {{{this.fields.title}}}`
     document_renderer: ?[]const u8 = null,
 
     /// OpenAPI wire names and nullability consumed by compatible typed JSON parsers.
@@ -11147,7 +12679,7 @@ pub const StatefulQueryRequest = struct {
     analyses: ?Analyses = null,
     /// Declarative graph matching, traversal, and path queries. A nested node `filter` is a typed, non-scoring stored-document predicate. It shares familiar scalar syntax with document queries but deliberately excludes analyzer-backed and index-only clauses. A request may contain at most 64 named graph operations, of which at most 8 may be named `match` operations. Each operation key is a GraphIdentifier under the versioned policy published in the GraphIdentifier schema. Put multiple counts over one pattern in the same `match` return object so they share one complete anchor scan.
     graph_queries: ?antfly_indexes_openapi.GraphQueries = null,
-    /// Optional Handlebars template string for rendering document content in RAG queries. Template has access to document fields via `{{this.fields.fieldName}}`. **Default**: Uses TOON (Token-Oriented Object Notation) format for 30-60% token reduction: ```handlebars {{encodeToon this.fields}} ``` **Available Helpers**: - `encodeToon` - Renders fields in compact TOON format with configurable options: - `lengthMarker` (bool): Add # prefix to array counts (default: true) - `indent` (int): Indentation spacing (default: 2) - `delimiter` (string): Field separator for tabular arrays - `scrubHtml` - Removes HTML tags and extracts text - `media` - Wraps data URIs for GenKit multimodal support - `eq` - Equality comparison for conditionals **Examples**: - Basic TOON: `{{encodeToon this.fields}}` - Compact TOON: `{{encodeToon this.fields lengthMarker=false indent=0}}` - Tabular data: `{{encodeToon this.fields delimiter="\t"}}` - Custom template: `Title: {{this.fields.title}}\nBody: {{this.fields.body}}` - Traditional format: `{{#each this.fields}}{{@key}}: {{this}}\n{{/each}}` TOON format produces compact, LLM-optimized output like: ``` title: Introduction to Vector Search author: Jane Doe tags[#3]: ai,search,ml ``` **References**: - TOON Specification: https://github.com/toon-format/toon - Go Implementation: https://github.com/alpkeskin/gotoon
+    /// Not supported on queries, which do not generate text; requests that set it are rejected. Set `document_renderer` on a retrieval agent request to control how documents appear in the generation prompt.
     document_renderer: ?[]const u8 = null,
     /// Optional result pruning configuration to filter low-relevance results. Pruning helps detect "elbows" in score distributions and removes results that are significantly worse than top matches. It runs once on globally merged results, after optional reranking and before the final offset/limit page is selected. **Common patterns:** - RAG queries: Use `max_score_gap_percent: 30` to stop at quality drop-offs - Strict matching: Use `min_score_ratio: 0.7` for high-quality results only - Combine both for best results Example: ```json { "min_score_ratio": 0.5, "max_score_gap_percent": 25.0, "min_absolute_score": 0.3 } ```
     pruner: ?antfly_indexes_openapi.Pruner = null,
@@ -11604,7 +13136,7 @@ pub const StorageStatus = struct {
     }
 };
 
-/// Synchronization level for batch operations: - "propose": Wait for Raft proposal acceptance (fastest, default) - "write": Wait for Pebble KV write - "full_text": Wait for full-text index WAL write - "enrichments": Precompute enrichments before committing the document. A synchronous producer failure rejects the write; post-commit worker failures retain the document and may return `committed_repair_required`. - "full_index": Wait for all index writes to complete (full-text + enrichments + vector indexes)
+/// Synchronization level for batch operations: - "propose": Wait for Raft proposal acceptance (fastest, default) - "write": Wait for the write to be durably applied to the local key-value store - "full_text": Wait for full-text index WAL write - "enrichments": Precompute enrichments before committing the document. A synchronous producer failure rejects the write; post-commit worker failures retain the document and may return `committed_repair_required`. - "full_index": Wait for all index writes to complete (full-text + enrichments + vector indexes)
 pub const SyncLevel = enum {
     propose,
     write,
