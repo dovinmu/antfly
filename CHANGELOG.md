@@ -31,8 +31,9 @@ All notable changes to Antfly will be documented in this file.
   numeric values, singleton numeric lines, and their full source-row context
   when combining OCR with embedded text.
 - **Native multistage OCR** — support exact transposed convolution and average
-  pooling, preserve dynamic reshape dimensions, and correct Paddle image
-  normalization, detector aspect ratio, recognition width/padding, tall-crop
+  pooling, preserve typed constants and dynamic reshape dimensions in native
+  partitioned execution, and correct Paddle image normalization, detector aspect
+  ratio, recognition width/padding, tall-crop
   rotation, and CTC vocabulary handling. Recognition failures propagate instead
   of returning partial success.
 - **Reader request memory** — encode large inline-image JSON requests into one
