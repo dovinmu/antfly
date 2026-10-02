@@ -183,16 +183,19 @@ func NewRerankerConfig(config any) (*RerankerConfig, error) {
 		if err := rerankerConfig.FromAntflyRerankerConfig(v); err != nil {
 			return nil, fmt.Errorf("from antfly reranker config: %w", err)
 		}
+		rerankerConfig.Model = v.Model
 	case CohereRerankerConfig:
 		provider = RerankerProviderCohere
 		if err := rerankerConfig.FromCohereRerankerConfig(v); err != nil {
 			return nil, fmt.Errorf("from cohere reranker config: %w", err)
 		}
+		rerankerConfig.Model = v.Model
 	case VertexRerankerConfig:
 		provider = RerankerProviderVertex
 		if err := rerankerConfig.FromVertexRerankerConfig(v); err != nil {
 			return nil, fmt.Errorf("from vertex reranker config: %w", err)
 		}
+		rerankerConfig.Model = v.Model
 	default:
 		return nil, fmt.Errorf("unknown reranker config type: %T", v)
 	}
