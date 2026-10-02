@@ -30,6 +30,7 @@ pub const backup = @import("backup.zig");
 pub const agents = @import("agents.zig");
 pub const internal = @import("internal.zig");
 pub const auth = @import("auth.zig");
+pub const pdf = @import("pdf.zig");
 
 pub const OutputFormat = enum { json, table_fmt };
 
@@ -73,6 +74,7 @@ pub fn isHelpArg(arg: []const u8) bool {
 }
 
 pub fn commandUsage(command: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, command, "pdf")) return pdf.usage;
     if (std.mem.eql(u8, command, "sql")) return
     \\usage: antfly sql --statement '<SQL>' [--parameters '<JSON array>']
     \\                  [--database <name>] [--namespace <name>] [--limit <1..4096>]

@@ -1213,7 +1213,15 @@ pub fn create(b: *std.Build) ?Artifacts {
         .pdf_mod = pdf_bench_pdf,
     });
     b.step("lib-pdf-bench", "Build and install lib-pdf-bench").dependOn(&b.addInstallArtifact(pdf_bench, .{}).step);
-    const pdf_safety = addFilteredTestRunArtifact(b, pdf_build.addSafetyTests(b, pdf_mod));
+    const pdf_safety = addFilteredTestRunArtifact(b, pdf_build.addSafetyTests(b, .{
+        .root = b.path("lib/pdf"),
+        .target = target,
+        .optimize = optimize,
+        .image_mod = image_mod,
+        .hash_mod = hash_mod,
+        .font_mod = font_mod,
+        .pdf_standard_fonts_mod = pdf_standard_fonts_mod,
+    }));
     b.step("lib-pdf-safety-test", "Run focused PDF OCR rendering and parser safety tests").dependOn(&pdf_safety.step);
 
     const image_conformance = image_build.addConformance(b, .{

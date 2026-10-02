@@ -45,6 +45,7 @@ pub fn runFromIterator(
     var io_impl = std.Io.Threaded.init(std.heap.page_allocator, .{});
     defer io_impl.deinit();
     const io = io_impl.io();
+    if (std.mem.eql(u8, command, "pdf")) return cli.pdf.run(init.gpa, io, args);
     var http = httpx.Client.initWithConfig(init.gpa, io, .{});
     defer http.deinit();
 

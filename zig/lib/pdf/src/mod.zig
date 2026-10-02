@@ -752,6 +752,37 @@ pub fn renderParsedPagePngAdaptiveWithProfileAlloc(
     );
 }
 
+/// Adaptive rendering without ever invoking a platform compatibility backend.
+pub fn renderParsedPagePngNativeAdaptiveWithProfileAlloc(
+    alloc: Allocator,
+    parsed: *reader.Reader,
+    page_number: usize,
+    requested_dpi: u16,
+    max_pixels: u64,
+    max_dimension: u32,
+    profile: RenderProfile,
+) !RenderedPagePng {
+    const geometry = try adaptiveRenderGeometry(parsed, .{
+        .page_number = page_number,
+        .requested_dpi = requested_dpi,
+        .max_pixels = max_pixels,
+        .max_dimension = max_dimension,
+    });
+    parsed.clearRenderDiagnostics();
+    const png = try renderParsedPagePngNativeAlloc(alloc, parsed, page_number, geometry.effective_dpi, max_pixels, geometry.rotation, profile);
+    const diagnostics = parsed.lastRenderDiagnostics();
+    const degraded = if (diagnostics) |value| value.fallback_text_groups != 0 else false;
+    return .{
+        .png = png,
+        .requested_dpi = requested_dpi,
+        .effective_dpi = geometry.effective_dpi,
+        .width = geometry.width,
+        .height = geometry.height,
+        .quality = if (degraded) .degraded else .native,
+        .diagnostics = diagnostics,
+    };
+}
+
 fn renderParsedPagePngAdaptiveWithProfileAndCompatibilityAlloc(
     alloc: Allocator,
     parsed: *reader.Reader,
@@ -4966,6 +4997,13 @@ test "adaptive OCR rendering records effective DPI and enforces safety caps" {
     try std.testing.expect(compact.height <= 400);
     try std.testing.expectError(error.RenderedPageTooLarge, renderParsedPagePngAdaptiveAlloc(alloc, &parsed, 1, 150, 10, 4096));
     try std.testing.expectError(error.InvalidRenderDpi, renderParsedPagePngAlloc(alloc, &parsed, 1, 48, 40_000_000));
+}
+
+test "strict native adaptive rendering rejects unsupported streams" {
+    const alloc = std.testing.allocator;
+    var parsed = try reader.Reader.init(alloc, @embedFile("../testdata/unsupported_filter.pdf"));
+    defer parsed.deinit();
+    try std.testing.expectError(error.UnsupportedStreamFilter, renderParsedPagePngNativeAdaptiveWithProfileAlloc(alloc, &parsed, 1, 200, 40_000_000, 4096, .ocr));
 }
 
 test "adaptive raster rendering exposes the native RGBA layout without PNG loss" {

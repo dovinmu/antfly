@@ -181,8 +181,8 @@ pub const AntflyRootImports = struct {
         mod.addImport("build_info", self.build_info.module);
     }
 
-    /// Remote commands depend on client contracts and transport. In particular,
-    /// they do not depend on local tokenization, inference, or storage engines.
+    /// Client commands depend on transport contracts; local PDF preparation
+    /// additionally links the native renderer, but not inference or storage.
     pub fn configureCli(self: @This(), mod: *std.Build.Module, link_libc: bool) void {
         mod.addImport("antfly_platform", self.platform);
         mod.addImport("httpx", self.httpx);
@@ -191,6 +191,7 @@ pub const AntflyRootImports = struct {
         mod.addImport("antfly_hash", self.hash);
         mod.addImport("structlog", self.structlog);
         mod.addImport("handlebars", self.handlebars);
+        mod.addImport("antfly_pdf", self.pdf);
         mod.link_libc = link_libc;
     }
 

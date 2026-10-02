@@ -97,9 +97,9 @@ pub fn runtimeCompileMaxRss(unit: RuntimeLibraryUnit, profile: CompileMemoryProf
         // scheduler can overlap whichever roots fit without forcing
         // callers to serialize the whole build.
         .inference => 16 * 1024 * 1024 * 1024,
-        // Clean aarch64-macOS ReleaseFast codegen currently peaks
-        // around 2.23 GB, just above the former 2 GiB reservation.
-        .cli => 3 * 1024 * 1024 * 1024,
+        // Native PDF preparation adds renderer codegen to the client root;
+        // the previously measured PDF-linked CLI exceeded 3 GiB.
+        .cli => 4 * 1024 * 1024 * 1024,
     };
 }
 

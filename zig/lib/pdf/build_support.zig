@@ -28,7 +28,7 @@ pub const AddTestsResult = struct {
     run_lib_pdf_tests: *std.Build.Step.Run,
 };
 
-pub fn addTests(b: *std.Build, options: AddTestsOptions) AddTestsResult {
+fn createTestModule(b: *std.Build, options: AddTestsOptions) *std.Build.Module {
     const target = options.target;
     const optimize = options.optimize;
     const image_mod = options.image_mod;
@@ -48,10 +48,14 @@ pub fn addTests(b: *std.Build, options: AddTestsOptions) AddTestsResult {
         pdf_test_mod.linkFramework("CoreFoundation", .{});
         pdf_test_mod.linkFramework("CoreGraphics", .{});
     }
+    pdf_test_mod.link_libc = true;
+    return pdf_test_mod;
+}
+
+pub fn addTests(b: *std.Build, options: AddTestsOptions) AddTestsResult {
     const lib_pdf_tests = b.addTest(.{
-        .root_module = pdf_test_mod,
+        .root_module = createTestModule(b, options),
     });
-    lib_pdf_tests.root_module.link_libc = true;
     const run_lib_pdf_tests = b.addRunArtifact(lib_pdf_tests);
 
     return .{
@@ -73,13 +77,15 @@ pub fn addBenchmark(b: *std.Build, options: struct {
     return b.addExecutable(.{ .name = "lib-pdf-bench", .root_module = module });
 }
 
-pub fn addSafetyTests(b: *std.Build, pdf_mod: *std.Build.Module) *std.Build.Step.Compile {
+pub fn addSafetyTests(b: *std.Build, options: AddTestsOptions) *std.Build.Step.Compile {
     return b.addTest(.{
-        .root_module = pdf_mod,
+        .root_module = createTestModule(b, options),
         .filters = &.{
             "native backend renders simple pdf first page png",
             "stream decoders enforce the decoded byte budget before growth",
             "xref parser rejects a cyclic Prev chain",
+            "strict native adaptive rendering rejects unsupported streams",
+            "adaptive OCR rendering records effective DPI and enforces safety caps",
         },
     });
 }

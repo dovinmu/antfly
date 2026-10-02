@@ -85,6 +85,7 @@ pub const commands = [_]Command{
     .{ .name = "backup", .description = "Back up tables", .route = .cli },
     .{ .name = "restore", .description = "Restore tables", .route = .cli },
     .{ .name = "storage", .description = "Manage table storage", .route = .storage, .subcommands = &.{"migrate"} },
+    .{ .name = "pdf", .description = "Render PDF pages locally", .route = .cli, .subcommands = &.{"render-page"} },
     .{ .name = "auth", .description = "Manage users and authorization", .route = .cli, .subcommands = &auth_subcommands },
     .{ .name = "internal", .description = "Run internal cluster commands", .route = .cli, .subcommands = &internal_subcommands },
     .{ .name = "cloud", .description = "Delegate to the Antfly Cloud CLI", .route = .cloud },
