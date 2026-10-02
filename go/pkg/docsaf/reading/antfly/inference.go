@@ -27,19 +27,25 @@ type ModelReader interface {
 
 // AntflyConfig configures Antfly-backed reading adapters.
 type AntflyConfig struct {
-	BaseURL          string
-	HTTPClient       *http.Client
-	Client           *inferenceclient.InferenceClient
-	Models           []string
-	DefaultMaxTokens int
-	RenderDPI        float64
+	BaseURL                       string
+	HTTPClient                    *http.Client
+	Client                        *inferenceclient.InferenceClient
+	Models                        []string
+	DefaultMaxTokens              int
+	RenderDPI                     float64
+	GenerationTemperatureOverride *float32
+	EnableThinking                *bool
+	AllowEmptyOutput              bool
 }
 
 type inferenceBase struct {
-	client           *inferenceclient.InferenceClient
-	models           []string
-	defaultMaxTokens int
-	renderDPI        float64
+	client                        *inferenceclient.InferenceClient
+	models                        []string
+	defaultMaxTokens              int
+	renderDPI                     float64
+	generationTemperatureOverride *float32
+	enableThinking                *bool
+	allowEmptyOutput              bool
 }
 
 // AntflyReadReader uses the Antfly read endpoint for OCR-style extraction.
@@ -99,10 +105,13 @@ func newInferenceBase(cfg AntflyConfig) (inferenceBase, error) {
 	}
 
 	return inferenceBase{
-		client:           client,
-		models:           append([]string(nil), cfg.Models...),
-		defaultMaxTokens: maxTokens,
-		renderDPI:        renderDPI,
+		client:                        client,
+		models:                        append([]string(nil), cfg.Models...),
+		defaultMaxTokens:              maxTokens,
+		renderDPI:                     renderDPI,
+		generationTemperatureOverride: cfg.GenerationTemperatureOverride,
+		enableThinking:                cfg.EnableThinking,
+		allowEmptyOutput:              cfg.AllowEmptyOutput,
 	}, nil
 }
 
@@ -154,6 +163,31 @@ func (r *AntflyGenerateReader) ReadDetailed(ctx context.Context, pages []reading
 		results[i] = result
 	}
 	return results, nil
+}
+
+// ReadDataURIDetailed reads one already-encoded page. It is useful when the
+// same rendered page is sent to more than one native inference stage.
+func (r *AntflyReadReader) ReadDataURIDetailed(ctx context.Context, dataURI string, opts *reading.ReadOptions) (Result, error) {
+	if strings.TrimSpace(dataURI) == "" {
+		return Result{}, fmt.Errorf("page data URI is required")
+	}
+	result, err := r.base.readSingle(ctx, dataURI, opts)
+	if err != nil {
+		return Result{}, fmt.Errorf("read page 1: %w", err)
+	}
+	return result, nil
+}
+
+// GenerateDataURIDetailed generates from one already-encoded page.
+func (r *AntflyGenerateReader) GenerateDataURIDetailed(ctx context.Context, dataURI string, opts *reading.ReadOptions) (Result, error) {
+	if strings.TrimSpace(dataURI) == "" {
+		return Result{}, fmt.Errorf("page data URI is required")
+	}
+	result, err := r.base.generateSingle(ctx, dataURI, opts)
+	if err != nil {
+		return Result{}, fmt.Errorf("generate page 1: %w", err)
+	}
+	return result, nil
 }
 
 func (r *AntflyReadReader) Close() error {
@@ -221,15 +255,23 @@ func (b inferenceBase) readSingle(ctx context.Context, dataURI string, opts *rea
 			lastErr = fmt.Errorf("service unavailable: %s", resp.JSON503.Error)
 			continue
 		}
-		if resp.JSON200 == nil || len(resp.JSON200.Data) == 0 {
+		if resp.JSON200 == nil {
+			lastErr = fmt.Errorf("reader %q returned status %d: %s", model, resp.StatusCode(), strings.TrimSpace(string(resp.Body)))
+			continue
+		}
+		if len(resp.JSON200.Data) == 0 {
+			lastErr = fmt.Errorf("reader %q returned no results", model)
 			continue
 		}
 
-		text := strings.TrimSpace(resp.JSON200.Data[0].Text)
-		if text == "" {
-			continue
+		modelUsed := strings.TrimSpace(resp.JSON200.Model)
+		if modelUsed == "" {
+			modelUsed = model
 		}
-		return Result{Text: text, Model: model}, nil
+		return Result{
+			Text:  strings.TrimSpace(resp.JSON200.Data[0].Text),
+			Model: modelUsed,
+		}, nil
 	}
 
 	if lastErr != nil {
@@ -248,21 +290,34 @@ func (b inferenceBase) generateSingle(ctx context.Context, dataURI string, opts 
 	var lastErr error
 	for _, model := range b.models {
 		resp, err := b.client.Generate(ctx, model, []oapi.InferenceChatMessage{message}, &inferenceclient.GenerateConfig{
-			MaxTokens: maxTokens,
+			MaxTokens:           maxTokens,
+			TemperatureOverride: b.generationTemperatureOverride,
+			EnableThinking:      b.enableThinking,
 		})
 		if err != nil {
 			lastErr = err
 			continue
 		}
 		if len(resp.Choices) == 0 {
+			lastErr = fmt.Errorf("generator %q returned no choices", model)
 			continue
 		}
 
-		text := strings.TrimSpace(resp.Choices[0].Message.Content)
-		if text == "" {
+		choice := resp.Choices[0]
+		if choice.FinishReason != oapi.InferenceFinishReasonStop {
+			lastErr = fmt.Errorf("generator %q did not complete normally (finish_reason=%q)", model, choice.FinishReason)
 			continue
 		}
-		return Result{Text: text, Model: model}, nil
+		text := strings.TrimSpace(choice.Message.Content)
+		if text == "" && !b.allowEmptyOutput {
+			lastErr = fmt.Errorf("generator %q returned an empty result", model)
+			continue
+		}
+		modelUsed := strings.TrimSpace(resp.Model)
+		if modelUsed == "" {
+			modelUsed = model
+		}
+		return Result{Text: text, Model: modelUsed}, nil
 	}
 
 	if lastErr != nil {
