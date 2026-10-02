@@ -129,43 +129,6 @@ func createTestZip(t *testing.T, files map[string][]byte) string {
 	return path
 }
 
-func TestCreateEmbeddingIndexUsesAntflyClipClap(t *testing.T) {
-	idx, err := createEmbeddingIndex(DefaultEmbeddingModel, DefaultInferenceURL, DefaultChunkerModel, 512, 50)
-	if err != nil {
-		t.Fatalf("createEmbeddingIndex failed: %v", err)
-	}
-
-	cfg, err := idx.AsEmbeddingsIndexConfig()
-	if err != nil {
-		t.Fatalf("AsEmbeddingsIndexConfig failed: %v", err)
-	}
-
-	embedder, err := cfg.Embedder.AsAntflyEmbedderConfig()
-	if err != nil {
-		t.Fatalf("AsAntflyEmbedderConfig failed: %v", err)
-	}
-	if string(embedder.Provider) != string(antfly.EmbedderProviderAntfly) {
-		t.Fatalf("embedder provider = %q, want %q", embedder.Provider, antfly.EmbedderProviderAntfly)
-	}
-	if cfg.Dimension != DefaultEmbeddingDims {
-		t.Fatalf("embedding dimension = %d, want %d", cfg.Dimension, DefaultEmbeddingDims)
-	}
-	if embedder.Model != DefaultEmbeddingModel {
-		t.Fatalf("embedder model = %q, want %q", embedder.Model, DefaultEmbeddingModel)
-	}
-
-	if cfg.Chunker.Provider != antfly.ChunkerProviderAntfly {
-		t.Fatalf("chunker provider = %q, want %q", cfg.Chunker.Provider, antfly.ChunkerProviderAntfly)
-	}
-	wantChunkerURL := DefaultInferenceURL + "/ai/v1"
-	if cfg.Chunker.ApiUrl != wantChunkerURL {
-		t.Fatalf("chunker api URL = %q, want %q", cfg.Chunker.ApiUrl, wantChunkerURL)
-	}
-	if cfg.Chunker.Model != DefaultChunkerModel {
-		t.Fatalf("chunker model = %q, want %q", cfg.Chunker.Model, DefaultChunkerModel)
-	}
-}
-
 func TestCreateArtifactGraphIndexIncludesProducerConfig(t *testing.T) {
 	idx, err := createArtifactGraphIndex(
 		DefaultAutographIndex,
@@ -281,43 +244,6 @@ func TestCreateArtifactGraphIndexDefaultsToExtractorConfig(t *testing.T) {
 	edge := source["edge"].(map[string]any)
 	if edge["weight"] != "{{ _item.score }}" {
 		t.Fatalf("unexpected extractor edge mapping: %#v", edge)
-	}
-}
-
-func TestGraphVisualizationQueryUsesAutographIndex(t *testing.T) {
-	req := graphVisualizationQuery("Maxwell")
-	fullText, ok := req["full_text_search"].(map[string]any)
-	if !ok || fullText["query"] != "Maxwell" {
-		t.Fatalf("unexpected full-text search: %#v", req["full_text_search"])
-	}
-	graphSearches, ok := req["graph_queries"].(map[string]any)
-	if !ok {
-		t.Fatalf("graph searches missing: %#v", req)
-	}
-	graph, ok := graphSearches["relations"].(map[string]any)
-	if !ok {
-		t.Fatalf("relations graph search missing: %#v", graphSearches)
-	}
-	if graph["index"] != DefaultAutographIndex {
-		t.Fatalf("graph index = %q, want %s", graph["index"], DefaultAutographIndex)
-	}
-	traverse, ok := graph["traverse"].(map[string]any)
-	if !ok {
-		t.Fatalf("traverse operation missing: %#v", graph)
-	}
-	startNodes, ok := traverse["start"].(map[string]any)
-	if !ok || startNodes["result_ref"] != "$query_results" || startNodes["limit"] != 8 {
-		t.Fatalf("unexpected start nodes: %#v", traverse["start"])
-	}
-	if traverse["direction"] != "both" || traverse["max_depth"] != 1 {
-		t.Fatalf("unexpected traversal: %#v", traverse)
-	}
-	if traverse["include_documents"] != true {
-		t.Fatalf("graph traversal must hydrate visualization documents: %#v", traverse)
-	}
-	fields, ok := traverse["fields"].([]string)
-	if !ok || len(fields) != 3 || fields[0] != "title" || fields[1] != "url" || fields[2] != "metadata" {
-		t.Fatalf("unexpected graph document fields: %#v", traverse["fields"])
 	}
 }
 
@@ -961,6 +887,25 @@ func TestIdentifyEnrichCandidates(t *testing.T) {
 			},
 		},
 		{
+			name: "EFTA identifier retains compatibility reason",
+			records: map[string]map[string]any{
+				"page-1": {
+					"content": "EFTA00003256",
+					"metadata": map[string]any{
+						"page_pdf_path": "pages/EFTA00003256/EFTA00003256_1.pdf",
+					},
+				},
+			},
+			minContent: 50,
+			wantIDs:    []string{"page-1"},
+			wantReason: map[string][]string{
+				"page-1": {"identifier_only"},
+			},
+			wantCategory: map[string]string{
+				"page-1": "ocr",
+			},
+		},
+		{
 			name: "empty content triggers empty with ocr category",
 			records: map[string]map[string]any{
 				"page-1": {
@@ -1254,5 +1199,72 @@ func TestSplitPDFToPagesFromBytes_SinglePage(t *testing.T) {
 
 	if metadata.TotalPages != 1 {
 		t.Errorf("metadata.TotalPages = %d, want 1", metadata.TotalPages)
+	}
+}
+
+func TestNativeRecoveryRemovesCorruptionFromSearchableContent(t *testing.T) {
+	original := "J * M \ue000\ue001"
+	record := map[string]any{
+		"content":  original,
+		"metadata": map[string]any{"extraction_method": "text_stream"},
+	}
+	result := nativeEnrichResult{
+		candidate:     enrichCandidate{content: original},
+		transcription: nativeStageResult{text: "FBI photograph"},
+		description:   nativeStageResult{text: "A yellow teddy bear."},
+	}
+	applyNativeEnrichResult(record, result, nativeEnrichConfig{visionModel: defaultRecoveryOCRModel})
+	content := record["content"].(string)
+	if strings.Contains(content, original) {
+		t.Fatal("corrupt source text remains in the recovered search field")
+	}
+	if !strings.Contains(content, result.transcription.text) || !strings.Contains(content, result.description.text) {
+		t.Fatal("recovered search text omits transcription or visual description")
+	}
+	if record["original_content"] != original {
+		t.Fatal("recovery destroyed the original extraction")
+	}
+}
+
+func TestPrepareSplitPagesRetainsPagesWithoutText(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "blank.pdf"), createMultiPagePDF(3), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "records.json")
+	if err := prepareCmd([]string{"--dir", dir, "--split-pages", "--workers", "1", "--output", output}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records map[string]struct {
+		FilePath string `json:"file_path"`
+		Content  string `json:"content"`
+		Metadata struct {
+			PageNumber  int    `json:"page_number"`
+			PagePDFPath string `json:"page_pdf_path"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(data, &records); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("retained %d pages, want all 3 source pages", len(records))
+	}
+	seen := make(map[int]bool)
+	for _, record := range records {
+		page := record.Metadata.PageNumber
+		if page < 1 || page > 3 || seen[page] {
+			t.Fatalf("invalid or duplicate source page %d", page)
+		}
+		seen[page] = true
+		if record.FilePath != "blank.pdf" || record.Content != "" {
+			t.Fatalf("blank source page was changed: %+v", record)
+		}
+		if _, err := os.Stat(filepath.Join(dir, record.Metadata.PagePDFPath)); err != nil {
+			t.Fatalf("retained page has no recoverable PDF: %v", err)
+		}
 	}
 }

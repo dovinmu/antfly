@@ -26,6 +26,7 @@ The documents are processed page-by-page, chunked for semantic search, and made 
 # From the antfly root directory
 cd zig
 zig build antfly
+export ANTFLY_BIN="$PWD/zig-out/bin/antfly"
 ./zig-out/bin/antfly standalone
 ```
 
@@ -41,7 +42,11 @@ omitted here.
 cd zig
 ./zig-out/bin/antfly inference pull antflydb/clipclap:gguf:Q4_K --tasks embed
 ./zig-out/bin/antfly inference pull antflydb/gliner2-base-v1-q4_k --tasks extract --capabilities extraction
-./zig-out/bin/antfly inference pull microsoft/Florence-2-base-ft --tasks read
+./zig-out/bin/antfly inference pull antflydb/Florence-2-base --tasks read
+./zig-out/bin/antfly inference pull ggml-org/gemma-4-e2b-it-gguf:gguf:Q4_0 --tasks generate
+
+# Optional native reranker for the search UI.
+./zig-out/bin/antfly inference pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:gguf:Q8_0 --tasks rerank
 ```
 
 ### 3. Build the Tool
@@ -67,7 +72,7 @@ Choose a dataset based on your needs:
 # These are ZIP archives that are automatically extracted after download
 ./epstein download --dataset doj-jan2026
 
-# Option D: Everything
+# Option D: All configured archive presets, not the entire current DOJ library
 ./epstein download --dataset all
 ```
 
@@ -89,14 +94,17 @@ export EPSTEIN_ZIP="/path/to/T9/DataSet_10.zip"
   --limit-files 2 --limit-pages 50 \
   --output epstein-smoke.json
 
-# Optional: OCR low-quality pages through Zig Antfly inference.
-./epstein enrich --input epstein-docs.json --dir "$EPSTEIN_DOCS_DIR"
+# Recover empty, identifier-only, short, fragmented, and corrupt pages natively.
+# ANTFLY_BIN must point to a build with `pdf render-page`.
+./epstein enrich --input epstein-docs.json --dir "$EPSTEIN_DOCS_DIR" \
+  --checkpoint-every 25
 
 # Optional: add entity metadata to each page record.
 ./epstein entities --input epstein-docs-enriched.json
 
 # Load into Antfly using ClipClap embeddings.
-./epstein load --input epstein-docs-enriched-entities.json --create-table
+./epstein load --input epstein-docs-enriched-entities.json --create-table \
+  --sync-level full_index
 
 # Load the small smoke file and enable the Zig artifact-backed relation graph.
 ./epstein load --input epstein-smoke.json --table epstein_smoke --create-table \
@@ -159,12 +167,17 @@ Flags:
               Enable OCR fallback through Antfly inference readers
   --ocr-url   Antfly inference URL (default: ANTFLY_INFERENCE_URL or http://localhost:8080)
   --ocr-models
-              OCR models to try (default: microsoft/Florence-2-base-ft)
+              OCR models to try (default: antflydb/Florence-2-base)
   --limit-files
               Process at most this many source PDFs (default: all)
   --limit-pages
               Keep at most this many parsed pages in output (default: all)
 ```
+
+Split-page preparation retains pages with no extracted text so native enrichment
+can recover them. Text-extraction failures retain a source-backed record with
+`metadata.text_extraction_error`; preparation writes the records and exits
+nonzero rather than silently dropping those pages.
 
 ### `load`
 
@@ -181,6 +194,7 @@ Flags:
   --dry-run         Preview changes without applying
   --num-shards      Number of shards (default: 1)
   --batch-size      Batch size for linear merge (default: 25)
+  --sync-level      write, full_text, full_index, enrichments, or propose (default: write)
   --inference-url     Antfly inference root URL for chunking; table config stores its /ai/v1 route (default: ANTFLY_INFERENCE_URL or http://localhost:8080)
   --embedding-model Embedding model (default: antflydb/clipclap)
   --chunker-model   Chunker model (default: fixed-bert-tokenizer)
@@ -212,6 +226,20 @@ Flags:
                     autoschema lane; "" disables the lane
                     (default: fastino/gliner2.5-base-v1)
 ```
+
+Managed embedding dimensions are detected by Antfly from the chosen model;
+they are not fixed to ClipClap's dimension. For native text-only BGE indexing:
+
+```bash
+./epstein load --input epstein-docs-enriched.json --create-table \
+  --embedding-model BAAI/bge-small-en-v1.5 --chunker-model fixed_bert \
+  --target-tokens 448 --overlap-tokens 50 --sync-level full_index
+```
+
+Pull the selected model into the serving runtime's model directory first.
+The example configures at most 256 chunks per document and partial coverage.
+Inspect index readiness and coverage, including skipped or failed sources;
+successful writes alone do not establish complete semantic indexing.
 
 ### AutoSchemaKG mode
 
@@ -274,7 +302,9 @@ Full pipeline: process PDFs and load directly.
 
 ### `enrich`
 
-Runs a second OCR/vision pass over prepared JSON and writes a new JSON file.
+Runs native PDF rendering, OCR, and visual description over prepared JSON.
+Set `ANTFLY_BIN` to an explicit Antfly executable with `pdf render-page`; no Go
+renderer, platform renderer, or degraded-render result is accepted by this path.
 
 ```bash
 ./epstein enrich [flags]
@@ -283,11 +313,62 @@ Flags:
   --input       Input JSON file (default: epstein-docs.json)
   --output      Output JSON file (default: {input-base}-enriched.json)
   --inference-url Antfly inference URL (default: ANTFLY_INFERENCE_URL or http://localhost:8080)
-  --model       Reader model (default: microsoft/Florence-2-base-ft)
-  --category    ocr, vision, quality, or all (default: ocr)
-  --dir         Base directory for resolving split page PDFs
+  --model       OCR model (default: ggml-org/gemma-4-e2b-it-gguf:gguf:Q4_0)
+  --ocr-mode    generate or read (default: generate)
+  --vision-model Visual description model (default: same Gemma model; "" disables)
+  --fallback-reader-model Native reader fallback (default: antflydb/Florence-2-base; "" disables)
+  --category    ocr, vision, quality, or all (default: all)
+  --min-content Short-content threshold (default: 50)
+  --only-empty-or-identifier Restrict selection to the earlier narrow recovery pass
+  --reprocess   Revisit previously enriched pages using their original content
+  --dpi         Native raster resolution, integer 72–600 (default: 200)
+  --max-tokens  OCR generation limit (default: 2048)
+  --vision-max-tokens Visual description limit (default: 256)
+  --fallback-max-tokens Reader fallback limit (default: 768)
+  --workers     Concurrent enrichment workers (default: 1)
+  --checkpoint-every Atomically save after this many results (default: 100)
+  --dir         Base directory for resolving source PDFs
   --zip         Source ZIP archive for page lookup (repeatable)
+  --dry-run     Report candidate count without inference
 ```
+
+The default pass includes short fragments such as `J`, symbol-only extraction,
+fragmented text, and font-corrupt text, not just blank or identifier-only pages.
+Already enriched pages are skipped unless `--reprocess` is supplied.
+Recovered text and separately labeled visual descriptions become searchable
+`content`; the bad extraction remains in `original_content`, not in the search
+field. Source PDFs are not changed.
+
+`metadata.recovery` records PDF/PNG SHA-256 hashes, selection reasons, native
+rendering, actual stage models, prompts, token limits, and fallback errors.
+Outputs remain **machine-generated and unreviewed**, not authoritative
+transcriptions. Truncated generation is rejected before the optional native
+reader fallback. OCR fallback can still lose layout or misread dense tables.
+Failed pages retain error metadata and the command exits nonzero after saving
+successful work. For the default pass, resume with the checkpoint as `--input`;
+successful pages are skipped and failed pages remain candidates. `--reprocess`
+forces eligible enriched pages through recovery again; do not use it merely to
+resume a normal pass.
+
+For a standalone renderer smoke:
+
+```bash
+"$ANTFLY_BIN" pdf render-page source.pdf --page 1 --dpi 200 \
+  --profile ocr --require-native --out page.png
+```
+
+The CLI reports effective geometry and render quality on stderr. Native-only
+rendering forbids platform fallback; enrichment additionally rejects degraded
+quality. Qualify the inference runtime with real page images before a bulk run,
+not just model inventory checks. The inference server's admission limit is
+weighted by image working memory: `--max-concurrent-requests 1` can reject a
+single page image. Use `--workers 1` to serialize enrichment instead.
+
+On macOS arm64, the 2026-10-01 qualification found a Gemma image-generation
+segfault in native build `main-8c295b2b49-dirty`; a previously qualified native reader build
+completed the same pages. Renderer, inference, and search executables may be
+pinned independently. Do not silently substitute a failed or truncated OCR
+response for a recovered page.
 
 ### `entities`
 
@@ -320,6 +401,16 @@ Flags:
   --url     Antfly API URL (default: http://localhost:8080/db/v1)
   --table   Table name to search (default: epstein_docs)
   --listen  Listen address (default: :3000)
+  --pdf-dir Root containing the prepared pages/ directory (default: ./epstein-docs)
+  --reranker-model Native Antfly reranker model (default: disabled)
+  --reranker-candidates Candidate window, at least 20 (default: 50)
+```
+
+For native reranking after pulling the model:
+
+```bash
+./epstein serve --pdf-dir "$EPSTEIN_DOCS_DIR" \
+  --reranker-model ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:gguf:Q8_0
 ```
 
 ## Architecture
@@ -341,7 +432,7 @@ Documents are indexed with:
    - Keyword search
    - Exact phrase matching
 
-2. **Embedding Index** (aknn_v0)
+2. **Embedding Index** (`embeddings`)
    - Semantic similarity search
    - Powered by the native Zig Antfly embedder + `antflydb/clipclap`
    - Chunked with configurable overlap
@@ -355,12 +446,31 @@ Documents are indexed with:
 
 ### Search
 
-The web interface performs hybrid search:
-- Queries both `full_text_index_v0` and `embeddings` indexes
-- Results are ranked by combined relevance score
-- Supports natural language queries
+Both the web interface and JSON search API issue the same hybrid request:
+- Explicit full-text matching on `content`, plus semantic search with only
+  `embeddings` in the semantic index list.
+- Optional native reranking of the candidate window.
+- Up to 20 highest-ranked results. Scores are query-relative ranking signals,
+  not calibrated confidence; weak or unrelated queries can still return results.
+  No universal score cutoff or heuristic short-text filter is applied.
+
+The relation panel checks whether `autograph_relations` exists and is queryable.
+It distinguishes `not_configured`, `ready_empty`, `ready`, and `error`. Traversal
+starts from content matches for the actual query; an empty result never triggers
+an unrelated sample graph. Entity metadata by itself does not populate this
+index. Native main `8c295b2b49` returned `InvalidGraphEdgesResponse` in a
+configured-graph smoke; this is surfaced as an error, not an empty graph.
 
 ## Datasets
+
+These archive presets describe historical releases. The
+[current official DOJ catalog](https://www.justice.gov/epstein/doj-disclosures)
+lists numbered datasets **1–12**, plus court, FOIA, and prior-disclosure
+collections. In particular, dataset 9 is not covered by the example's older
+DOJ 1–8 / 10–12 split. `--dataset all` is not a current-library completeness
+guarantee. Maintain a source URL/hash manifest and reconcile downloaded PDFs,
+split pages, prepared records, and index coverage before declaring a corpus
+complete.
 
 ### January 2024 Court Unsealing
 

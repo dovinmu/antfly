@@ -273,6 +273,10 @@
             display: block;
         }
 
+        .graph-canvas[hidden] {
+            display: none;
+        }
+
         .graph-empty {
             color: #777;
             font-size: 0.9rem;
@@ -400,7 +404,7 @@
 
         {{if .Query}}
         <div class="results-info">
-            Found {{.Total}} results for "{{.Query}}" ({{.Took}})
+            Showing {{.Total}} highest-ranked results for "{{.Query}}" ({{.Took}})
         </div>
 
         <div class="graph-panel" data-query="{{.Query}}">
@@ -421,7 +425,7 @@
                     {{else}}
                     <div class="result-title">{{.Title}}</div>
                     {{end}}
-                    <div class="result-score">Score: {{printf "%.2f" .Score}}</div>
+                    <div class="result-score" title="Ranking scores order this result set; fused scores are query-relative, not confidence values.">Ranking score: {{printf "%.4f" .Score}}</div>
                 </div>
                 <div class="result-meta">
                     {{if .FilePath}}<span>File: {{.FilePath}}</span>{{end}}
@@ -465,10 +469,9 @@
             const query = panel.getAttribute("data-query") || "";
 
             fetch("/api/graph?q=" + encodeURIComponent(query))
-                .then((resp) => {
-                    if (!resp.ok) throw new Error(resp.statusText || "graph request failed");
-                    return resp.json();
-                })
+                .then((resp) => resp.json().catch(() => {
+                    throw new Error(resp.statusText || "graph request failed");
+                }))
                 .then((graph) => renderGraph(svg, meta, empty, graph))
                 .catch((err) => {
                     meta.textContent = "Unavailable";
@@ -478,6 +481,21 @@
                 });
 
             function renderGraph(svg, meta, empty, graph) {
+                if (graph.state === "not_configured") {
+                    meta.textContent = "Not configured";
+                    empty.hidden = false;
+                    empty.textContent = graph.message || "Relation graph is not configured for this collection.";
+                    svg.setAttribute("hidden", "hidden");
+                    return;
+                }
+                if (graph.state === "error") {
+                    meta.textContent = "Unavailable";
+                    empty.hidden = false;
+                    empty.textContent = graph.message || "Graph data is unavailable.";
+                    svg.setAttribute("hidden", "hidden");
+                    return;
+                }
+
                 const nodes = Array.isArray(graph.nodes) ? graph.nodes.slice(0, 40) : [];
                 const nodeIds = new Set(nodes.map((node) => node.id));
                 const edges = (Array.isArray(graph.edges) ? graph.edges : [])
@@ -487,6 +505,7 @@
                 meta.textContent = `${nodes.length} nodes, ${edges.length} edges`;
                 if (nodes.length === 0 || edges.length === 0) {
                     empty.hidden = false;
+                    empty.textContent = graph.message || "No graph relations found for this search.";
                     svg.setAttribute("hidden", "hidden");
                     return;
                 }

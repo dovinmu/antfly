@@ -36,7 +36,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,7 +92,7 @@ func NewOCRClient(inferenceURL string, models []string, renderDPI float64) (*OCR
 	cfg := antflyreading.AntflyConfig{
 		BaseURL:          inferenceURL,
 		Models:           models,
-		DefaultMaxTokens: 2048,
+		DefaultMaxTokens: defaultRecoveryFallbackTokens,
 		RenderDPI:        renderDPI,
 	}
 
@@ -128,7 +127,7 @@ func (o *OCRClient) ProcessPage(ctx context.Context, pdfData []byte, pageNum int
 	}
 
 	results, err := o.readReader.ReadDetailed(ctx, []reading.BinaryContent{page}, &reading.ReadOptions{
-		MaxTokens: 2048,
+		MaxTokens: defaultRecoveryFallbackTokens,
 	})
 	if err != nil {
 		return extractedText, false, err
@@ -167,11 +166,11 @@ func (o *OCRClient) ReadPageWithPrompt(ctx context.Context, pdfData []byte, prom
 	if err != nil {
 		return "", "", err
 	}
-	if len(results) > 0 && results[0].Text != "" {
+	if len(results) > 0 {
 		return results[0].Text, results[0].Model, nil
 	}
 
-	return "", "", fmt.Errorf("all models failed to produce text")
+	return "", "", fmt.Errorf("reader returned no result")
 }
 
 // GeneratePageWithPrompt renders a single-page PDF and sends it to Inference's generate
@@ -209,9 +208,8 @@ const (
 	DefaultEmbeddingIndex   = "embeddings"
 	DefaultEmbeddingModel   = "antflydb/clipclap"
 	DefaultEmbeddingPull    = "antflydb/clipclap:gguf:Q4_K"
-	DefaultEmbeddingDims    = 512
 	DefaultChunkerModel     = "fixed-bert-tokenizer"
-	DefaultOCRModel         = "microsoft/Florence-2-base-ft"
+	DefaultOCRModel         = "antflydb/Florence-2-base"
 	DefaultRecognizerModel  = "antflydb/gliner2-base-v1-q4_k"
 	DefaultAutographIndex   = "autograph_relations"
 	DefaultAutographAsset   = "relations_v1"
@@ -1122,13 +1120,9 @@ func prepareCmd(args []string) error {
 				for job := range jobChan {
 					// Read the page PDF
 					pageData := job.pageData
+					var pageErr error
 					if pageData == nil {
-						var err error
-						pageData, err = os.ReadFile(job.pagePath)
-						if err != nil {
-							pagesProcessed.Add(1)
-							continue
-						}
+						pageData, pageErr = os.ReadFile(job.pagePath)
 					}
 
 					// Process the single-page PDF
@@ -1138,10 +1132,19 @@ func prepareCmd(args []string) error {
 					} else {
 						relPagePath = fmt.Sprintf("%s_page_%d.pdf", strings.TrimSuffix(job.sourceFile, ".pdf"), job.pageNum)
 					}
-					pageSections, err := pdfProcessor.Process(relPagePath, "", *baseURL, pageData)
-					if err != nil {
-						pagesProcessed.Add(1)
-						continue
+					var pageSections []docsaf.DocumentSection
+					if pageErr == nil {
+						pageSections, pageErr = pdfProcessor.Process(relPagePath, "", *baseURL, pageData)
+					}
+					if pageErr != nil || len(pageSections) == 0 {
+						// A page without extracted text still needs an identity for native recovery.
+						metadata := map[string]any{"extraction_method": "empty_text"}
+						if pageErr != nil {
+							metadata["extraction_method"] = "failed"
+							metadata["text_extraction_error"] = pageErr.Error()
+							fmt.Printf("    Text extraction failed for %s page %d: %v\n", job.sourceFile, job.pageNum, pageErr)
+						}
+						pageSections = []docsaf.DocumentSection{{Type: "pdf_page", Metadata: metadata}}
 					}
 
 					// Should be exactly 1 section for a single-page PDF
@@ -1449,6 +1452,15 @@ func prepareCmd(args []string) error {
 	}
 
 	fmt.Printf("Prepared data written to %s\n", *outputFile)
+	extractionFailures := 0
+	for _, section := range sections {
+		if _, failed := section.Metadata["text_extraction_error"]; failed {
+			extractionFailures++
+		}
+	}
+	if extractionFailures > 0 {
+		return fmt.Errorf("text extraction failed for %d page(s); source-backed records were retained in %s for native recovery", extractionFailures, *outputFile)
+	}
 	return nil
 }
 
@@ -1867,9 +1879,24 @@ func serveCmd(args []string) error {
 	tableName := fs.String("table", "epstein_docs", "Table name to search")
 	listenAddr := fs.String("listen", ":3000", "Listen address for web server")
 	pdfDir := fs.String("pdf-dir", "./epstein-docs", "Directory containing PDF files (including pages/ subdirectory)")
+	rerankerModel := fs.String("reranker-model", "", "Native Antfly reranker model (disabled when empty)")
+	rerankerCandidates := fs.Int("reranker-candidates", 50, "Number of hybrid candidates sent to the native reranker")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("failed to parse flags: %w", err)
+	}
+	var reranker *antfly.RerankerConfig
+	if model := strings.TrimSpace(*rerankerModel); model != "" {
+		if *rerankerCandidates < searchResultLimit {
+			return fmt.Errorf("--reranker-candidates must be at least %d", searchResultLimit)
+		}
+		configured, err := antfly.NewRerankerConfig(antfly.AntflyRerankerConfig{Model: model})
+		if err != nil {
+			return fmt.Errorf("configure native reranker: %w", err)
+		}
+		configured.Field = "content"
+		configured.CandidateCount = rerankerCandidates
+		reranker = configured
 	}
 
 	// Create Antfly client
@@ -1890,6 +1917,7 @@ func serveCmd(args []string) error {
 		antflyURL: strings.TrimRight(*antflyURL, "/"),
 		tableName: *tableName,
 		tmpl:      tmpl,
+		reranker:  reranker,
 	}
 
 	// Create a new mux to avoid conflicts with default mux
@@ -1901,22 +1929,11 @@ func serveCmd(args []string) error {
 	mux.HandleFunc("/api/search", server.handleAPISearch)
 	mux.HandleFunc("/api/graph", server.handleAPIGraph)
 
-	// Serve static PDF files from the pages directory
+	// Record URLs retain their path relative to the source PDF directory.
 	pagesDir := filepath.Join(*pdfDir, "pages")
 	if _, err := os.Stat(pagesDir); err == nil {
-		// Serve PDFs with proper content type
-		pdfHandler := http.StripPrefix("/pdfs/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			filePath := filepath.Join(pagesDir, r.URL.Path)
-			// Security: ensure path doesn't escape the pages directory
-			if !strings.HasPrefix(filepath.Clean(filePath), filepath.Clean(pagesDir)) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			w.Header().Set("Content-Type", "application/pdf")
-			http.ServeFile(w, r, filePath)
-		}))
-		mux.Handle("/pdfs/", pdfHandler)
-		fmt.Printf("PDF files: %s (serving at /pdfs/)\n", pagesDir)
+		mux.Handle("/pdfs/", http.StripPrefix("/pdfs/", http.FileServer(http.Dir(*pdfDir))))
+		fmt.Printf("PDF files: %s (serving at /pdfs/)\n", *pdfDir)
 	} else {
 		fmt.Printf("Note: No pages/ directory found at %s\n", pagesDir)
 		fmt.Printf("      Run 'epstein prepare --split-pages' to create individual page PDFs\n")
@@ -1926,6 +1943,11 @@ func serveCmd(args []string) error {
 	fmt.Printf("Antfly URL: %s\n", *antflyURL)
 	fmt.Printf("Table: %s\n", *tableName)
 	fmt.Printf("Listen: %s\n", *listenAddr)
+	if reranker != nil {
+		fmt.Printf("Native reranker: %s (%d candidates)\n", *rerankerModel, *rerankerCandidates)
+	} else {
+		fmt.Printf("Native reranker: disabled\n")
+	}
 	fmt.Printf("\nOpen http://localhost%s in your browser\n\n", *listenAddr)
 
 	return http.ListenAndServe(*listenAddr, mux)
@@ -1937,6 +1959,7 @@ type SearchServer struct {
 	antflyURL string
 	tableName string
 	tmpl      *template.Template
+	reranker  *antfly.RerankerConfig
 }
 
 // SearchResult represents a search result for the template
@@ -1965,10 +1988,19 @@ type SearchPageData struct {
 	Total   int
 }
 
+const (
+	graphStateReady         = "ready"
+	graphStateReadyEmpty    = "ready_empty"
+	graphStateNotConfigured = "not_configured"
+	graphStateError         = "error"
+)
+
 type GraphVisualization struct {
-	Query string      `json:"query"`
-	Nodes []GraphNode `json:"nodes"`
-	Edges []GraphEdge `json:"edges"`
+	Query   string      `json:"query"`
+	State   string      `json:"state"`
+	Message string      `json:"message,omitempty"`
+	Nodes   []GraphNode `json:"nodes"`
+	Edges   []GraphEdge `json:"edges"`
 }
 
 type GraphNode struct {
@@ -1991,8 +2023,8 @@ func (s *SearchServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *SearchServer) handleSearch(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
-	if query == "" {
+	searchText := strings.TrimSpace(r.URL.Query().Get("q"))
+	if searchText == "" {
 		s.tmpl.ExecuteTemplate(w, "index.html", SearchPageData{})
 		return
 	}
@@ -2000,16 +2032,10 @@ func (s *SearchServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	start := time.Now()
 
-	// Perform search
-	resp, err := s.client.Query(ctx, antfly.QueryRequest{
-		Table:          s.tableName,
-		SemanticSearch: query,
-		Indexes:        searchIndexNames(),
-		Limit:          20,
-	})
+	resp, err := s.client.Query(ctx, hybridSearchRequest(s.tableName, searchText, s.reranker))
 
 	data := SearchPageData{
-		Query: query,
+		Query: searchText,
 		Took:  time.Since(start).String(),
 	}
 
@@ -2054,20 +2080,13 @@ func (s *SearchServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *SearchServer) handleAPISearch(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
-	if query == "" {
+	searchText := strings.TrimSpace(r.URL.Query().Get("q"))
+	if searchText == "" {
 		http.Error(w, "missing query parameter 'q'", http.StatusBadRequest)
 		return
 	}
 
-	ctx := r.Context()
-
-	resp, err := s.client.Query(ctx, antfly.QueryRequest{
-		Table:          s.tableName,
-		SemanticSearch: query,
-		Indexes:        searchIndexNames(),
-		Limit:          20,
-	})
+	resp, err := s.client.Query(r.Context(), hybridSearchRequest(s.tableName, searchText, s.reranker))
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2085,20 +2104,104 @@ func (s *SearchServer) handleAPIGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	available, err := s.graphIndexAvailable(r.Context())
+	if err != nil {
+		writeGraphVisualization(w, http.StatusBadGateway, GraphVisualization{
+			Query:   query,
+			State:   graphStateError,
+			Message: err.Error(),
+		})
+		return
+	}
+	if !available {
+		writeGraphVisualization(w, http.StatusOK, GraphVisualization{
+			Query:   query,
+			State:   graphStateNotConfigured,
+			Message: "Relation graph is not configured for this collection.",
+		})
+		return
+	}
+
 	resp, err := s.queryGraphVisualization(r.Context(), graphVisualizationQuery(query))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeGraphVisualization(w, http.StatusBadGateway, GraphVisualization{
+			Query:   query,
+			State:   graphStateError,
+			Message: err.Error(),
+		})
+		return
+	}
+	if resp == nil || len(resp.Responses) == 0 {
+		writeGraphVisualization(w, http.StatusBadGateway, GraphVisualization{
+			Query:   query,
+			State:   graphStateError,
+			Message: "Graph query returned no response.",
+		})
+		return
+	}
+	graphResponse := resp.Responses[0]
+	if graphResponse.Error != "" || graphResponse.Status >= http.StatusBadRequest {
+		message := graphResponse.Error
+		if message == "" {
+			message = fmt.Sprintf("graph query failed with status %d", graphResponse.Status)
+		}
+		writeGraphVisualization(w, http.StatusBadGateway, GraphVisualization{
+			Query:   query,
+			State:   graphStateError,
+			Message: message,
+		})
 		return
 	}
 
 	viz := buildGraphVisualization(query, resp)
-	if len(viz.Edges) == 0 {
-		if fallback, err := s.queryGraphVisualization(r.Context(), graphVisualizationSampleQuery()); err == nil {
-			viz = buildGraphVisualization(query, fallback)
-		}
+	if viz.State == graphStateError {
+		writeGraphVisualization(w, http.StatusBadGateway, viz)
+		return
 	}
+	if len(viz.Edges) == 0 {
+		viz.State = graphStateReadyEmpty
+		viz.Message = "No graph relations found for this search."
+	}
+	writeGraphVisualization(w, http.StatusOK, viz)
+}
+
+func (s *SearchServer) graphIndexAvailable(ctx context.Context) (bool, error) {
+	indexes, err := s.client.ListIndexes(ctx, s.tableName)
+	if err != nil {
+		return false, fmt.Errorf("inspect graph index: %w", err)
+	}
+	indexStatus, ok := indexes[DefaultAutographIndex]
+	if !ok {
+		return false, nil
+	}
+	config, err := indexStatus.Config.AsCreatedGraphIndex()
+	if err != nil || config.Name != DefaultAutographIndex || config.Type != antfly.CreatedGraphIndexTypeGraph {
+		return false, fmt.Errorf("index %q is not a graph index", DefaultAutographIndex)
+	}
+	stats, err := indexStatus.Status.AsGraphIndexStats()
+	if err != nil {
+		return false, fmt.Errorf("inspect graph index readiness: %w", err)
+	}
+	if stats.Error != "" {
+		return false, fmt.Errorf("graph index unavailable: %s", stats.Error)
+	}
+	if !stats.Milestones.Queryable.Reached {
+		reason := strings.Join(stats.Milestones.Queryable.Blockers, ", ")
+		if reason == "" {
+			reason = stats.BackfillState
+		}
+		if reason == "" {
+			reason = "not queryable"
+		}
+		return false, fmt.Errorf("graph index unavailable: %s", reason)
+	}
+	return true, nil
+}
+
+func writeGraphVisualization(w http.ResponseWriter, status int, viz GraphVisualization) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(viz)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(viz)
 }
 
 func (s *SearchServer) queryGraphVisualization(ctx context.Context, payload map[string]any) (*antfly.QueryResponses, error) {
@@ -2135,30 +2238,8 @@ func (s *SearchServer) queryGraphVisualization(ctx context.Context, payload map[
 func graphVisualizationQuery(searchText string) map[string]any {
 	return map[string]any{
 		"full_text_search": map[string]any{
-			"query": searchText,
-		},
-		"limit": 8,
-		"graph_queries": map[string]any{
-			"relations": map[string]any{
-				"index": DefaultAutographIndex,
-				"traverse": map[string]any{
-					"start":             map[string]any{"result_ref": "$query_results", "limit": 8},
-					"direction":         "both",
-					"max_depth":         1,
-					"limit":             80,
-					"include_paths":     true,
-					"include_documents": true,
-					"fields":            []string{"title", "url", "metadata"},
-				},
-			},
-		},
-	}
-}
-
-func graphVisualizationSampleQuery() map[string]any {
-	return map[string]any{
-		"query": map[string]any{
-			"match_all": map[string]any{},
+			"match": searchText,
+			"field": "content",
 		},
 		"limit": 8,
 		"graph_queries": map[string]any{
@@ -2179,16 +2260,22 @@ func graphVisualizationSampleQuery() map[string]any {
 }
 
 func buildGraphVisualization(query string, resp *antfly.QueryResponses) GraphVisualization {
-	viz := GraphVisualization{Query: query}
+	viz := GraphVisualization{Query: query, State: graphStateReady}
 	if resp == nil || len(resp.Responses) == 0 {
+		viz.State = graphStateError
+		viz.Message = "Graph query returned no response."
 		return viz
 	}
 	graph, ok := resp.Responses[0].GraphResults["relations"]
 	if !ok {
+		viz.State = graphStateError
+		viz.Message = "Graph query returned no relation result."
 		return viz
 	}
 	graphValue, err := antfly.DecodeCanonicalGraphResult(graph)
 	if err != nil {
+		viz.State = graphStateError
+		viz.Message = fmt.Sprintf("Decode graph result: %v", err)
 		return viz
 	}
 	nodeByID := map[string]int{}
@@ -2369,9 +2456,10 @@ func createEmbeddingIndex(embeddingModel, inferenceURL, chunkerModel string, tar
 	}
 
 	chunker := antfly.ChunkerConfig{
-		Provider: antfly.ChunkerProviderAntfly,
-		ApiUrl:   chunkerURL,
-		Model:    chunkerModel,
+		Provider:  antfly.ChunkerProviderAntfly,
+		ApiUrl:    chunkerURL,
+		Model:     chunkerModel,
+		MaxChunks: 256,
 		Text: antfly.TextChunkOptions{
 			TargetTokens:  targetTokens,
 			OverlapTokens: overlapTokens,
@@ -2379,10 +2467,10 @@ func createEmbeddingIndex(embeddingModel, inferenceURL, chunkerModel string, tar
 	}
 
 	err = embeddingIndexConfig.FromEmbeddingsIndexConfig(antfly.EmbeddingsIndexConfig{
-		Field:     "content",
-		Dimension: DefaultEmbeddingDims,
-		Embedder:  *embedder,
-		Chunker:   chunker,
+		Field:          "content",
+		CoveragePolicy: antfly.DerivedCoveragePolicyPartial,
+		Embedder:       *embedder,
+		Chunker:        chunker,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure embedding index: %w", err)
@@ -2596,8 +2684,10 @@ func artifactProducerConfig(producerType, model, inferenceAPIURL string, labels,
 	}
 }
 
+var searchableEmbeddingIndexes = [...]string{DefaultEmbeddingIndex}
+
 func searchIndexNames() []string {
-	return []string{DefaultFullTextIndex, DefaultEmbeddingIndex}
+	return searchableEmbeddingIndexes[:]
 }
 
 // truncateContent truncates content at a natural boundary (paragraph or sentence)
@@ -3367,13 +3457,19 @@ func identifyEnrichCandidates(records map[string]map[string]any, minContentLen i
 			continue
 		}
 
-		trimmed := strings.TrimSpace(content)
+		candidateContent := content
+		if reprocess {
+			if original, ok := rec["original_content"].(string); ok {
+				candidateContent = original
+			}
+		}
+		trimmed := strings.TrimSpace(candidateContent)
 		var reasons []string
 		var category string
 
 		switch {
 		case len(trimmed) == 0:
-			// Empty content: check if already tagged as image page from prior OCR pass
+			// Empty content: check if already tagged as image page from prior OCR pass.
 			pageType, _ := meta["page_type"].(string)
 			if pageType == "image" {
 				reasons = append(reasons, "image_page")
@@ -3383,19 +3479,23 @@ func identifyEnrichCandidates(records map[string]map[string]any, minContentLen i
 				category = "ocr"
 			}
 
+		case isEFTAIdentifier(trimmed):
+			reasons = append(reasons, "identifier_only")
+			category = "ocr"
+
 		case len(trimmed) < minContentLen:
 			reasons = append(reasons, "short_content")
 			category = "ocr"
 
 		default:
-			// Substantial content: check quality heuristics
-			if symbolRatio(content) > 0.15 {
+			// Reuse the established enrichment quality heuristics for substantial text.
+			if symbolRatio(candidateContent) > 0.15 {
 				reasons = append(reasons, "high_symbols")
 			}
-			if isFragmentedLayout(content) {
+			if isFragmentedLayout(candidateContent) {
 				reasons = append(reasons, "fragmented")
 			}
-			if hasFontEncodingCorruption(content) {
+			if hasFontEncodingCorruption(candidateContent) {
 				reasons = append(reasons, "font_corruption")
 			}
 			if len(reasons) > 0 {
@@ -3406,7 +3506,7 @@ func identifyEnrichCandidates(records map[string]map[string]any, minContentLen i
 		if len(reasons) > 0 {
 			candidates = append(candidates, enrichCandidate{
 				id:         id,
-				content:    content,
+				content:    candidateContent,
 				pdfPath:    pdfPath,
 				sourceFile: sourceFile,
 				pageNum:    pageNum,
@@ -3419,7 +3519,7 @@ func identifyEnrichCandidates(records map[string]map[string]any, minContentLen i
 	return candidates
 }
 
-// buildZipIndex builds a map from base filename to zip entry for fast lookup.
+// buildZipIndex maps both archive-relative paths and unique basenames to PDF entries.
 func buildZipIndex(zipPaths []string) (map[string]*zip.File, []*zip.ReadCloser, error) {
 	index := make(map[string]*zip.File)
 	var readers []*zip.ReadCloser
@@ -3441,7 +3541,13 @@ func buildZipIndex(zipPaths []string) (map[string]*zip.File, []*zip.ReadCloser, 
 			}
 			base := filepath.Base(f.Name)
 			if strings.HasSuffix(strings.ToLower(base), ".pdf") {
-				index[base] = f
+				name := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(f.Name)), "./")
+				if _, exists := index[name]; !exists {
+					index[name] = f
+				}
+				if _, exists := index[base]; !exists {
+					index[base] = f
+				}
 			}
 		}
 	}
@@ -3449,352 +3555,9 @@ func buildZipIndex(zipPaths []string) (map[string]*zip.File, []*zip.ReadCloser, 
 	return index, readers, nil
 }
 
-// extractPageFromZip extracts a specific page from a source PDF in a zip archive.
-// Uses pdfcpu Trim to extract only the requested page instead of splitting all pages.
-func extractPageFromZip(zipIndex map[string]*zip.File, sourceFile string, pageNum int) ([]byte, error) {
-	f, ok := zipIndex[sourceFile]
-	if !ok {
-		return nil, fmt.Errorf("source file %q not found in zip", sourceFile)
-	}
-
-	rc, err := f.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open zip entry: %w", err)
-	}
-	defer rc.Close()
-
-	pdfData, err := io.ReadAll(rc)
-	if err != nil {
-		return nil, fmt.Errorf("read zip entry: %w", err)
-	}
-
-	// Extract just the single page using Trim
-	conf := model.NewDefaultConfiguration()
-	var buf bytes.Buffer
-	if err := api.Trim(bytes.NewReader(pdfData), &buf, []string{strconv.Itoa(pageNum)}, conf); err != nil {
-		return nil, fmt.Errorf("trim page %d from %s: %w", pageNum, sourceFile, err)
-	}
-
-	return buf.Bytes(), nil
-}
-
-// enrichCmd implements the "enrich" subcommand: a second pass over prepare output
-// that re-OCRs low-quality pages using Florence 2 (via Inference).
+// enrichCmd implements native OCR and visual recovery for low-quality pages.
 func enrichCmd(args []string) error {
-	fs := flag.NewFlagSet("enrich", flag.ExitOnError)
-	inputFile := fs.String("input", "epstein-docs.json", "Input JSON file from prepare")
-	outputFile := fs.String("output", "", "Output JSON file (default: {input-base}-enriched.json)")
-	inferenceURL := fs.String("inference-url", defaultInferenceURL(), "Inference service URL")
-	model := fs.String("model", DefaultOCRModel, "Reader model for OCR")
-	prompt := fs.String("prompt", "", "Reader prompt")
-	maxTokens := fs.Int("max-tokens", 4096, "Max generation tokens")
-	dpi := fs.Float64("dpi", 150, "Render DPI for page images")
-	minContentLen := fs.Int("min-content", 50, "Short content threshold (chars)")
-	workers := fs.Int("workers", 4, "Concurrent enrichment workers")
-	dryRun := fs.Bool("dry-run", false, "Report candidates only, don't process")
-	reprocess := fs.Bool("reprocess", false, "Re-process already-enriched pages")
-	category := fs.String("category", "ocr", "Category to process: ocr, vision, quality, or all")
-	dirPath := fs.String("dir", "", "Base directory for resolving relative page_pdf_path values")
-
-	var zipPaths StringSliceFlag
-	fs.Var(&zipPaths, "zip", "Path to ZIP archive containing source PDFs (repeatable)")
-
-	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("failed to parse flags: %w", err)
-	}
-
-	// Derive output path
-	outPath := *outputFile
-	if outPath == "" {
-		base := strings.TrimSuffix(*inputFile, filepath.Ext(*inputFile))
-		outPath = base + "-enriched.json"
-	}
-
-	fmt.Printf("=== Epstein Documents Enrich ===\n\n")
-	fmt.Printf("Input:  %s\n", *inputFile)
-	fmt.Printf("Output: %s\n", outPath)
-	fmt.Printf("Model:  %s\n", *model)
-	fmt.Printf("Prompt: %s\n", *prompt)
-	if len(zipPaths) > 0 {
-		fmt.Printf("ZIP sources: %d\n", len(zipPaths))
-		for _, zp := range zipPaths {
-			fmt.Printf("  - %s\n", zp)
-		}
-	}
-	fmt.Println()
-
-	// Load input JSON
-	records, err := readJSONFile[map[string]map[string]any](*inputFile)
-	if err != nil {
-		return fmt.Errorf("failed to read input: %w", err)
-	}
-
-	fmt.Printf("Total records: %d\n", len(records))
-
-	// Resolve relative page_pdf_path values if -dir is provided
-	if *dirPath != "" {
-		resolved := 0
-		for _, rec := range records {
-			meta, _ := rec["metadata"].(map[string]any)
-			if meta == nil {
-				continue
-			}
-			p, _ := meta["page_pdf_path"].(string)
-			if p != "" && !filepath.IsAbs(p) {
-				meta["page_pdf_path"] = filepath.Join(*dirPath, p)
-				resolved++
-			}
-		}
-		if resolved > 0 {
-			fmt.Printf("Resolved %d relative page paths with -dir %s\n", resolved, *dirPath)
-		}
-	}
-
-	// Identify all candidates
-	allCandidates := identifyEnrichCandidates(records, *minContentLen, *reprocess)
-
-	// Print category breakdown
-	categoryCounts := map[string]int{}
-	for _, c := range allCandidates {
-		categoryCounts[c.category]++
-	}
-	fmt.Printf("All candidates: %d\n", len(allCandidates))
-	fmt.Printf("Category breakdown:\n")
-	for cat, count := range categoryCounts {
-		fmt.Printf("  - %s: %d\n", cat, count)
-	}
-
-	// Print reason breakdown
-	reasonCounts := map[string]int{}
-	for _, c := range allCandidates {
-		for _, r := range c.reasons {
-			reasonCounts[r]++
-		}
-	}
-	fmt.Printf("Reason breakdown:\n")
-	for reason, count := range reasonCounts {
-		fmt.Printf("  - %s: %d\n", reason, count)
-	}
-	fmt.Println()
-
-	// Filter to selected category
-	var candidates []enrichCandidate
-	if *category == "all" {
-		candidates = allCandidates
-	} else {
-		for _, c := range allCandidates {
-			if c.category == *category {
-				candidates = append(candidates, c)
-			}
-		}
-	}
-	fmt.Printf("Selected category %q: %d candidates\n\n", *category, len(candidates))
-
-	if *dryRun {
-		fmt.Printf("Dry run complete. Use without -dry-run to process.\n")
-		return nil
-	}
-
-	if len(candidates) == 0 {
-		fmt.Printf("No candidates to enrich. Writing unchanged output.\n")
-		return writeJSONSorted(outPath, records)
-	}
-
-	// Build zip index if zip sources provided
-	var zipIndex map[string]*zip.File
-	var zipReaders []*zip.ReadCloser
-	if len(zipPaths) > 0 {
-		fmt.Printf("Indexing ZIP archives...\n")
-		zipIndex, zipReaders, err = buildZipIndex(zipPaths)
-		if err != nil {
-			return fmt.Errorf("build zip index: %w", err)
-		}
-		defer func() {
-			for _, r := range zipReaders {
-				r.Close()
-			}
-		}()
-		fmt.Printf("  %d PDFs indexed from %d archives\n\n", len(zipIndex), len(zipPaths))
-	}
-
-	// Init OCR client
-	ocrClient, err := NewOCRClient(*inferenceURL, []string{*model}, *dpi)
-	if err != nil {
-		return fmt.Errorf("create OCR client: %w", err)
-	}
-
-	// Process candidates concurrently
-	type enrichResult struct {
-		id        string
-		text      string
-		model     string
-		reasons   []string
-		category  string
-		origEmpty bool // original content was empty
-		err       error
-		replaced  bool
-	}
-
-	candidateCh := make(chan enrichCandidate, *workers*4)
-	resultCh := make(chan enrichResult, *workers*4)
-
-	go func() {
-		for _, c := range candidates {
-			candidateCh <- c
-		}
-		close(candidateCh)
-	}()
-
-	var processed atomic.Int64
-	total := len(candidates)
-
-	var wg sync.WaitGroup
-	for range *workers {
-		wg.Go(func() {
-			for c := range candidateCh {
-				var pageData []byte
-
-				// Try disk first, fall back to zip extraction
-				if c.pdfPath != "" {
-					var readErr error
-					pageData, readErr = os.ReadFile(c.pdfPath)
-					if readErr != nil {
-						log.Printf("Warning: failed to read %s: %v", c.pdfPath, readErr)
-					}
-				}
-				if pageData == nil && zipIndex != nil && c.sourceFile != "" && c.pageNum > 0 {
-					var err error
-					pageData, err = extractPageFromZip(zipIndex, c.sourceFile, c.pageNum)
-					if err != nil {
-						resultCh <- enrichResult{id: c.id, err: fmt.Errorf("extract from zip: %w", err)}
-						continue
-					}
-				}
-				if pageData == nil {
-					resultCh <- enrichResult{id: c.id, err: fmt.Errorf("no page source available")}
-					continue
-				}
-
-				// Route through reader (OCR) or generator (vision) endpoint
-				var text, usedModel string
-				var callErr error
-				if c.category == "vision" {
-					text, usedModel, callErr = ocrClient.GeneratePageWithPrompt(context.Background(), pageData, *prompt, *maxTokens)
-				} else {
-					text, usedModel, callErr = ocrClient.ReadPageWithPrompt(context.Background(), pageData, *prompt, *maxTokens)
-				}
-				if callErr != nil {
-					resultCh <- enrichResult{id: c.id, err: callErr, category: c.category, origEmpty: len(strings.TrimSpace(c.content)) == 0}
-					continue
-				}
-
-				origEmpty := len(strings.TrimSpace(c.content)) == 0
-
-				// Per-category replacement rules
-				replaced := false
-				if text != "" {
-					switch c.category {
-					case "ocr":
-						// Replace if OCR text is longer or passes quality checks where original didn't
-						origFails := needsOCRFallback(c.content, *minContentLen)
-						newFails := needsOCRFallback(text, *minContentLen)
-						if len(text) > len(c.content) || (origFails && !newFails) {
-							replaced = true
-						}
-					case "vision":
-						// Any caption text is an improvement over empty content
-						replaced = true
-					case "quality":
-						// Replace only if significantly better (len > 2x original)
-						if len(text) > 2*len(c.content) {
-							replaced = true
-						}
-					}
-				}
-
-				n := processed.Add(1)
-				if n%100 == 0 || int(n) == total {
-					fmt.Printf("  Processed %d/%d candidates...\n", n, total)
-				}
-
-				resultCh <- enrichResult{
-					id:        c.id,
-					text:      text,
-					model:     usedModel,
-					reasons:   c.reasons,
-					category:  c.category,
-					origEmpty: origEmpty,
-					replaced:  replaced,
-				}
-			}
-		})
-	}
-
-	// Close results when workers done
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	// Collect results
-	var enriched, skipped, errors int
-	for r := range resultCh {
-		if r.err != nil {
-			errors++
-			log.Printf("Error enriching %s: %v", r.id, r.err)
-			// Still tag empty-content pages as image so vision pass can pick them up
-			if r.origEmpty && r.category == "ocr" {
-				rec := records[r.id]
-				meta, _ := rec["metadata"].(map[string]any)
-				if meta == nil {
-					meta = map[string]any{}
-					rec["metadata"] = meta
-				}
-				meta["page_type"] = "image"
-			}
-			continue
-		}
-
-		rec := records[r.id]
-		meta, _ := rec["metadata"].(map[string]any)
-		if meta == nil {
-			meta = map[string]any{}
-			rec["metadata"] = meta
-		}
-
-		// Tag empty-content pages that returned no OCR text as image pages
-		// so a future vision pass can pick them up.
-		if r.origEmpty && strings.TrimSpace(r.text) == "" {
-			meta["page_type"] = "image"
-		}
-
-		if !r.replaced {
-			skipped++
-			continue
-		}
-
-		enriched++
-
-		// Update record
-		rec["content"] = r.text
-		meta["enriched"] = true
-		meta["enrich_model"] = r.model
-		meta["enrich_reasons"] = r.reasons
-		meta["enrich_category"] = r.category
-	}
-
-	fmt.Printf("\n=== Enrich Summary ===\n")
-	fmt.Printf("  Enriched: %d\n", enriched)
-	fmt.Printf("  Skipped (no improvement): %d\n", skipped)
-	fmt.Printf("  Errors: %d\n", errors)
-
-	// Write output
-	if err := writeJSONSorted(outPath, records); err != nil {
-		return fmt.Errorf("write output: %w", err)
-	}
-
-	fmt.Printf("\nWrote %s\n", outPath)
-	return nil
+	return runNativeEnrich(args)
 }
 
 type entityCandidate struct {
