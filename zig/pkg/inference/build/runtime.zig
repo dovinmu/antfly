@@ -21,6 +21,7 @@ pub const BackendOptions = struct {
     enable_onnx: bool = false,
     onnx_root: []const u8 = "onnxruntime/unknown-unknown",
     enable_metal: bool = false,
+    enable_apple_vision: bool = false,
     enable_cuda: bool = false,
     cuda_artifacts: []const u8 = "fatbin",
     cuda_libraries: []const u8 = "auto",
@@ -547,6 +548,7 @@ fn addExplicitBuildOptions(b: *std.Build, backend: BackendOptions) *std.Build.St
 fn addCommonOptions(options: *std.Build.Step.Options, backend: BackendOptions) void {
     options.addOption(bool, "enable_onnx", backend.enable_onnx);
     options.addOption(bool, "enable_metal", backend.enable_metal);
+    options.addOption(bool, "enable_apple_vision", backend.enable_apple_vision);
     options.addOption(bool, "enable_cuda", backend.enable_cuda);
     options.addOption([]const u8, "cuda_artifacts", backend.cuda_artifacts);
     options.addOption([]const u8, "cuda_libraries", backend.cuda_libraries);
@@ -718,6 +720,7 @@ fn configureRuntimeLinks(
     }
     configureOnnxRuntime(b, module, backend.enable_onnx, backend.onnx_root);
     configureMetal(b, module, target, backend.enable_metal, paths);
+    configureAppleVision(b, module, target, backend.enable_apple_vision, paths);
 }
 
 pub fn configureSystemBlas(
@@ -771,6 +774,22 @@ pub fn configureMetal(
     module.linkFramework("Metal", .{});
     module.linkFramework("MetalPerformanceShaders", .{});
     module.addCSourceFile(.{ .file = b.path(pathJoin(b, paths.inference_root, "src/backends/metal_kernels.m")), .flags = &.{"-fobjc-arc"} });
+}
+
+pub fn configureAppleVision(
+    b: *std.Build,
+    module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    enable_apple_vision: bool,
+    paths: Paths,
+) void {
+    if (!enable_apple_vision or target.result.os.tag != .macos) return;
+    addMacosSdkPaths(b, module, target);
+    module.linkFramework("Foundation", .{});
+    module.linkFramework("CoreGraphics", .{});
+    module.linkFramework("ImageIO", .{});
+    module.linkFramework("Vision", .{});
+    module.addCSourceFile(.{ .file = b.path(pathJoin(b, paths.inference_root, "src/readers/apple_vision.m")), .flags = &.{"-fobjc-arc"} });
 }
 
 fn addMacosSdkPaths(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {

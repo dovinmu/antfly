@@ -146,6 +146,10 @@ pub fn create(b: *std.Build) ?Artifacts {
         b.option(bool, "metal", "Enable Apple Metal kernels for embedded inference") orelse (target.result.os.tag == .macos)
     else
         false;
+    const inference_enable_apple_vision = if (link_libc)
+        b.option(bool, "apple-vision", "Enable the Apple Vision OCR reader for embedded inference") orelse (target.result.os.tag == .macos)
+    else
+        false;
     const inference_enable_cuda = b.option(bool, "cuda", "Enable CUDA inference support through the NVIDIA Driver API") orelse false;
     const inference_cuda_artifacts = b.option([]const u8, "cuda-artifacts", "CUDA artifact bundle: fatbin SASS+PTX, portable PTX, or sm89 cubin") orelse "fatbin";
     if (!std.mem.eql(u8, inference_cuda_artifacts, "portable") and !std.mem.eql(u8, inference_cuda_artifacts, "fatbin") and !std.mem.eql(u8, inference_cuda_artifacts, "sm89")) {
@@ -660,6 +664,7 @@ pub fn create(b: *std.Build) ?Artifacts {
             .enable_onnx = inference_enable_onnx,
             .onnx_root = inference_onnx_root,
             .enable_metal = inference_enable_metal,
+            .enable_apple_vision = inference_enable_apple_vision,
             .enable_cuda = inference_enable_cuda,
             .cuda_artifacts = inference_cuda_artifacts,
             .enable_pjrt = inference_enable_pjrt,

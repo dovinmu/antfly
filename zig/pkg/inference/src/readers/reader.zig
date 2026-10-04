@@ -22,6 +22,7 @@ const model_manager_mod = @import("../server/model_manager.zig");
 const generation = @import("../pipelines/generation.zig");
 const onnx_decoder_only_vlm = @import("../pipelines/onnx_decoder_only_vlm.zig");
 const multistage_metadata = @import("multistage_metadata.zig");
+const apple_vision_reader_mod = @import("apple_vision_reader.zig");
 const multistage_reader_mod = @import("multistage_reader.zig");
 const pix2struct_mod = @import("pix2struct.zig");
 const vision_reader_mod = @import("vision_reader.zig");
@@ -380,6 +381,7 @@ pub const LoadedReader = union(enum) {
     genai: GenAiLoadedReader,
     vlm: VlmLoadedReader,
     multistage: multistage_reader_mod.LoadedMultiStageReader,
+    apple_vision: apple_vision_reader_mod.LoadedAppleVisionReader,
 
     pub fn loadFromDir(
         allocator: std.mem.Allocator,
@@ -397,6 +399,9 @@ pub const LoadedReader = union(enum) {
         model_manager: *model_manager_mod.ModelManager,
         control: ?InferenceExecutionControl,
     ) !LoadedReader {
+        if (try apple_vision_reader_mod.isAppleVisionModelDir(allocator, model_path)) {
+            return .{ .apple_vision = try apple_vision_reader_mod.LoadedAppleVisionReader.load(allocator) };
+        }
         if (try multistage_metadata.isMultiStageModelDir(allocator, model_path)) {
             return .{ .multistage = try multistage_reader_mod.LoadedMultiStageReader.loadFromDirWithControl(
                 allocator,
@@ -449,6 +454,8 @@ pub const LoadedReader = union(enum) {
         model_path: []const u8,
         model_manager: *model_manager_mod.ModelManager,
     ) !?ExecutionFence {
+        // Weightless system readers have no model generation to fence.
+        if (apple_vision_reader_mod.isAppleVisionModelDir(std.heap.page_allocator, model_path) catch false) return null;
         var handle = model_manager.acquireFromDir(model_path) catch |err| switch (err) {
             error.OutOfMemory => return err,
             // The direct typed loader remains responsible for reporting model
@@ -484,6 +491,7 @@ pub const LoadedReader = union(enum) {
             .genai => |*reader| reader.deinit(),
             .vlm => |*reader| reader.deinit(),
             .multistage => |*reader| reader.deinit(),
+            .apple_vision => |*reader| reader.deinit(),
         }
     }
 
@@ -494,6 +502,7 @@ pub const LoadedReader = union(enum) {
             .genai => |*reader| reader.read(image_data, options),
             .vlm => |*reader| reader.read(image_data, options),
             .multistage => |*reader| reader.read(image_data, options),
+            .apple_vision => |*reader| reader.read(image_data, options),
         };
         errdefer result.deinit();
         try sanitizeResultUtf8(&result);
@@ -503,7 +512,7 @@ pub const LoadedReader = union(enum) {
     pub fn snapshotMetalGeneratedQuantStats(self: *LoadedReader, allocator: std.mem.Allocator) metal_generated_quant_stats.Stats {
         return switch (self.*) {
             .vision => |*reader| reader.core.snapshotMetalGeneratedQuantStats(allocator),
-            .genai, .vlm, .multistage => .{},
+            .genai, .vlm, .multistage, .apple_vision => .{},
         };
     }
 
@@ -520,6 +529,11 @@ pub const LoadedReader = union(enum) {
             .genai => |*reader| BatchResult{ .results = try reader.readBatch(image_datas, options), .mode = .serial },
             .vlm => |*reader| BatchResult{ .results = try reader.readBatch(image_datas, options), .mode = .serial },
             .multistage => |*reader| BatchResult{ .results = try readBatchSerial(@TypeOf(reader.*), reader, image_datas, options), .mode = .serial },
+            .apple_vision => |*reader| BatchResult{
+                .results = try reader.readBatch(image_datas, options),
+                .mode = .native,
+                .native_batches = @intFromBool(image_datas.len > 0),
+            },
         };
         errdefer {
             for (batch.results) |*result| result.deinit();
@@ -539,7 +553,7 @@ pub const LoadedReader = union(enum) {
         const allocator = self.resultAllocator();
         const batch = try switch (self.*) {
             .vision => |*reader| reader.readBorrowedRasterBatchReported(rasters, options),
-            .genai, .vlm, .multistage => return error.BorrowedRasterUnsupported,
+            .genai, .vlm, .multistage, .apple_vision => return error.BorrowedRasterUnsupported,
         };
         errdefer {
             for (batch.results) |*result| result.deinit();
@@ -559,7 +573,7 @@ pub const LoadedReader = union(enum) {
             .vision => |*reader| reader.inputTokenCount(options),
             .genai => |*reader| reader.inputTokenCount(options),
             .vlm => |*reader| reader.inputTokenCount(options),
-            .multistage => 0,
+            .multistage, .apple_vision => 0,
         };
     }
 
@@ -662,7 +676,7 @@ fn validateVisionReadOptions(parser_kind: ParserKind, options: ReadOptions) !voi
     }
 }
 
-pub const ReaderKind = enum { multistage, decoder_only, encoder_decoder, native_vision };
+pub const ReaderKind = enum { apple_vision, multistage, decoder_only, encoder_decoder, native_vision };
 pub const UnsupportedReason = enum { no_reader_artifacts, invalid_metadata };
 pub const ReaderSupport = union(enum) {
     supported: ReaderKind,
@@ -686,6 +700,13 @@ pub fn probeManifest(
     model_path: []const u8,
     man: manifest_mod.ModelManifest,
 ) !ReaderSupport {
+    const apple_vision = apple_vision_reader_mod.isAppleVisionModelDir(allocator, model_path) catch |err| switch (err) {
+        error.InvalidMetadata, error.FileTooLarge, error.IsDir, error.SymLinkLoop => return .{ .unsupported = .invalid_metadata },
+        else => return err,
+    };
+    if (apple_vision) {
+        return if (apple_vision_reader_mod.enabled) .{ .supported = .apple_vision } else .{ .unsupported = .no_reader_artifacts };
+    }
     const multistage = multistage_metadata.isMultiStageModelDir(allocator, model_path) catch |err| switch (err) {
         error.InvalidMetadata, error.FileTooLarge, error.IsDir, error.SymLinkLoop => return .{ .unsupported = .invalid_metadata },
         else => return err,

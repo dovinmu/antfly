@@ -173,6 +173,7 @@ pub fn build(b: *std.Build) void {
     const onnx_root_opt = b.option([]const u8, "onnx-root", "Path to ONNX Runtime root (default: ./onnxruntime/<platform>)");
     const effective_onnx_root = onnx_root_opt orelse defaultOnnxRuntimeRoot(b, target);
     const enable_metal = if (enable_wasm or !link_libc) false else (b.option(bool, "metal", "Enable Apple Metal kernels (macOS only)") orelse (target.result.os.tag == .macos));
+    const enable_apple_vision = if (enable_wasm or !link_libc) false else (b.option(bool, "apple-vision", "Enable the Apple Vision OCR reader (macOS only)") orelse (target.result.os.tag == .macos));
     const enable_cuda = if (enable_wasm or !link_libc) false else (b.option(bool, "cuda", "Enable CUDA backend through the NVIDIA Driver API") orelse false);
     const cuda_artifacts = b.option([]const u8, "cuda-artifacts", "CUDA artifact bundle: fatbin SASS+PTX, portable PTX, or sm89 cubin") orelse "fatbin";
     if (!std.mem.eql(u8, cuda_artifacts, "portable") and !std.mem.eql(u8, cuda_artifacts, "fatbin") and !std.mem.eql(u8, cuda_artifacts, "sm89")) {
@@ -260,6 +261,7 @@ pub fn build(b: *std.Build) void {
             .enable_onnx = enable_onnx,
             .onnx_root = effective_onnx_root,
             .enable_metal = enable_metal,
+            .enable_apple_vision = enable_apple_vision,
             .enable_cuda = enable_cuda,
             .cuda_artifacts = cuda_artifacts,
             .cuda_libraries = cuda_libraries,

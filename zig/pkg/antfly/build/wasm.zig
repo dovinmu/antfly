@@ -319,6 +319,7 @@ pub fn add(b: *std.Build, sentencepiece_proto_source: std.Build.LazyPath) Result
     inference_wasm_build_options.addOption(bool, "enable_cuda", false);
     inference_wasm_build_options.addOption([]const u8, "cuda_artifacts", "portable");
     inference_wasm_build_options.addOption(bool, "enable_metal", false);
+    inference_wasm_build_options.addOption(bool, "enable_apple_vision", false);
     inference_wasm_build_options.addOption(bool, "enable_native", false);
     inference_wasm_build_options.addOption(bool, "enable_system_blas", false);
     inference_wasm_build_options.addOption(bool, "enable_wasm", true);
