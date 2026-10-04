@@ -43,6 +43,11 @@ pub fn isAppleVisionModelDir(allocator: std.mem.Allocator, model_dir: []const u8
 }
 
 const c = struct {
+    // Mirrors the ANTFLY_VISION_* status enum in apple_vision.m.
+    const status_ok: i32 = 0;
+    const status_decode_failed: i32 = 1;
+    const status_out_of_memory: i32 = 3;
+
     const Image = extern struct { bytes: [*]const u8, len: usize };
     const Line = extern struct { offset: usize, len: usize, bbox: [4]f64, confidence: f32 };
     const Result = extern struct {
@@ -89,9 +94,9 @@ pub const LoadedAppleVisionReader = struct {
         const status = c.antfly_vision_recognize_batch(images.ptr, images.len, max_concurrency, raw.ptr);
         defer c.antfly_vision_free_results(raw.ptr, raw.len);
         switch (status) {
-            0 => {},
-            1 => return error.InvalidImage,
-            3 => return error.OutOfMemory,
+            c.status_ok => {},
+            c.status_decode_failed => return error.InvalidImage,
+            c.status_out_of_memory => return error.OutOfMemory,
             else => return error.AppleVisionRecognitionFailed,
         }
         if (options.execution_control) |control| try control.check();
